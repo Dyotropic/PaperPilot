@@ -26,7 +26,7 @@ echo   [OK] Python %PYVER%
 REM -- Install dependencies --
 echo   [..] Installing dependencies...
 echo.
-python -m pip install -r requirements.txt --disable-pip-version-check
+python -m pip install -r requirements.txt --disable-pip-version-check -i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn
 if %errorlevel% neq 0 (
     echo.
     echo   [ERROR] Install failed. Check your network and retry.
