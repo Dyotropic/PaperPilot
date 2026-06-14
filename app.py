@@ -676,20 +676,32 @@ def _infer_actions_from_message(user_msg: str, ai_reply: str) -> list[dict]:
         return actions
 
     if any(k in msg for k in _SEARCH_KW):
-        # 从 AI 回复中提取英文词作为候选关键词
-        en_words = re.findall(r'\b[A-Za-z][\w-]{2,}\b', ai_reply)
         _stop = {"the", "and", "for", "with", "from", "that", "this", "are", "was", "will",
                  "can", "have", "has", "been", "but", "not", "also", "its", "such", "into",
-                 "which", "their", "these", "those", "more", "based", "using", "used"}
-        en_kw = list(dict.fromkeys(w for w in en_words if w.lower() not in _stop))[:6]
+                 "which", "their", "these", "those", "more", "based", "using", "used",
+                 "about", "between", "through", "during", "before", "after", "above",
+                 "each", "every", "both", "few", "most", "other", "some", "any", "all",
+                 "than", "very", "just", "only", "then", "when", "where", "how", "what",
+                 "new", "recent", "study", "research", "analysis", "review", "paper"}
 
-        # 如果 AI 回复没有英文词，回退到搜索页已有关键词
-        if len(en_kw) < 2 and state.keywords:
-            en_kw = list(state.keywords)[:6]
+        # 从 AI 回复中提取英文词
+        reply_words = re.findall(r'\b[A-Za-z][\w-]{2,}\b', ai_reply)
+        reply_kw = list(dict.fromkeys(w for w in reply_words if w.lower() not in _stop))
 
+        # 从课题描述中提取英文词（更精准的关键词来源）
         desc = state.topic_desc or _agent_topic_desc or user_msg[:200]
-        primary = en_kw[:2] if en_kw else []
-        secondary = en_kw[2:] if en_kw else []
+        desc_words = re.findall(r'\b[A-Za-z][\w-]{2,}\b', desc)
+        desc_kw = list(dict.fromkeys(w for w in desc_words if w.lower() not in _stop))
+
+        # 合并：课题描述关键词优先（更精准），AI 回复补充
+        combined = list(dict.fromkeys(desc_kw + reply_kw))[:8]
+
+        # 如果都没有英文词，回退到搜索页已有关键词
+        if len(combined) < 2 and state.keywords:
+            combined = list(state.keywords)[:8]
+
+        primary = combined[:3] if combined else []
+        secondary = combined[3:] if combined else []
         actions.append({"type": "search", "params": {
             "topic_name": state.topic_name or _agent_project_name or "",
             "topic_desc": desc,
