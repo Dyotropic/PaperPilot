@@ -79,13 +79,13 @@ PaperPilot 是一款**桌面端学术文献管理工具**，帮助你完成从"�
 打开命令行，进入你想存放项目的目录（例如 `E:\`），执行：
 
 ```bash
-git clone https://github.com/yue070527-cloud/PaperPilot.git
+git clone https://github.com/Dyotropic/PaperPilot.git
 cd PaperPilot
 ```
 
 **方式二：直接下载 ZIP**
 
-1. 在浏览器打开 https://github.com/yue070527-cloud/PaperPilot
+1. 在浏览器打开 https://github.com/Dyotropic/PaperPilot
 2. 点击绿色的 **Code** 按钮 → **Download ZIP**
 3. 解压到你想要的目录（例如 `E:\PaperPilot`）
 
@@ -478,4 +478,4 @@ pip install -r requirements.txt  # 更新依赖（如有变化）
 ---
 
 > 如有其他问题或功能建议，请在 GitHub 提交 Issue：
-> https://github.com/yue070527-cloud/PaperPilot/issues
+> https://github.com/Dyotropic/PaperPilot/issues

@@ -19,7 +19,7 @@
 **环境要求**：Windows 10+，Python 3.10 ~ 3.12
 
 ```bash
-git clone https://github.com/yue070527-cloud/PaperPilot.git
+git clone https://github.com/Dyotropic/PaperPilot.git
 cd PaperPilot
 python -m venv .venv
 .venv\Scripts\activate
