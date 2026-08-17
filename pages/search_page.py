@@ -1499,8 +1499,9 @@ def build_search_page(ctx):
             ft.Divider(height=1, color=border_color()),
             ft.Row([search_btn, progress_bar], spacing=SP_MD),
             status_text,
-        ], spacing=SP_MD, scroll=ft.ScrollMode.AUTO, expand=_form_weight),
+        ], spacing=SP_MD, scroll=ft.ScrollMode.AUTO, expand=True),
         padding=SP_XL,
+        expand=_form_weight,
     )
 
     left_side = ft.Column([

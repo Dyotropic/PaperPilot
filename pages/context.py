@@ -282,5 +282,14 @@ class AppContext:
         self.agent_project_name = ""
         self.agent_topic_desc = ""
 
+        # 文献库页注册的课题能力（左侧导航通过 ctx 触发）+ 侧栏项目子菜单
+        self.library_select_project = None     # (pid) -> None
+        self.library_new_project = None        # () -> None
+        self.library_delete_project = None     # () -> None
+        self.library_refresh_projects = None   # () -> None
+        self.library_project_submenu = None    # ft.Column：侧栏课题子菜单（library_page 填充）
+        self.library_project_submenu_wrap = None  # ft.Container：子菜单可见性包装（app.py 创建）
+        self.selected_project_id = None        # 当前选中课题 id
+
 
 ctx = AppContext()

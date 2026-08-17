@@ -32,9 +32,6 @@ def build_library_page(ctx):
     _status_filter = "all"
     _sort_mode = "ce"  # "ce" 或 "ai"
 
-    # ── 左侧：课题列表 ──
-    project_list_col = ft.Column(spacing=4, expand=True, scroll=ft.ScrollMode.AUTO)
-
     selected_project_title = ft.Text(
         "请选择一个课题", size=14, weight=ft.FontWeight.W_500,
         max_lines=1, overflow=ft.TextOverflow.ELLIPSIS, expand=True,
@@ -42,36 +39,38 @@ def build_library_page(ctx):
     paper_count_text = ft.Text("", size=13)
 
     def refresh_project_list():
-        """从数据库刷新课题列表。"""
+        """从数据库刷新课题列表，填充左侧导航的课题子菜单。"""
         projects = library.get_all_projects()
-        project_list_col.controls.clear()
+        sub = ctx.library_project_submenu
+        if sub is None:
+            return
+        sub.controls.clear()
         if not projects:
-            project_list_col.controls.append(
-                ft.Text("暂无课题，检索后保存即可创建", size=FS_MD,
-                       color=text_tertiary())
+            sub.controls.append(
+                ft.Text("暂无课题", size=FS_XS, color=text_tertiary(),
+                        padding=ft.padding.Padding(left=SP_MD, top=4, bottom=4))
             )
         else:
             for proj in projects:
-                is_active = _selected_project_id == proj.id
-                btn = ft.Container(
+                is_active = ctx.selected_project_id == proj.id
+                item = ft.Container(
                     content=ft.Row([
-                        ft.Icon(ft.Icons.FOLDER, size=16,
+                        ft.Icon(ft.Icons.FOLDER, size=14,
                                 color=seed_color() if is_active else text_tertiary()),
-                        ft.Text(proj.name, size=FS_LG,
+                        ft.Text(proj.name, size=FS_SM,
                                weight=FW_SEMIBOLD if is_active else FW_REGULAR,
-                               color=text_primary(),
+                               color=text_primary() if is_active else text_secondary(),
                                max_lines=1, overflow=ft.TextOverflow.ELLIPSIS, expand=True),
                     ], spacing=SP_SM),
-                    data=proj.id,
-                    on_click=lambda e, pid=proj.id: on_select_project(pid),
-                    border_radius=R_MD,
+                    on_click=lambda e, pid=proj.id: ctx.library_select_project(pid),
+                    border_radius=R_SM,
                     bgcolor=accent_container() if is_active else None,
-                    padding=ft.padding.Padding(left=SP_MD, top=10, right=SP_MD, bottom=10),
+                    padding=ft.padding.Padding(left=SP_MD, top=7, right=SP_MD, bottom=7),
                     ink=True,
                 )
-                project_list_col.controls.append(btn)
+                sub.controls.append(item)
         try:
-            project_list_col.update()
+            sub.update()
         except RuntimeError:
             pass
 
@@ -178,6 +177,7 @@ def build_library_page(ctx):
                 repo_manager.move_project_to_recycle(proj.name)
             library.delete_project(pid)
             _selected_project_id = None
+            ctx.selected_project_id = None
             ctx.set_agent_project(None)
             selected_project_title.value = "请选择一个课题"
             paper_count_text.value = ""
@@ -1156,6 +1156,7 @@ def build_library_page(ctx):
         """选中课题时刷新论文列表。"""
         nonlocal _selected_project_id, _pagination_page
         _selected_project_id = project_id
+        ctx.selected_project_id = project_id
         _pagination_page = 0
         upload_progress.value = ""
         if project_id is None:
@@ -1175,6 +1176,7 @@ def build_library_page(ctx):
             else:
                 sort_btn.disabled = True
                 ai_sort_btn.disabled = True
+        selected_project_title.update()
         refresh_project_list()
         refresh_paper_list()
 
@@ -1551,27 +1553,20 @@ def build_library_page(ctx):
         dlg.open = True
         ctx.page.update()
 
-    # 首次加载课题列表
+    # ── 注册课题能力回调（供左侧导航省略号菜单 / 子菜单调用）──
+    ctx.library_select_project = on_select_project
+    ctx.library_new_project = lambda: on_new_project(None)
+    ctx.library_delete_project = lambda: on_delete_project(None)
+    ctx.library_refresh_projects = lambda: (refresh_project_list(), refresh_paper_list())
+
+    # 首次加载课题列表（填充侧栏子菜单）
     refresh_project_list()
 
-    # ── 布局：两侧均为卡片容器，形成层次 ──
-    left_panel = card(
-        ft.Column([
-            ft.Row([
-                ft.IconButton(icon=ft.Icons.ADD, tooltip="新建课题", on_click=on_new_project,
-                              icon_color=seed_color()),
-                ft.IconButton(icon=ft.Icons.DELETE, tooltip="删除课题", on_click=on_delete_project,
-                              icon_color=text_secondary()),
-                ft.IconButton(icon=ft.Icons.REFRESH, tooltip="刷新列表",
-                              on_click=lambda e: refresh_project_list(),
-                              icon_color=text_secondary()),
-            ], spacing=SP_XS),
-            ft.Text("课题", size=FS_XL, weight=FW_SEMIBOLD, color=text_primary()),
-            project_list_col,
-        ], spacing=SP_SM, expand=True),
-        width=210,
-    )
+    # 初始化筛选标签
+    _filter_chips[:] = _build_filter_chips()
+    status_filter_row.controls[:] = _filter_chips
 
+    # ── 布局：单卡片文献内容区（课题列表已移至左侧导航子菜单）──
     right_panel = card(
         ft.Column([
             ft.Row([
@@ -1622,18 +1617,4 @@ def build_library_page(ctx):
         expand=True,
     )
 
-    return ft.Row([
-        left_panel,
-        ft.VerticalDivider(width=SP_MD, color=ft.Colors.TRANSPARENT),
-        right_panel,
-    ], expand=True, alignment=ft.CrossAxisAlignment.STRETCH, spacing=0)
-
-    # 初始化筛选标签
-    _filter_chips[:] = _build_filter_chips()
-    status_filter_row.controls[:] = _filter_chips
-
-    return ft.Row([
-        left_panel,
-        ft.VerticalDivider(width=1, color=ft.Colors.OUTLINE_VARIANT),
-        right_panel,
-    ], expand=True, alignment=ft.CrossAxisAlignment.STRETCH)
+    return right_panel
