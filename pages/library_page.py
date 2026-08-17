@@ -4,7 +4,15 @@ import threading
 
 import flet as ft
 
-from pages.context import ctx, THEMES, _border
+from pages.context import (
+    ctx, THEMES, _border,
+    FS_XS, FS_SM, FS_MD, FS_LG, FS_XL, FS_XXL, FS_HERO,
+    FW_REGULAR, FW_MEDIUM, FW_SEMIBOLD, FW_BOLD,
+    R_SM, R_MD, R_LG, R_XL, SP_XS, SP_SM, SP_MD, SP_LG, SP_XL, SP_XXL,
+    text_primary, text_secondary, text_tertiary, border_color,
+    seed_color, app_bg, surface, surface_hi, accent_container,
+    subtle_shadow, card,
+)
 from paperpilot import library
 from paperpilot import repo_manager, downloader
 from paperpilot.local_import import scan_folder, extract_pdfs
@@ -39,27 +47,27 @@ def build_library_page(ctx):
         project_list_col.controls.clear()
         if not projects:
             project_list_col.controls.append(
-                ft.Text("暂无课题，检索后保存即可创建", size=13,
-                       color=ft.Colors.OUTLINE)
+                ft.Text("暂无课题，检索后保存即可创建", size=FS_MD,
+                       color=text_tertiary())
             )
         else:
             for proj in projects:
                 is_active = _selected_project_id == proj.id
-                btn = ft.TextButton(
+                btn = ft.Container(
                     content=ft.Row([
                         ft.Icon(ft.Icons.FOLDER, size=16,
-                                color=ft.Colors.ON_PRIMARY_CONTAINER if is_active else None),
-                        ft.Text(proj.name, size=13,
-                               weight=ft.FontWeight.W_600 if is_active else ft.FontWeight.NORMAL,
-                               color=ft.Colors.ON_PRIMARY_CONTAINER if is_active else None,
+                                color=seed_color() if is_active else text_tertiary()),
+                        ft.Text(proj.name, size=FS_LG,
+                               weight=FW_SEMIBOLD if is_active else FW_REGULAR,
+                               color=text_primary(),
                                max_lines=1, overflow=ft.TextOverflow.ELLIPSIS, expand=True),
-                    ], spacing=6),
+                    ], spacing=SP_SM),
                     data=proj.id,
                     on_click=lambda e, pid=proj.id: on_select_project(pid),
-                    style=ft.ButtonStyle(
-                        bgcolor=ft.Colors.PRIMARY_CONTAINER if is_active else None,
-                        padding=ft.padding.Padding(left=12, top=8, right=12, bottom=8),
-                    ),
+                    border_radius=R_MD,
+                    bgcolor=accent_container() if is_active else None,
+                    padding=ft.padding.Padding(left=SP_MD, top=10, right=SP_MD, bottom=10),
+                    ink=True,
                 )
                 project_list_col.controls.append(btn)
         try:
@@ -204,13 +212,15 @@ def build_library_page(ctx):
         for label, val in _filter_options:
             is_selected = _status_filter == val
             chip = ft.Container(
-                content=ft.Text(label, size=13,
-                               weight=ft.FontWeight.W_600 if is_selected else ft.FontWeight.NORMAL,
-                               color=ft.Colors.ON_PRIMARY_CONTAINER if is_selected else ft.Colors.ON_SURFACE),
-                padding=ft.padding.Padding(left=12, right=12, top=5, bottom=5),
-                border_radius=16,
-                bgcolor=ft.Colors.PRIMARY_CONTAINER if is_selected else ft.Colors.SURFACE_CONTAINER,
+                content=ft.Text(label, size=FS_MD,
+                               weight=FW_SEMIBOLD if is_selected else FW_REGULAR,
+                               color=seed_color() if is_selected else text_secondary()),
+                padding=ft.padding.Padding(left=SP_MD, right=SP_MD, top=6, bottom=6),
+                border_radius=R_XL,
+                bgcolor=accent_container() if is_selected else surface_hi(),
+                border=_border(border_color()) if not is_selected else None,
                 on_click=lambda e, v=val: on_status_filter_click(v),
+                ink=True,
             )
             chips.append(chip)
         return chips
@@ -220,9 +230,10 @@ def build_library_page(ctx):
         nonlocal _filter_chips
         for i, (label, val) in enumerate(_filter_options):
             is_selected = _status_filter == val
-            _filter_chips[i].bgcolor = ft.Colors.PRIMARY_CONTAINER if is_selected else ft.Colors.SURFACE_CONTAINER
-            _filter_chips[i].content.color = ft.Colors.ON_PRIMARY_CONTAINER if is_selected else ft.Colors.ON_SURFACE
-            _filter_chips[i].content.weight = ft.FontWeight.W_600 if is_selected else ft.FontWeight.NORMAL
+            _filter_chips[i].bgcolor = accent_container() if is_selected else surface_hi()
+            _filter_chips[i].border = _border(border_color()) if not is_selected else None
+            _filter_chips[i].content.color = seed_color() if is_selected else text_secondary()
+            _filter_chips[i].content.weight = FW_SEMIBOLD if is_selected else FW_REGULAR
 
     status_filter_row = ft.Row([], spacing=4)
 
@@ -255,11 +266,12 @@ def build_library_page(ctx):
         """构建文献库列表表头。"""
         def _hdr(label, width=None, expand=None):
             return ft.Container(
-                content=ft.Text(label, size=13, weight=ft.FontWeight.W_600),
+                content=ft.Text(label, size=FS_SM, weight=FW_SEMIBOLD,
+                                color=text_secondary()),
                 width=width, expand=expand,
-                padding=ft.padding.Padding(left=4, right=4),
-                bgcolor=ft.Colors.SURFACE_CONTAINER,
-                border=ft.border.Border(bottom=ft.BorderSide(1, ft.Colors.OUTLINE_VARIANT)),
+                padding=ft.padding.Padding(left=SP_SM, right=SP_SM, top=10, bottom=10),
+                bgcolor=surface_hi(),
+                border=ft.border.Border(bottom=ft.BorderSide(1, border_color())),
                 clip_behavior=ft.ClipBehavior.HARD_EDGE,
             )
         cols = [_hdr("", width=38),   # 复选框占位
@@ -1104,8 +1116,8 @@ def build_library_page(ctx):
             row = ft.Container(
                 content=ft.Row(cells, spacing=0),
                 border=ft.border.Border(
-                    bottom=ft.BorderSide(1, ft.Colors.OUTLINE_VARIANT)),
-                padding=ft.padding.Padding(left=4, top=4, right=4, bottom=4),
+                    bottom=ft.BorderSide(1, border_color())),
+                padding=ft.padding.Padding(left=SP_SM, top=SP_XS, right=SP_SM, bottom=SP_XS),
             )
             rows.append(row)
 
@@ -1542,22 +1554,26 @@ def build_library_page(ctx):
     # 首次加载课题列表
     refresh_project_list()
 
-    # ── 布局 ──
-    left_panel = ft.Container(
-        content=ft.Column([
+    # ── 布局：两侧均为卡片容器，形成层次 ──
+    left_panel = card(
+        ft.Column([
             ft.Row([
-                ft.IconButton(icon=ft.Icons.ADD, tooltip="新建课题", on_click=on_new_project),
-                ft.IconButton(icon=ft.Icons.DELETE, tooltip="删除课题", on_click=on_delete_project),
-                ft.IconButton(icon=ft.Icons.REFRESH, tooltip="刷新列表", on_click=lambda e: refresh_project_list()),
-            ], spacing=2),
+                ft.IconButton(icon=ft.Icons.ADD, tooltip="新建课题", on_click=on_new_project,
+                              icon_color=seed_color()),
+                ft.IconButton(icon=ft.Icons.DELETE, tooltip="删除课题", on_click=on_delete_project,
+                              icon_color=text_secondary()),
+                ft.IconButton(icon=ft.Icons.REFRESH, tooltip="刷新列表",
+                              on_click=lambda e: refresh_project_list(),
+                              icon_color=text_secondary()),
+            ], spacing=SP_XS),
+            ft.Text("课题", size=FS_XL, weight=FW_SEMIBOLD, color=text_primary()),
             project_list_col,
-        ], spacing=6, expand=True),
-        width=190,
-        padding=ft.padding.Padding(top=8, right=8, bottom=8, left=0),
+        ], spacing=SP_SM, expand=True),
+        width=210,
     )
 
-    right_panel = ft.Container(
-        content=ft.Column([
+    right_panel = card(
+        ft.Column([
             ft.Row([
                 ft.Row([
                     selected_project_title,
@@ -1595,17 +1611,22 @@ def build_library_page(ctx):
             upload_progress,
             multi_select_bar,
             ft.Row([
-                ft.Text("筛选:", size=13),
+                ft.Text("筛选:", size=FS_MD, color=text_secondary()),
                 status_filter_row,
-            ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-            ft.Divider(height=8),
+            ], spacing=SP_SM, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            ft.Divider(height=1, color=border_color()),
             empty_hint,
             _pagination_row,
             _library_list,
-        ], spacing=6, expand=True),
+        ], spacing=SP_SM, expand=True),
         expand=True,
-        padding=ft.padding.Padding(top=8, left=8, bottom=8, right=0),
     )
+
+    return ft.Row([
+        left_panel,
+        ft.VerticalDivider(width=SP_MD, color=ft.Colors.TRANSPARENT),
+        right_panel,
+    ], expand=True, alignment=ft.CrossAxisAlignment.STRETCH, spacing=0)
 
     # 初始化筛选标签
     _filter_chips[:] = _build_filter_chips()

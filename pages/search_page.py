@@ -4,7 +4,15 @@ import threading
 
 import flet as ft
 
-from pages.context import ctx, THEMES, _border
+from pages.context import (
+    ctx, THEMES, _border,
+    FS_XS, FS_SM, FS_MD, FS_LG, FS_XL, FS_XXL, FS_HERO,
+    FW_REGULAR, FW_MEDIUM, FW_SEMIBOLD, FW_BOLD,
+    R_SM, R_MD, R_LG, R_XL, SP_XS, SP_SM, SP_MD, SP_LG, SP_XL, SP_XXL,
+    text_primary, text_secondary, text_tertiary, border_color,
+    seed_color, app_bg, surface, surface_hi, accent_container,
+    subtle_shadow, card,
+)
 from pages.settings_page import (
     arxiv_switch, openalex_switch, max_results_slider,
     top_k_slider, ce_candidates_slider,
@@ -175,15 +183,15 @@ def _build_search_header():
             arrow = " ▲" if not _sort_ascending else " ▼"
         return ft.Container(
             content=ft.TextButton(
-                content=ft.Text(f"{label}{arrow}", size=13,
-                                weight=ft.FontWeight.W_600),
+                content=ft.Text(f"{label}{arrow}", size=FS_SM,
+                                weight=FW_SEMIBOLD, color=text_secondary()),
                 on_click=lambda e, c=column: sort_table(c) if c else None,
-                style=ft.ButtonStyle(padding=ft.padding.Padding(left=4, top=4, right=4, bottom=4)),
+                style=ft.ButtonStyle(padding=ft.padding.Padding(left=SP_XS, top=10, right=SP_XS, bottom=10)),
             ),
             width=width, expand=expand,
-            padding=ft.padding.Padding(left=4, right=4),
-            bgcolor=ft.Colors.SURFACE_CONTAINER,
-            border=ft.border.Border(bottom=ft.BorderSide(1, ft.Colors.OUTLINE_VARIANT)),
+            padding=ft.padding.Padding(left=SP_XS, right=SP_XS),
+            bgcolor=surface_hi(),
+            border=ft.border.Border(bottom=ft.BorderSide(1, border_color())),
         )
 
     if _ai_scored:
@@ -373,7 +381,7 @@ def refresh_results_table():
             content=ft.Row(cells, spacing=0),
             on_click=lambda e, p=paper: show_paper_detail(p),
             border=ft.border.Border(
-                bottom=ft.BorderSide(1, ft.Colors.OUTLINE_VARIANT)),
+                bottom=ft.BorderSide(1, border_color())),
         )
         rows.append(row)
 
@@ -673,9 +681,9 @@ def build_search_page(ctx):
     def _make_draggable_chip(kw: str, zone: str, icon, color):
         """创建可拖拽的关键词 Chip。"""
         chip = ft.Chip(
-            label=ft.Text(kw),
+            label=ft.Text(kw, size=FS_MD, color=text_primary()),
             leading=ft.Icon(icon, size=14, color=color) if icon else None,
-            bgcolor=ft.Colors.PRIMARY_CONTAINER if zone == "primary" else None,
+            bgcolor=accent_container() if zone == "primary" else surface_hi(),
             on_delete=lambda e, k=kw: _on_delete_keyword(k),
         )
         return ft.Draggable(
@@ -684,7 +692,7 @@ def build_search_page(ctx):
             group="kw",
             content_feedback=ft.Chip(
                 label=ft.Text(kw),
-                bgcolor=ft.Colors.SURFACE,
+                bgcolor=surface_hi(),
             ),
         )
 
@@ -738,15 +746,15 @@ def build_search_page(ctx):
             return False
 
         def on_leave(e: ft.DragTargetEvent):
-            zone_container.border = _border(ft.Colors.OUTLINE_VARIANT)
+            zone_container.border = _border(border_color())
             zone_container.update()
 
         zone_container = ft.Container(
             content=chip_row,
-            border=_border(ft.Colors.OUTLINE_VARIANT),
-            border_radius=8,
-            padding=8,
-            bgcolor=ft.Colors.SURFACE if hasattr(ft.Colors, 'SURFACE') else None,
+            border=_border(border_color()),
+            border_radius=R_MD,
+            padding=SP_MD,
+            bgcolor=surface(),
         )
 
         drag_target = ft.DragTarget(
@@ -760,11 +768,11 @@ def build_search_page(ctx):
         return ft.Column([
             ft.Row([
                 ft.Icon(icon, size=16, color=color) if icon else ft.Text(""),
-                ft.Text(label, size=13, weight=ft.FontWeight.W_500),
-            ], spacing=4),
+                ft.Text(label, size=FS_MD, weight=FW_SEMIBOLD, color=text_primary()),
+            ], spacing=SP_XS),
             drag_target,
-            ft.Text(hint, size=12, color=ft.Colors.OUTLINE),
-        ], spacing=4)
+            ft.Text(hint, size=FS_XS, color=text_tertiary()),
+        ], spacing=SP_XS)
 
     def refresh_all_zones():
         """刷新三个拖拽区的 Chip 显示。"""
@@ -797,10 +805,10 @@ def build_search_page(ctx):
     status_text = ft.Text("", size=13)
 
     # ── 文献详情侧边栏 ──
-    sb_title = ft.Text("", size=18, selectable=True)
-    sb_meta = ft.Text("", size=13, selectable=True)
-    sb_abstract = ft.Text("", size=13, selectable=True)
-    sb_links = ft.Row([], spacing=8)
+    sb_title = ft.Text("", size=FS_XXL, weight=FW_SEMIBOLD, selectable=True, color=text_primary())
+    sb_meta = ft.Text("", size=FS_MD, selectable=True, color=text_secondary())
+    sb_abstract = ft.Text("", size=FS_MD, selectable=True, color=text_primary())
+    sb_links = ft.Row([], spacing=SP_SM)
 
     def on_close_sidebar(e):
         global _sidebar_busy
@@ -814,26 +822,28 @@ def build_search_page(ctx):
     sidebar = ft.Container(
         content=ft.Column([
             ft.Row([
-                ft.Text("文献详情", size=16, weight=ft.FontWeight.W_600),
-                ft.IconButton(icon=ft.Icons.CLOSE, on_click=on_close_sidebar),
+                ft.Text("文献详情", size=FS_XL, weight=FW_SEMIBOLD, color=text_primary()),
+                ft.IconButton(icon=ft.Icons.CLOSE, on_click=on_close_sidebar,
+                              icon_color=text_secondary()),
             ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
-            ft.Divider(height=8),
+            ft.Divider(height=1, color=border_color()),
             sb_title,
             sb_meta,
-            ft.Divider(height=8),
-            ft.Text("摘要", size=14, weight=ft.FontWeight.W_500),
+            ft.Divider(height=1, color=border_color()),
+            ft.Text("摘要", size=FS_LG, weight=FW_MEDIUM, color=text_secondary()),
             ft.Container(content=sb_abstract, expand=True),
-            ft.Divider(height=8),
+            ft.Divider(height=1, color=border_color()),
             sb_links,
-        ], spacing=6),
+        ], spacing=SP_SM),
         width=400,
         right=0,
         top=0,
         bottom=0,
-        padding=ft.padding.Padding(left=16, top=12, right=16, bottom=12),
-        border=_border(ft.Colors.OUTLINE_VARIANT),
-        border_radius=8,
-        bgcolor=ft.Colors.SURFACE,
+        padding=ft.padding.Padding(left=SP_LG, top=SP_MD, right=SP_LG, bottom=SP_MD),
+        border=_border(border_color()),
+        border_radius=R_LG,
+        bgcolor=surface(),
+        shadow=subtle_shadow(),
         visible=False,
     )
     sidebar._title = sb_title
@@ -1263,22 +1273,26 @@ def build_search_page(ctx):
     _form_weight = 2
     _results_weight = 3
 
-    results_area = ft.Column([
-        ft.Divider(height=16),
-        ft.Text("检索结果", size=22, weight=ft.FontWeight.W_600),
-        summary,
-        ft.Row([
-            search_select_all_cb,
-            search_select_count,
-            search_compare_btn,
-            ai_limit_dd,
-            ai_score_btn,
-            _ai_score_status,
-            save_to_library_btn,
-        ], alignment=ft.MainAxisAlignment.END, spacing=8),
-        ft.Divider(height=8),
-        _search_list,
-    ], spacing=6, expand=_results_weight, visible=False)
+    results_area = card(
+        ft.Column([
+            ft.Text("检索结果", size=FS_XL, weight=FW_BOLD, color=text_primary()),
+            summary,
+            ft.Row([
+                search_select_all_cb,
+                search_select_count,
+                search_compare_btn,
+                ai_limit_dd,
+                ai_score_btn,
+                _ai_score_status,
+                save_to_library_btn,
+            ], alignment=ft.MainAxisAlignment.END, spacing=SP_SM),
+            ft.Divider(height=1, color=border_color()),
+            _search_list,
+        ], spacing=SP_MD, expand=True),
+        padding=SP_XL,
+        expand=_results_weight,
+        visible=False,
+    )
 
     def on_extract(e):
         desc = topic_desc_field.value.strip()
@@ -1457,38 +1471,41 @@ def build_search_page(ctx):
     # 初始化分区（恢复已有状态）
     refresh_all_zones()
 
-    # ── 页面布局：上方可滚动检索区 + 下方结果列表区 + 右侧详情侧边栏 ──
-    scrollable_form = ft.Column([
-        ft.Text("PaperPilot", size=28, weight=ft.FontWeight.W_600),
-        ft.Text("智能文献检索与筛选", size=14),
-        ft.Divider(height=20),
-        ft.Text("检索信息", size=16, weight=ft.FontWeight.W_500),
-        topic_name_field,
-        topic_desc_field,
-        ft.Row([
-            ft.FilledTonalButton(
-                content=ft.Text("提取关键词"), icon=ft.Icons.AUTO_AWESOME,
-                on_click=on_extract,
-            ),
-            manual_kw_field,
-        ], spacing=8),
-        _make_zone("主关键词", "拖拽关键词至此设为「主关键词」",
-                   primary_zone_row, "primary",
-                   ft.Icons.STAR, ft.Colors.AMBER),
-        _make_zone("副关键词", "拖拽关键词至此设为「副关键词」",
-                   secondary_zone_row, "secondary",
-                   ft.Icons.ARROW_FORWARD, ft.Colors.PRIMARY),
-        _make_zone("普通关键词", "拖拽关键词至此设为「普通关键词」",
-                   regular_zone_row, "regular",
-                   None, None),
-        ft.Divider(height=12),
-        ft.Row([search_btn, progress_bar], spacing=16),
-        status_text,
-    ], spacing=8, scroll=ft.ScrollMode.AUTO, expand=_form_weight)
+    # ── 页面布局：卡片化的检索表单 + 结果区 + 右侧详情侧边栏 ──
+    scrollable_form = card(
+        ft.Column([
+            ft.Text("PaperPilot", size=FS_HERO, weight=FW_BOLD, color=text_primary()),
+            ft.Text("智能文献检索与筛选", size=FS_MD, color=text_secondary()),
+            ft.Divider(height=1, color=border_color()),
+            ft.Text("检索信息", size=FS_XL, weight=FW_SEMIBOLD, color=text_primary()),
+            topic_name_field,
+            topic_desc_field,
+            ft.Row([
+                ft.FilledTonalButton(
+                    content=ft.Text("提取关键词"), icon=ft.Icons.AUTO_AWESOME,
+                    on_click=on_extract,
+                ),
+                manual_kw_field,
+            ], spacing=SP_SM),
+            _make_zone("主关键词", "拖拽关键词至此设为「主关键词」",
+                       primary_zone_row, "primary",
+                       ft.Icons.STAR, ft.Colors.AMBER),
+            _make_zone("副关键词", "拖拽关键词至此设为「副关键词」",
+                       secondary_zone_row, "secondary",
+                       ft.Icons.ARROW_FORWARD, seed_color()),
+            _make_zone("普通关键词", "拖拽关键词至此设为「普通关键词」",
+                       regular_zone_row, "regular",
+                       None, None),
+            ft.Divider(height=1, color=border_color()),
+            ft.Row([search_btn, progress_bar], spacing=SP_MD),
+            status_text,
+        ], spacing=SP_MD, scroll=ft.ScrollMode.AUTO, expand=_form_weight),
+        padding=SP_XL,
+    )
 
     left_side = ft.Column([
         scrollable_form,
-        ft.Divider(height=1, color=ft.Colors.OUTLINE_VARIANT),
+        ft.Container(height=SP_MD),
         results_area,
     ], spacing=0, expand=True)
 

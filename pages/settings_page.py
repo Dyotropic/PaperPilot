@@ -1,7 +1,15 @@
 """设置页（index 2）。"""
 import flet as ft
 
-from pages.context import ctx, THEMES, _border, apply_theme
+from pages.context import (
+    ctx, THEMES, _border, apply_theme,
+    FS_XS, FS_SM, FS_MD, FS_LG, FS_XL, FS_XXL, FS_HERO,
+    FW_REGULAR, FW_MEDIUM, FW_SEMIBOLD, FW_BOLD,
+    R_SM, R_MD, R_LG, R_XL, SP_XS, SP_SM, SP_MD, SP_LG, SP_XL, SP_XXL,
+    text_primary, text_secondary, text_tertiary, border_color,
+    seed_color, app_bg, surface, surface_hi, accent_container,
+    subtle_shadow, card,
+)
 
 
 # ── 设置持久化 ──
@@ -144,15 +152,17 @@ def build_settings_page(ctx):
                 width=44, height=44, border_radius=22,
                 bgcolor=t["seed"],
                 border=_border(
-                    ft.Colors.ON_SURFACE if ctx.state.theme_name == name else ft.Colors.OUTLINE_VARIANT
+                    seed_color() if ctx.state.theme_name == name else border_color()
                 ),
+                shadow=subtle_shadow(),
                 ink=True,
                 on_click=lambda e, n=name: on_select_theme(n),
             ),
-            ft.Text(t["label"], size=12, text_align=ft.TextAlign.CENTER),
-        ], spacing=4, horizontal_alignment=ft.CrossAxisAlignment.CENTER)
+            ft.Text(t["label"], size=FS_SM, color=text_secondary(),
+                    text_align=ft.TextAlign.CENTER),
+        ], spacing=SP_XS, horizontal_alignment=ft.CrossAxisAlignment.CENTER)
         for name, t in THEMES.items()
-    ], spacing=20, alignment=ft.MainAxisAlignment.CENTER)
+    ], spacing=SP_XL, alignment=ft.MainAxisAlignment.CENTER)
 
     # 收集按钮引用用于就地更新（避免重建页面导致滚回顶部）
     for i, name in enumerate(THEMES):
@@ -166,45 +176,62 @@ def build_settings_page(ctx):
         on_change=on_toggle_dark,
     )
 
+    def _section(title: str, desc: str, *controls):
+        """构建设置分区卡片。"""
+        return card(
+            ft.Column([
+                ft.Text(title, size=FS_LG, weight=FW_SEMIBOLD, color=text_primary()),
+                ft.Text(desc, size=FS_SM, color=text_secondary()),
+                ft.Divider(height=1, color=border_color()),
+                *controls,
+            ], spacing=SP_MD, tight=True),
+            padding=SP_XL,
+        )
+
     return ft.Column([
-        ft.Text("设置", size=22),
-        ft.Divider(height=16),
-        ft.Text("DeepSeek API", size=16, weight=ft.FontWeight.W_500),
-        ft.Text("用于关键词提取和中英翻译，密钥仅存储在本地 config.yaml", size=13),
-        key_status,
         ft.Row([
-            api_key_field,
-            ft.FilledTonalButton(
-                content=ft.Text("保存"), icon=ft.Icons.SAVE, on_click=on_save_key,
-            ),
-        ], spacing=8),
-        save_status,
-        ft.Divider(height=12),
-        ft.Text("模型", size=16, weight=ft.FontWeight.W_500),
-        ft.Text("选择 DeepSeek API 模型，7月后 V3 将下线", size=13),
-        _make_model_selector(),
-        ft.Divider(height=16),
-        ft.Text("数据源", size=16, weight=ft.FontWeight.W_500),
-        ft.Text("选择从哪些来源获取论文", size=13),
-        arxiv_switch,
-        openalex_switch,
-        ft.Divider(height=16),
-        ft.Text("检索数量", size=16, weight=ft.FontWeight.W_500),
-        ft.Text("每个来源的最大检索结果数", size=13),
-        max_results_slider,
-        ft.Container(height=8),
-        ft.Text("结果显示与精排", size=16, weight=ft.FontWeight.W_500),
-        ft.Text("控制最终显示的论文数量和送入精排的候选数", size=13),
-        top_k_slider,
-        ce_candidates_slider,
-        ft.Divider(height=16),
-        ft.Text("外观", size=16, weight=ft.FontWeight.W_500),
-        ft.Text("选择配色主题和夜间模式", size=13),
-        theme_selector,
-        ft.Container(height=8),
-        dark_switch,
-        ft.Divider(height=16),
-        ft.Text("离线模式", size=16, weight=ft.FontWeight.W_500),
-        ft.Text("Embedding 模型：paraphrase-multilingual-MiniLM-L12-v2", size=13),
-        ft.Text("已下载至本地缓存，无需联网", size=13, color=ft.Colors.GREEN),
-    ], spacing=8, scroll=ft.ScrollMode.AUTO)
+            ft.Text("设置", size=FS_HERO, weight=FW_BOLD, color=text_primary()),
+        ], alignment=ft.MainAxisAlignment.START),
+        ft.Text("配置 PaperPilot 的 AI 服务、数据源与外观", size=FS_MD, color=text_secondary()),
+        ft.Container(height=SP_SM),
+        _section(
+            "DeepSeek API", "用于关键词提取和中英翻译，密钥仅存储在本地 config.yaml",
+            key_status,
+            ft.Row([
+                api_key_field,
+                ft.FilledTonalButton(
+                    content=ft.Text("保存"), icon=ft.Icons.SAVE, on_click=on_save_key,
+                ),
+            ], spacing=SP_SM),
+            save_status,
+        ),
+        _section(
+            "模型", "选择 DeepSeek API 模型，7月后 V3 将下线",
+            _make_model_selector(),
+        ),
+        _section(
+            "数据源", "选择从哪些来源获取论文",
+            arxiv_switch,
+            openalex_switch,
+        ),
+        _section(
+            "检索数量", "每个来源的最大检索结果数",
+            max_results_slider,
+        ),
+        _section(
+            "结果显示与精排", "控制最终显示的论文数量和送入精排的候选数",
+            top_k_slider,
+            ce_candidates_slider,
+        ),
+        _section(
+            "外观", "选择配色主题和夜间模式",
+            theme_selector,
+            dark_switch,
+        ),
+        _section(
+            "离线模式", "本地语义模型",
+            ft.Text("Embedding 模型：paraphrase-multilingual-MiniLM-L12-v2",
+                    size=FS_MD, color=text_primary()),
+            ft.Text("已下载至本地缓存，无需联网", size=FS_MD, color=ft.Colors.GREEN),
+        ),
+    ], spacing=SP_MD, scroll=ft.ScrollMode.AUTO)

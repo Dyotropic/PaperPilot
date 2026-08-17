@@ -12,7 +12,15 @@ import threading
 
 import flet as ft
 
-from pages.context import ctx, THEMES, DEFAULT_THEME, _border, apply_theme, AppState
+from pages.context import (
+    ctx, THEMES, DEFAULT_THEME, _border, apply_theme, AppState,
+    FONT_FAMILY, FS_XS, FS_SM, FS_MD, FS_LG, FS_XL, FS_XXL, FS_HERO,
+    FW_REGULAR, FW_MEDIUM, FW_SEMIBOLD, FW_BOLD,
+    R_SM, R_MD, R_LG, R_XL, SP_XS, SP_SM, SP_MD, SP_LG, SP_XL, SP_XXL,
+    text_primary, text_secondary, text_tertiary, border_color,
+    seed_color, app_bg, surface, surface_hi, accent_container,
+    subtle_shadow, card,
+)
 from pages.search_page import build_search_page
 from pages.library_page import build_library_page
 from pages.settings_page import (
@@ -84,21 +92,12 @@ def _on_agent_resize_end(e):
 
 def _agent_theme_colors():
     """根据当前主题返回 Agent 面板配色。"""
-    t = THEMES.get(state.theme_name, THEMES[DEFAULT_THEME])
-    if state.dark_mode:
-        return {
-            "user_bubble": ft.Colors.PRIMARY_CONTAINER,
-            "agent_bubble": ft.Colors.SURFACE_CONTAINER,
-            "user_text": ft.Colors.ON_PRIMARY_CONTAINER,
-            "agent_text": ft.Colors.ON_SURFACE,
-        }
-    else:
-        return {
-            "user_bubble": ft.Colors.PRIMARY_CONTAINER,
-            "agent_bubble": ft.Colors.SURFACE_CONTAINER,
-            "user_text": ft.Colors.ON_PRIMARY_CONTAINER,
-            "agent_text": ft.Colors.ON_SURFACE,
-        }
+    return {
+        "user_bubble": accent_container(),
+        "agent_bubble": surface_hi(),
+        "user_text": seed_color(),
+        "agent_text": text_primary(),
+    }
 
 
 def _format_agent_text(text: str):
@@ -935,42 +934,67 @@ NAV_ITEMS = [
 
 def build_sidebar(active_idx: int) -> ft.Column:
     """生成左侧垂直导航栏，页面切换时替换此栏内容即可。"""
+    accent = seed_color()
 
     def on_nav_click(e):
         page_switcher(e.control.data)
 
-    items = []
-    for label, icon, idx in NAV_ITEMS:
-        is_active = idx == active_idx
-        items.append(
-            ft.Container(
-                content=ft.Row([
-                    ft.Icon(icon, size=18,
-                            color=ft.Colors.ON_PRIMARY_CONTAINER if is_active else ft.Colors.ON_SURFACE),
-                    ft.Text(label, size=14,
-                           weight=ft.FontWeight.W_600 if is_active else ft.FontWeight.NORMAL,
-                           color=ft.Colors.ON_PRIMARY_CONTAINER if is_active else ft.Colors.ON_SURFACE),
-                ], spacing=10),
-                padding=ft.padding.Padding(left=14, top=11, right=14, bottom=11),
-                border_radius=8,
-                bgcolor=ft.Colors.PRIMARY_CONTAINER if is_active else None,
-                ink=True,
-                on_click=on_nav_click,
-                data=idx,
-            )
+    def _nav_item(label, icon, idx, is_active):
+        # 选中态：accent 浅底 + accent 图标/文字 + 左侧指示条
+        return ft.Container(
+            content=ft.Row([
+                ft.Container(
+                    width=3, height=18,
+                    border_radius=2,
+                    bgcolor=accent if is_active else None,
+                ),
+                ft.Icon(icon, size=18,
+                        color=accent if is_active else text_secondary()),
+                ft.Text(label, size=FS_LG,
+                       weight=FW_SEMIBOLD if is_active else FW_REGULAR,
+                       color=accent if is_active else text_primary()),
+            ], spacing=SP_MD),
+            padding=ft.padding.Padding(left=SP_SM, top=11, right=SP_MD, bottom=11),
+            border_radius=R_MD,
+            bgcolor=accent_container() if is_active else None,
+            ink=True,
+            on_click=on_nav_click,
+            data=idx,
         )
 
+    items = [_nav_item(label, icon, idx, idx == active_idx)
+             for label, icon, idx in NAV_ITEMS]
+
     return ft.Column([
+        # 品牌区
         ft.Container(
             content=ft.Column([
-                ft.Text("PaperPilot", size=18, weight=ft.FontWeight.W_700),
-                ft.Text("智能文献工作流", size=11, color=ft.Colors.OUTLINE),
-            ], spacing=2),
-            padding=ft.padding.Padding(left=14, top=10, bottom=10),
+                ft.Row([
+                    ft.Container(
+                        width=34, height=34, border_radius=R_MD,
+                        bgcolor=accent,
+                        alignment=ft.Alignment(0, 0),
+                        content=ft.Icon(ft.Icons.SCIENCE, size=20, color="#FFFFFF"),
+                    ),
+                    ft.Column([
+                        ft.Text("PaperPilot", size=FS_XXL, weight=FW_BOLD,
+                                color=text_primary()),
+                        ft.Text("智能文献工作流", size=FS_XS, color=text_tertiary()),
+                    ], spacing=1),
+                ], spacing=SP_MD),
+            ]),
+            padding=ft.padding.Padding(left=SP_MD, top=SP_LG, bottom=SP_LG),
         ),
-        ft.Divider(height=1),
-        *items,
-    ], spacing=4, expand=True)
+        ft.Divider(height=1, color=border_color()),
+        ft.Container(content=ft.Column(items, spacing=SP_XS),
+                     padding=ft.padding.Padding(left=SP_MD, top=SP_SM, right=SP_MD, bottom=SP_SM)),
+        # 底部版本信息
+        ft.Container(expand=True),
+        ft.Container(
+            content=ft.Text("v1.0  Phase 2", size=FS_XS, color=text_tertiary()),
+            padding=ft.padding.Padding(left=SP_LG, top=SP_SM, right=SP_LG, bottom=SP_SM),
+        ),
+    ], spacing=0, expand=True)
 
 
 # ── 页面切换 ──
@@ -1044,23 +1068,26 @@ def main(page: ft.Page):
     # 左侧导航栏（内容后续由 page_switcher 动态替换）
     nav_ref = ft.Container(
         content=build_sidebar(1),
-        width=200,
-        padding=ft.padding.Padding(top=8, bottom=8),
-        border=ft.Border(right=ft.BorderSide(1, ft.Colors.OUTLINE_VARIANT)),
+        width=220,
+        bgcolor=surface(),
+        border=ft.Border(right=ft.BorderSide(1, border_color())),
     )
     ctx.top_nav_ref = nav_ref
 
     container_project = ft.Container(
         content=build_search_page(ctx), visible=False, expand=True,
-        padding=ft.padding.Padding(left=16, top=12, right=8, bottom=16),
+        bgcolor=app_bg(),
+        padding=ft.padding.Padding(left=SP_XL, top=SP_LG, right=SP_XL, bottom=SP_XL),
     )
     container_results = ft.Container(
         content=build_library_page(ctx), visible=True, expand=True,
-        padding=ft.padding.Padding(left=16, top=12, right=8, bottom=16),
+        bgcolor=app_bg(),
+        padding=ft.padding.Padding(left=SP_XL, top=SP_LG, right=SP_XL, bottom=SP_XL),
     )
     container_settings = ft.Container(
         content=build_settings_page(ctx), visible=False, expand=True,
-        padding=ft.padding.Padding(left=16, top=12, right=8, bottom=16),
+        bgcolor=app_bg(),
+        padding=ft.padding.Padding(left=SP_XL, top=SP_LG, right=SP_XL, bottom=SP_XL),
     )
 
     # ── Agent 对话面板 ──
@@ -1170,28 +1197,33 @@ def main(page: ft.Page):
 
     agent_panel = ft.Container(
         content=ft.Column([
-            ft.Row([
-                ft.Text("StudyCopilot", size=15, weight=ft.FontWeight.W_600),
-            ], alignment=ft.MainAxisAlignment.CENTER),
-            ft.Divider(height=1),
+            ft.Container(
+                content=ft.Row([
+                    ft.Icon(ft.Icons.AUTO_AWESOME, size=16, color=seed_color()),
+                    ft.Text("StudyCopilot", size=FS_LG, weight=FW_SEMIBOLD,
+                            color=text_primary()),
+                ], spacing=SP_SM, alignment=ft.MainAxisAlignment.CENTER),
+                padding=ft.padding.Padding(top=SP_MD, bottom=SP_MD),
+            ),
+            ft.Divider(height=1, color=border_color()),
             _agent_msg_list,
-            ft.Divider(height=1),
+            ft.Divider(height=1, color=border_color()),
             ft.Row([
                 _preset_menu,
                 _agent_input,
                 ft.IconButton(icon=ft.Icons.SEND, on_click=_on_agent_send, icon_size=20),
             ], spacing=6),
-        ], spacing=4),
+        ], spacing=SP_XS),
         width=_agent_panel_width,
-        padding=ft.padding.Padding(left=8, top=12, right=8, bottom=12),
-        border=ft.Border(left=ft.BorderSide(1, ft.Colors.OUTLINE_VARIANT)),
+        bgcolor=surface(),
+        border=ft.Border(left=ft.BorderSide(1, border_color())),
     )
     _agent_panel_ref = agent_panel
 
     resize_handle = ft.GestureDetector(
         content=ft.Container(
             width=8,
-            bgcolor=ft.Colors.OUTLINE_VARIANT,
+            bgcolor=border_color(),
             border_radius=4,
         ),
         mouse_cursor=ft.MouseCursor.RESIZE_LEFT_RIGHT,
