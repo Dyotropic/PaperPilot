@@ -54,9 +54,9 @@ _agent_topic_desc: str = ""
 _thinking_active: bool = False
 
 # ── Agent 面板拖拽拉伸 ──
-_AGENT_PANEL_MIN = 290
+_AGENT_PANEL_MIN = 320
 _AGENT_PANEL_MAX_RATIO = 0.5
-_agent_panel_width = 340
+_agent_panel_width = 380
 _agent_panel_ref: ft.Container | None = None
 _resize_start_x: float = 0
 _resize_start_width: float = 0
@@ -1148,7 +1148,8 @@ def main(page: ft.Page):
     page.window.height = 750
     page.window.min_width = 900
     page.window.min_height = 500
-    page.padding = 0
+    # 页面底部留白，避免内容贴底
+    page.padding = ft.padding.Padding(left=0, top=0, right=0, bottom=SP_LG)
 
     # 注入 Agent 面板 / 导航能力到 ctx
     ctx.send_agent_message = send_agent_message

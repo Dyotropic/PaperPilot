@@ -19,6 +19,7 @@ os.environ["TRANSFORMERS_OFFLINE"] = "1"
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
 import numpy as np
+import torch
 from sentence_transformers import CrossEncoder
 
 from paperpilot.config import config
@@ -179,10 +180,13 @@ def _get_cross_encoder():
             print(f"[CE] Loading from cache: {_CE_PATH}", flush=True)
 
             def _load():
+                # CPU 上强制 float32：Qwen2 系默认 bf16 在 CPU 推理慢 ~9 倍，
+                # float32 既提速又更高精度（见 library-pdf 分支 9d8fa34）
                 return CrossEncoder(
                     _CE_PATH,
                     max_length=_CE_MAX_LENGTH,
                     device="cpu",
+                    model_kwargs={"torch_dtype": torch.float32},
                 )
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
@@ -209,6 +213,7 @@ def _get_cross_encoder():
                 _CE_NAME,
                 max_length=_CE_MAX_LENGTH,
                 device="cpu",
+                model_kwargs={"torch_dtype": torch.float32},
             )
         except Exception as e:
             logger.warning(f"Cross-encoder download failed: {e}")

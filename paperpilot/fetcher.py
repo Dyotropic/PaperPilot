@@ -22,10 +22,24 @@ import re
 import socket
 import time
 from difflib import SequenceMatcher
+from pathlib import Path
 
 import arxiv
 import fitz
 import requests
+
+from paperpilot.config import config
+
+# ── OpenAlex 响应缓存（diskCache，TTL 24h）──
+# 搜索分页结果与摘要补齐都可缓存，重复检索几乎瞬时返回。
+_OA_CACHE_DIR = Path(config.get("cache", {}).get("dir", "./cache/api")) / "openalex"
+_CACHE_TTL = int(config.get("cache", {}).get("ttl_hours", 24)) * 3600
+
+try:
+    from diskcache import Cache as _Cache
+    _oa_cache = _Cache(str(_OA_CACHE_DIR))
+except Exception:
+    _oa_cache = None  # diskcache 不可用时降级为不缓存
 
 
 def _build_search_query(keywords: list[str], logic: str = "OR") -> str:
@@ -288,31 +302,41 @@ def _fetch_openalex_raw(query: str, max_results: int = 30,
             }
             if year_filter:
                 params["filter"] = year_filter
-            try:
-                resp = requests.get(url, params=params, headers=headers, timeout=15)
-                for retry in range(3):
-                    if resp.status_code != 429:
-                        break
-                    time.sleep(1 * (retry + 1))
+            ckey = f"page:{query}|{page}|{per_page}|{year_filter or ''}"
+            results = None
+            fetched = False
+            if _oa_cache is not None:
+                results = _oa_cache.get(ckey)
+            if results is None:
+                try:
                     resp = requests.get(url, params=params, headers=headers, timeout=15)
-                resp.raise_for_status()
-                data = resp.json()
-                results = data.get("results", [])
-                page_total = len(results)
-                for i, w in enumerate(results):
-                    paper = _parse_openalex_work(w)
-                    if paper:
-                        api_rel = w.get("relevance_score")
-                        if api_rel is not None:
-                            paper["api_score"] = float(api_rel)
-                        else:
-                            paper["api_score"] = 1.0 - (i / max(page_total, 1))
-                        papers.append(paper)
-                if len(papers) >= max_results:
-                    break
-                time.sleep(0.1)
-            except requests.RequestException:
-                continue
+                    for retry in range(3):
+                        if resp.status_code != 429:
+                            break
+                        time.sleep(1 * (retry + 1))
+                        resp = requests.get(url, params=params, headers=headers, timeout=15)
+                    resp.raise_for_status()
+                    data = resp.json()
+                    results = data.get("results", [])
+                    fetched = True
+                    if _oa_cache is not None:
+                        _oa_cache.set(ckey, results, expire=_CACHE_TTL)
+                except requests.RequestException:
+                    continue
+            page_total = len(results)
+            for i, w in enumerate(results):
+                paper = _parse_openalex_work(w)
+                if paper:
+                    api_rel = w.get("relevance_score")
+                    if api_rel is not None:
+                        paper["api_score"] = float(api_rel)
+                    else:
+                        paper["api_score"] = 1.0 - (i / max(page_total, 1))
+                    papers.append(paper)
+            if len(papers) >= max_results:
+                break
+            if fetched:
+                time.sleep(0.1)  # 网络请求后的礼貌速率
     finally:
         socket.setdefaulttimeout(old_timeout)
     # Normalize api_score to [0, 1] — OpenAlex relevance_score may exceed [0, 1]
@@ -339,10 +363,10 @@ def _fetch_openalex_raw(query: str, max_results: int = 30,
 
 
 def _fetch_missing_abstracts(papers: list[dict]) -> list[dict]:
-    """对缺少摘要的 OpenAlex 论文，单独请求完整摘要。
+    """对缺少摘要的 OpenAlex 论文，并行请求完整摘要（带缓存）。
 
     OpenAlex 搜索结果常截断摘要，需用 works/{id} 端点获取完整数据。
-    速率 ~10 req/s，每请求 10s 超时。
+    并发 4 路，较原串行 ~10 req/s 更快且更礼貌；重复检索命中缓存。
     """
     to_fetch = [
         p for p in papers
@@ -355,26 +379,38 @@ def _fetch_missing_abstracts(papers: list[dict]) -> list[dict]:
     headers = {"User-Agent": "PaperPilot/1.0 (mailto:paperpilot@example.com)"}
     old_timeout = socket.getdefaulttimeout()
     socket.setdefaulttimeout(10)
+
+    def _fetch_one(paper: dict) -> bool:
+        oa_id = paper["openalex_id"]
+        ckey = f"abs:{oa_id}"
+        if _oa_cache is not None:
+            cached = _oa_cache.get(ckey)
+            if cached:
+                paper["abstract"] = cached
+                return True
+        try:
+            resp = requests.get(oa_id, headers=headers, timeout=10)
+            if resp.status_code == 200:
+                w = resp.json()
+                inv = w.get("abstract_inverted_index")
+                if inv:
+                    text = _decode_inverted_index(inv)
+                    paper["abstract"] = text
+                    if _oa_cache is not None:
+                        _oa_cache.set(ckey, text, expire=_CACHE_TTL)
+                    return True
+        except requests.RequestException:
+            pass
+        return False
+
     count = 0
     try:
-        for paper in to_fetch:
-            oa_id = paper["openalex_id"]
-            try:
-                resp = requests.get(oa_id, headers=headers, timeout=10)
-                if resp.status_code == 200:
-                    w = resp.json()
-                    inv = w.get("abstract_inverted_index")
-                    if inv:
-                        paper["abstract"] = _decode_inverted_index(inv)
-                        count += 1
-                elif resp.status_code == 429:
-                    time.sleep(1)
-                # 非 200/429 静默跳过
-            except requests.RequestException:
-                continue
-            time.sleep(0.1)  # 礼貌速率：~10 req/s
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            count = sum(1 for ok in executor.map(_fetch_one, to_fetch) if ok)
     finally:
         socket.setdefaulttimeout(old_timeout)
+
     if count:
         print(f"[OpenAlex] 补齐 {count} 篇摘要", flush=True)
     return papers

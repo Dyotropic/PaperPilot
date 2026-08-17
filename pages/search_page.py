@@ -1,4 +1,5 @@
 """检索页（index 0）—— 课题输入 + 关键词拖拽三区 + 检索结果表 + 文献详情侧栏。"""
+import asyncio
 import os
 import threading
 
@@ -34,7 +35,7 @@ state = ctx.state
 # ── 检索页模块级状态 ──
 _sort_ascending = False
 _sort_column = "score"
-_search_list = ft.ListView(expand=True, spacing=0)
+_search_list = ft.Column(spacing=0)
 _ai_scored = False
 _last_sort_time = 0
 _search_check_handler = None
@@ -1269,30 +1270,23 @@ def build_search_page(ctx):
 
     save_to_library_btn.on_click = on_save_to_library
 
-    # ── 分割比例：表单区 vs 结果区 ──
-    _form_weight = 2
-    _results_weight = 3
-
-    results_area = card(
-        ft.Column([
-            ft.Text("检索结果", size=FS_XL, weight=FW_BOLD, color=text_primary()),
-            summary,
-            ft.Row([
-                search_select_all_cb,
-                search_select_count,
-                search_compare_btn,
-                ai_limit_dd,
-                ai_score_btn,
-                _ai_score_status,
-                save_to_library_btn,
-            ], alignment=ft.MainAxisAlignment.END, spacing=SP_SM),
-            ft.Divider(height=1, color=border_color()),
-            _search_list,
-        ], spacing=SP_MD, expand=True),
-        padding=SP_XL,
-        expand=_results_weight,
-        visible=False,
-    )
+    # ── 检索结果区（与检索表单同一张卡片内，检索完成后显示）──
+    results_section = ft.Column([
+        ft.Divider(height=1, color=border_color()),
+        ft.Text("检索结果", size=FS_XL, weight=FW_BOLD, color=text_primary()),
+        summary,
+        ft.Row([
+            search_select_all_cb,
+            search_select_count,
+            search_compare_btn,
+            ai_limit_dd,
+            ai_score_btn,
+            _ai_score_status,
+            save_to_library_btn,
+        ], alignment=ft.MainAxisAlignment.END, spacing=SP_SM),
+        ft.Divider(height=1, color=border_color()),
+        _search_list,
+    ], spacing=SP_MD, visible=False)
 
     def on_extract(e):
         desc = topic_desc_field.value.strip()
@@ -1430,7 +1424,7 @@ def build_search_page(ctx):
                     state.status_text = "未找到相关论文"
                     state.papers = []
                     state.scores = []
-                    results_area.visible = True
+                    results_section.visible = True
                     _search_list.controls.clear()
                     _search_list.update()
                     summary.value = _summary_text()
@@ -1439,7 +1433,7 @@ def build_search_page(ctx):
                     state.papers = _result["papers"]
                     state.scores = _result["scores"]
                     state.status_text = f"完成！共 {len(_result['scores'])} 篇"
-                    results_area.visible = True
+                    results_section.visible = True
                     save_to_library_btn.visible = True
                     ai_score_btn.visible = ctx.ai_service.is_available
                     ai_limit_dd.visible = ctx.ai_service.is_available
@@ -1471,8 +1465,8 @@ def build_search_page(ctx):
     # 初始化分区（恢复已有状态）
     refresh_all_zones()
 
-    # ── 页面布局：卡片化的检索表单 + 结果区 + 右侧详情侧边栏 ──
-    scrollable_form = card(
+    # ── 页面布局：检索表单 + 检索结果合并为一张卡片，整体可滚动 ──
+    search_card = card(
         ft.Column([
             ft.Text("PaperPilot", size=FS_HERO, weight=FW_BOLD, color=text_primary()),
             ft.Text("智能文献检索与筛选", size=FS_MD, color=text_secondary()),
@@ -1499,15 +1493,14 @@ def build_search_page(ctx):
             ft.Divider(height=1, color=border_color()),
             ft.Row([search_btn, progress_bar], spacing=SP_MD),
             status_text,
+            results_section,
         ], spacing=SP_MD, scroll=ft.ScrollMode.AUTO, expand=True),
         padding=SP_XL,
-        expand=_form_weight,
+        expand=True,
     )
 
     left_side = ft.Column([
-        scrollable_form,
-        ft.Container(height=SP_MD),
-        results_area,
+        search_card,
     ], spacing=0, expand=True)
 
     # ── 注册检索页回调，供 Agent [ACTION:xxx] 标记使用 ──
