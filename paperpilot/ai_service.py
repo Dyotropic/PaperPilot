@@ -1,4 +1,4 @@
-"""AI 服务层 — DeepSeek API 封装 + 论文精读。
+"""AI 服务层 — LLM 封装 + 论文精读。
 
 Deep Read 采用 RLM 分层阅读策略（借鉴 Feynman）：
     - < 8000 字符：直接全文注入
@@ -6,6 +6,7 @@ Deep Read 采用 RLM 分层阅读策略（借鉴 Feynman）：
     - > 60000 字符：切块分析后合成
 
 复用 downloader.py 的 PDF/HTML 获取能力，不重复造轮子。
+底层 LLM 调用统一经 llm_client 多模型抽象（PHASE3_PLAN 功能三）。
 """
 
 import hashlib
@@ -13,19 +14,13 @@ import json
 import logging
 import os
 import re
-import urllib.request
-import urllib.error
 import uuid
 from pathlib import Path
 
-from paperpilot.config import load_config
+from paperpilot.llm_client import get_client, get_task_model
 
 logger = logging.getLogger(__name__)
 
-_API_URL = "https://api.deepseek.com/v1/chat/completions"
-_DEFAULT_MODEL = "deepseek-v4-flash"
-_THINKING_DISABLED = {"type": "disabled"}
-_THINKING_ENABLED = {"type": "enabled"}
 _DEEP_READ_DIR = Path("outputs/deep_read")
 
 # ── RLM 参数 ──
@@ -112,7 +107,7 @@ def get_full_text_for_paper(paper: dict) -> tuple[str | None, str]:
 # ── AIService ──
 
 class AIService:
-    """DeepSeek API 封装，提供论文精读等 AI 能力。"""
+    """LLM 服务封装，提供论文精读等 AI 能力（底层经 llm_client 多模型）。"""
 
     def __init__(self, api_key: str | None = None, model: str | None = None):
         self._api_key = api_key
@@ -122,36 +117,22 @@ class AIService:
 
     @property
     def is_available(self) -> bool:
-        key, _ = self._resolve_key_model()
-        return bool(key)
-
-    def _resolve_key_model(self) -> tuple[str, str]:
-        key = self._api_key
-        model = self._model
-        if not key or not model:
-            cfg = load_config()
-            ds = cfg.get("deepseek", {})
-            if not key:
-                key = ds.get("api_key", "").strip()
-            if not model:
-                model = ds.get("model", "").strip() or _DEFAULT_MODEL
-        return key, model
+        client = get_client()
+        return bool(client and client.is_available)
 
     def _resolve_task_model(self, task: str) -> str:
-        """获取任务专用模型名，从 config deepseek.{task}_model 读取。
+        """获取任务专用模型名，从 config llm.{task}_model 读取。
 
         Args:
-            task: 任务名，如 "score"、"chat"、"deep_read"
+            task: 任务名，如 "score"、"chat"、"reasoning"
         Returns:
-            模型名，config 未配置时回退到默认模型
+            模型名，config 未配置时回退到主模型；未配置 LLM 返回空串
         """
-        cfg = load_config()
-        ds = cfg.get("deepseek", {})
-        task_model = ds.get(f"{task}_model", "").strip()
-        if task_model:
-            return task_model
-        _, default_model = self._resolve_key_model()
-        return default_model
+        return get_task_model(task)
+
+    def _get_client(self, task: str | None = None):
+        """获取任务对应的 LLM 客户端（未配置返回 None）。"""
+        return get_client(task)
 
     def _call_api(
         self,
@@ -160,18 +141,12 @@ class AIService:
         max_tokens: int = 2000,
         timeout: int = 120,
         model: str | None = None,
-        thinking: dict | None = None,
+        thinking: bool | None = None,
     ) -> str:
-        """通用 API 调用，含重试。返回 content 字符串。
-
-        Args:
-            model: 覆盖默认模型（None = 使用 config 配置的模型）
-            thinking: 覆盖 thinking 设置（None = v4 模型默认关 thinking）
-        """
-        content, _ = self._call_api_full(
+        """通用 LLM 调用。返回 content 字符串；失败返回空串。"""
+        return self._call_api_full(
             messages, temperature, max_tokens, timeout, model, thinking
-        )
-        return content
+        )[0]
 
     def _call_api_full(
         self,
@@ -180,63 +155,21 @@ class AIService:
         max_tokens: int = 2000,
         timeout: int = 120,
         model: str | None = None,
-        thinking: dict | None = None,
+        thinking: bool | None = None,
     ) -> tuple[str, str]:
-        """API 调用，返回 (content, reasoning_content) 元组。
+        """LLM 调用，返回 (content, reasoning) 元组。
 
-        reasoning_content 仅在 thinking=enabled 时由模型填充。
+        reasoning 仅 thinking=True 时由模型填充（DeepSeek reasoning_content
+        / Anthropic thinking block），无则空串。
         """
-        api_key, default_model = self._resolve_key_model()
-        if not api_key:
+        client = self._get_client()
+        if not client or not client.is_available:
             return "", ""
-
-        model = model or default_model
-
-        payload = {
-            "messages": messages,
-            "model": model,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "stream": False,
-        }
-        if thinking is not None:
-            payload["thinking"] = thinking
-        elif "v4" in model.lower():
-            payload["thinking"] = _THINKING_DISABLED
-
-        for attempt in (1, 2):
-            try:
-                req = urllib.request.Request(
-                    _API_URL,
-                    data=json.dumps(payload).encode("utf-8"),
-                    headers={
-                        "Content-Type": "application/json",
-                        "Authorization": f"Bearer {api_key}",
-                    },
-                )
-                with urllib.request.urlopen(req, timeout=timeout) as resp:
-                    raw = resp.read().decode("utf-8")
-                    body = json.loads(raw)
-                msg = body.get("choices", [{}])[0].get("message", {})
-                content = msg.get("content", "")
-                reasoning = msg.get("reasoning_content", "")
-                if not content and "error" in body:
-                    logger.warning(f"API returned error: {body['error']}")
-                return content, reasoning
-            except (urllib.error.URLError, urllib.error.HTTPError, OSError) as e:
-                if attempt == 1:
-                    logger.warning(
-                        f"API call failed (attempt 1, {type(e).__name__}): {e}, retrying..."
-                    )
-                    continue
-                logger.warning(
-                    f"API call failed (attempt 2, {type(e).__name__}): {e}"
-                )
-            except json.JSONDecodeError as e:
-                logger.warning(f"API response parse error: {e}")
-                break
-
-        return "", ""
+        result = client.chat(
+            messages, temperature=temperature, max_tokens=max_tokens,
+            timeout=timeout, model=model, thinking=thinking,
+        )
+        return result.content, result.reasoning
 
     def _call_api_stream(
         self,
@@ -245,58 +178,20 @@ class AIService:
         max_tokens: int = 2000,
         timeout: int = 120,
         model: str | None = None,
-        thinking: dict | None = None,
+        thinking: bool | None = None,
     ):
-        """流式调用 API，yield 每个 content delta 字符串（SSE 解析）。
+        """流式调用 LLM，yield 每个 content delta 字符串。
 
-        使用 requests 的 stream=True + iter_lines() 确保逐行读取，
-        避免 urllib 的响应缓冲导致一次性吐出所有内容。
+        未配置/失败时直接返回（不 yield）。
         """
-        import requests as _requests
-
-        api_key, default_model = self._resolve_key_model()
-        if not api_key:
+        client = self._get_client()
+        if not client or not client.is_available:
             return
-
-        model = model or default_model
-
-        payload = {
-            "messages": messages,
-            "model": model,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "stream": True,
-        }
-        if thinking is not None:
-            payload["thinking"] = thinking
-        elif "v4" in model.lower():
-            payload["thinking"] = _THINKING_DISABLED
-
-        resp = _requests.post(
-            _API_URL,
-            json=payload,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-            },
-            stream=True,
-            timeout=timeout,
-        )
-        resp.raise_for_status()
-
-        for line in resp.iter_lines(decode_unicode=True):
-            if not line or not line.startswith("data: "):
-                continue
-            data_str = line[6:]  # strip "data: " prefix
-            if data_str == "[DONE]":
-                break
-            try:
-                body = json.loads(data_str)
-                delta = body.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                if delta:
-                    yield delta
-            except (json.JSONDecodeError, KeyError, IndexError):
-                pass
+        for delta in client.chat_stream(
+            messages, temperature=temperature, max_tokens=max_tokens,
+            timeout=timeout, model=model, thinking=thinking,
+        ):
+            yield delta
 
     def _parse_json_response(self, content: str) -> dict | list:
         """从 LLM 回复中提取 JSON 块，失败返回空 dict。"""
@@ -390,7 +285,7 @@ class AIService:
             ]
 
             content = self._call_api(messages, temperature=0.3, max_tokens=600,
-                                     timeout=90, thinking=_THINKING_ENABLED)
+                                     timeout=90, thinking=True)
             if content:
                 notes_parts.append(f"## 片段 {i + 1}/{total_windows}\n\n{content}")
 
@@ -510,7 +405,7 @@ class AIService:
         ]
 
         content = self._call_api(messages, temperature=0.3, max_tokens=1500,
-                                 timeout=120, thinking=_THINKING_ENABLED)
+                                 timeout=120, thinking=True)
         result = self._parse_json_response(content)
 
         if not result:
@@ -864,43 +759,43 @@ class AIService:
 
         messages = cm.build_api_messages(sys_prompt, paper_catalog)
 
-        # 调用 API（支持双模型：pro 推理 → flash 输出）
+        # 调用 LLM（支持两步推理：reasoning_model 显式配置时，先深度推理再生成）
         reasoning_model = self._resolve_task_model("reasoning")
         chat_model = self._resolve_task_model("chat")
 
         if reasoning_model:
-            # 两步模式：pro 深度推理 → flash 生成回复
+            # 两步模式：reasoning 模型推理 → chat 模型生成回复
             logger.info(
                 f"chat: two-step mode — reasoning={reasoning_model}, output={chat_model}"
             )
-            # Step 1: pro 模型推理
+            # Step 1: reasoning_model 推理
             _, reasoning = self._call_api_full(
                 messages, temperature=0.6, max_tokens=2000,
-                timeout=120, thinking=_THINKING_ENABLED,
+                timeout=120, thinking=True,
                 model=reasoning_model,
             )
             if reasoning:
-                # Step 2: flash 基于推理结果生成回复
+                # Step 2: chat_model 基于推理结果生成回复
                 messages.append({
                     "role": "system",
                     "content": f"[内部推理结果，基于此生成回复]\n{reasoning}"
                 })
                 reply = self._call_api(
                     messages, temperature=0.6, max_tokens=3000,
-                    timeout=120, thinking=_THINKING_DISABLED,
+                    timeout=120, thinking=False,
                     model=chat_model,
                 )
             else:
-                # 推理失败，回退到单步 flash
+                # 推理失败，回退到单步 chat 模型
                 logger.warning("chat: reasoning returned empty, falling back to single-step")
                 reply = self._call_api(
                     messages, temperature=0.6, max_tokens=3000,
-                    timeout=120, thinking=_THINKING_DISABLED,
+                    timeout=120, thinking=False,
                     model=chat_model,
                 )
         else:
             # 单步模式：直接调用 chat_model
-            thinking = _THINKING_ENABLED if thinking_enabled else None
+            thinking = True if thinking_enabled else None
             reply = self._call_api(messages, temperature=0.6, max_tokens=3000,
                                    timeout=120, thinking=thinking,
                                    model=chat_model)
@@ -1000,10 +895,10 @@ class AIService:
             chat_model = self._resolve_task_model("chat")
 
             if reasoning_model:
-                # 两步模式：pro 推理（同步）→ flash 流式输出
+                # 两步模式：reasoning_model 推理（同步）→ chat_model 流式输出
                 _, reasoning = self._call_api_full(
                     messages, temperature=0.6, max_tokens=2000,
-                    timeout=120, thinking=_THINKING_ENABLED,
+                    timeout=120, thinking=True,
                     model=reasoning_model,
                 )
                 if reasoning:
@@ -1011,9 +906,9 @@ class AIService:
                         "role": "system",
                         "content": f"[内部推理结果，基于此生成回复]\n{reasoning}"
                     })
-                thinking = _THINKING_DISABLED
+                thinking = False
             else:
-                thinking = _THINKING_ENABLED if thinking_enabled else None
+                thinking = True if thinking_enabled else None
 
             for delta in self._call_api_stream(messages, temperature=0.6,
                                                 max_tokens=3000, timeout=120,

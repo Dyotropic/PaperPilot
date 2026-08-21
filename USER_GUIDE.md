@@ -11,6 +11,8 @@
 1. [项目简介](#1-项目简介)
 2. [准备工作](#2-准备工作)
 3. [安装步骤](#3-安装步骤)
+   - [3.4 配置 AI 模型服务（API Key）](#34-配置-ai-模型服务api-key)
+   - [3.5 高级选项字段说明](#35-高级选项字段说明)
 4. [首次启动](#4-首次启动)
 5. [功能详解](#5-功能详解)
    - [5.1 检索论文](#51-检索论文)
@@ -132,38 +134,64 @@ pip install -r requirements.txt
 > pip install curl_cffi
 > ```
 
-### 3.4 创建配置文件
+### 3.4 配置 AI 模型服务（API Key）
 
-项目目录下有一个配置模板文件 `config.example.yaml`，你需要复制它并填入你自己的配置。
+PaperPilot 的所有 AI 功能（关键词提取、中英翻译、AI 精读、打分、StudyCopilot 对话）都依赖一个 **LLM 服务商**。你可以在「设置」页的「AI 模型服务」卡片中完成全部配置，无需手改文件；以下也给出 config.yaml 对应的写法作为参照。
 
-```bash
-copy config.example.yaml config.yaml
-```
-
-然后用记事本（或其他文本编辑器）打开 `config.yaml`，修改以下内容：
+**config.yaml 对应结构（新增 `llm:` 节）：**
 
 ```yaml
-deepseek:
-  api_key: sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx  # 替换为你的 DeepSeek API Key
-  model: deepseek-v4-flash                       # 模型选择，默认即可
-
-data_sources:
-  arxiv: true      # 是否从 arXiv 检索（需要网络）
-  openalex: true   # 是否从 OpenAlex 检索（需要网络，但免费免 Key）
-
-ui:
-  theme: cyan      # 默认主题色（可选 mint/ocean/sand/dusk/rose/cyan）
-  dark_mode: true  # 是否默认夜间模式
+llm:
+  provider: deepseek       # 服务商名，见下表
+  api_key: sk-xxxxxxxxxxxx  # 该服务商的 API Key（Ollama 可留空）
+  base_url: ""              # 留空用内置默认地址，一般不用填
+  model: deepseek-v4-flash  # 主模型
+  score_model: ""           # 高级：精排打分专用模型，可留空
+  chat_model: ""            # 高级：对话专用模型，可留空
+  reasoning_model: ""       # 高级：两步推理模型，留空=关闭两步推理
 ```
 
-> **如何获取 DeepSeek API Key？**
-> 1. 打开 https://platform.deepseek.com/
-> 2. 注册并登录
-> 3. 进入 **API Keys** 页面 → 点击 **创建 API Key**
-> 4. 复制生成的 Key（以 `sk-` 开头），粘贴到 `config.yaml` 的 `api_key` 位置
-> 5. DeepSeek 新用户通常有免费额度，充值 10 元左右即可长期使用
+> 旧版本只有 `deepseek:` 配置节的，可以继续使用：程序会自动把旧的 Key/Model 读进来，无需迁移。
 
-如果你暂时没有 API Key，把 `api_key` 留空（不建议！）也可以使用基本功能（关键词提取会回退到本地算法，但 AI 精读和对话助手不可用）。
+**推荐：直接在界面上配置**。打开软件 →「设置」页 →「AI 模型服务」卡片：
+
+1. **Provider（服务商）**：下拉选择你要用哪一家（共 7 家，见下表）。
+2. **模型**：下拉选择该家的模型；列表里没有的可选「自定义…」并手动输入模型名。
+3. **API Key**：粘贴对应服务商的密钥（见下表如何获取）。密钥只在本地 `config.yaml` 存储，不会上传。
+4. 点 **「测试」** 验证连通性 → 点 **「保存」** 生效（下次 AI 调用时应用）。
+
+> 切换 Provider 后，Key 和模型都会重置为未保存状态，需要重新填写并保存。
+
+**各服务商 API Key 获取方式 + 内置模型：**
+
+| Provider | 注册/获取 Key | Key 特点 | 内置默认模型 |
+|----------|---------------|----------|--------------|
+| **DeepSeek** | https://platform.deepseek.com → 注册 → 「API Keys」→ 创建 | `sk-` 开头 | deepseek-v4-flash / deepseek-v4-pro |
+| **OpenAI** | https://platform.openai.com → 「API keys」→ 创建 | `sk-` 开头 | gpt-5.6-sol、gpt-5.6-terra、gpt-5.6-luna、gpt-5.5 |
+| **Anthropic(Claude)** | https://console.anthropic.com →「API Keys」→ 创建 | `sk-ant-` 开头 | fable-5、opus-5、opus-4.8、opus-4.7、opus-4.6 |
+| **智谱 GLM** | https://open.bigmodel.cn → 注册 →「API 密钥」→ 新建 | 长字符串 | glm-5.3、glm-5.2 |
+| **Kimi(Moonshot)** | https://platform.moonshot.cn → 注册 →「API 密钥」 | `sk-` 开头 | kimi-k3 |
+| **通义千问(Qwen)** | https://dashscope.console.aliyun.com →「API-KEY」 | `sk-` 开头 | qwen-plus、qwen-turbo、qwen-max |
+| **Ollama（本地）** | 本地安装 Ollama 后**无需 Key，留空即可** | 无需 | qwen2.5:7b（可自选本地已拉取的模型） |
+
+> 各家模型名随时可能变化，「自定义…」可直接填任何官方最新模型名，不必受内置列表限制。可用「测试」验证模型名是否正确。
+
+---
+
+如果你暂时没有 API Key（或 key 留空），软件仍可基本离线运行：关键词提取会回退到本地 jieba 算法，但 **AI 精读、打分、对话、中英翻译不可用**。
+
+### 3.5 高级选项字段说明（「高级选项 ▾」内）
+
+「AI 模型服务」卡片底部可展开「高级选项」，以下字段**都可不填**（留空即用主模型 / 用内置默认地址）。填错不影响运行，顶多退回默认。
+
+| 字段 | 含义 | 怎么填 |
+|------|------|--------|
+| **Base URL（可选）** | 自定义 API 服务地址。默认留空用各家内置官方地址；若你用的是第三方中转站/代理/自建网关，填它的完整地址（以 `/v1` 结尾） | 例如用某中转服务的 kimi 接口，就填 `https://你的地址.com/v1`。**普通用户留空即可** |
+| **精排打分模型（score_model）** | 仅「AI 精排打分」用的模型，与主模型分开 | 想省 token 可填更便宜的模型（如 `deepseek-v4-flash`）；想更高质可填旗舰。**留空 = 用主模型** |
+| **对话模型（chat_model）** | 仅「StudyCopilot 对话」用的模型 | 同上，可单独指定。**留空 = 用主模型** |
+| **推理模型（reasoning_model）** | 开启「两步推理」：先让该模型深度推理，再用对话模型生成回复 | ⚠️ **非空才启用两步推理**，会让每次对话多调一次 API（更慢、更费 token）。**默认留空 = 单步直答（推荐）**；只有你需要更强逻辑链时才填，且需先用「测试」确认该模型支持推理输出 |
+
+> 关键词提取、中英翻译始终走主模型，不受这三项影响。
 
 ---
 
@@ -361,19 +389,18 @@ python app.py
 
 ### 5.6 设置页面
 
-点击顶部 **"设置"** 标签进入设置页面。
+点击顶部 **"设置"** 标签进入设置页面。主要分区如下：
 
 | 设置项 | 说明 |
 |--------|------|
-| **DeepSeek API Key** | 用于关键词提取、AI 精读、对话助手。以 `sk-` 开头 |
-| **模型选择** | DeepSeek V4 Flash（推荐）/ V3（7月将下线） |
+| **AI 模型服务** | 选择 Provider、填 API Key、选/输模型名，可「测试」「保存」；底部「高级选项」含 Base URL、任务专用模型。**各家 Key 怎么拿 + 高级字段填法详见 §3.4 / §3.5** |
 | **数据源** | 开关 arXiv / OpenAlex 检索 |
 | **检索数量** | 每个来源的最大检索结果数（100–500 篇，默认 250） |
 | **显示/精排数量** | 最终显示论文数（10–200）和送入精排的候选数（10–200） |
 | **配色主题** | 6 种主题色：薄荷绿 / 海蓝 / 暖沙 / 暮紫 / 玫瑰 / 青碧 |
 | **夜间模式** | 切换深色/浅色界面 |
 
-所有设置自动保存到 `config.yaml`，下次启动自动恢复。
+所有设置自动保存到 `config.yaml`，下次启动自动恢复。其中「AI 模型服务」的配置流程、各家 Key 获取方式及高级字段含义，详见本章 §3.4「配置 AI 模型服务（API Key）」与 §3.5「高级选项字段说明」。
 
 ---
 

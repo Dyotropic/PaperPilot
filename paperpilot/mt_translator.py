@@ -1,30 +1,11 @@
 """中文关键词 → 英文术语翻译模块。
 
-通过 DeepSeek API 进行学术关键词翻译，替代原有的 Hunyuan-MT 本地模型。
-API Key 从 config.yaml 的 deepseek.api_key 读取，支持用户自有 Key。
+通过 LLM（llm_client 多模型抽象）进行学术关键词翻译。
 """
 
-import json
 import re
-import urllib.request
-import urllib.error
 from paperpilot.config import load_config
-
-_API_URL = "https://api.deepseek.com/v1/chat/completions"
-_DEFAULT_MODEL = "deepseek-v4-flash"
-
-# V4 Flash/V4 Pro 默认开启推理模式，翻译等简单任务需要显式禁用 thinking
-_THINKING_DISABLED = {"type": "disabled"}
-
-
-def _get_model():
-    """从 config.yaml 读取用户选择的模型，未配置时用 V4 Flash。"""
-    model = load_config().get("deepseek", {}).get("model", "").strip()
-    return model or _DEFAULT_MODEL
-
-
-def _is_v4_model(model: str) -> bool:
-    return "v4" in model.lower()
+from paperpilot.llm_client import get_client
 
 _SYSTEM_PROMPT = (
     "You are a scientific translator. Translate Chinese academic keywords into "
@@ -77,35 +58,18 @@ def translate_terms(chinese_terms: list[str]) -> list[str]:
         f"{numbered}"
     )
 
-    payload = {
-        "messages": [
+    client = get_client()
+    if not client or not client.is_available:
+        return results
+
+    content = client.chat(
+        [
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": user_msg},
         ],
-        "temperature": 0.1,
-        "max_tokens": len(to_translate) * 50,
-        "stream": False,
-    }
-    model = _get_model()
-    payload["model"] = model
-    if _is_v4_model(model):
-        payload["thinking"] = _THINKING_DISABLED
-
-    try:
-        req = urllib.request.Request(
-            _API_URL,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-            },
-        )
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError):
-        return results
-
-    content = body.get("choices", [{}])[0].get("message", {}).get("content", "")
+        temperature=0.1, max_tokens=len(to_translate) * 50,
+        timeout=30, thinking=False,
+    ).content
     translations = _parse_batch_response(content, len(to_translate))
 
     for j, translation in enumerate(translations):
@@ -172,11 +136,6 @@ def translate_all_terms(*term_lists: list[str]) -> list[list[str]]:
     if not all_terms:
         return results
 
-    config = load_config()
-    api_key = config.get("deepseek", {}).get("api_key", "").strip()
-    if not api_key:
-        return results
-
     numbered = "\n".join(f"{j+1}. {t}" for j, t in enumerate(all_terms))
     user_msg = (
         "Translate these Chinese academic keywords to English. "
@@ -184,35 +143,18 @@ def translate_all_terms(*term_lists: list[str]) -> list[list[str]]:
         f"{numbered}"
     )
 
-    payload = {
-        "messages": [
+    client = get_client()
+    if not client or not client.is_available:
+        return results
+
+    content = client.chat(
+        [
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": user_msg},
         ],
-        "temperature": 0.1,
-        "max_tokens": len(all_terms) * 50,
-        "stream": False,
-    }
-    model = _get_model()
-    payload["model"] = model
-    if _is_v4_model(model):
-        payload["thinking"] = _THINKING_DISABLED
-
-    try:
-        req = urllib.request.Request(
-            _API_URL,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-            },
-        )
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError):
-        return results
-
-    content = body.get("choices", [{}])[0].get("message", {}).get("content", "")
+        temperature=0.1, max_tokens=len(all_terms) * 50,
+        timeout=30, thinking=False,
+    ).content
     translations = _parse_batch_response(content, len(all_terms))
 
     for j, translation in enumerate(translations):

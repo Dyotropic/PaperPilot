@@ -1,4 +1,6 @@
 """设置页（index 2）。"""
+import threading
+
 import flet as ft
 
 from pages.context import (
@@ -10,9 +12,223 @@ from pages.context import (
     seed_color, app_bg, surface, surface_hi, accent_container,
     subtle_shadow, card,
 )
+from paperpilot.llm_client import PROVIDERS, MODEL_CATALOG
 
 
-# ── 设置持久化 ──
+# ── 多模型 LLM 配置 UI ──
+
+_CUSTOM = "--custom--"  # 模型下拉"自定义…"哨兵
+
+
+def _model_options_for(provider: str) -> list:
+    """某 provider 的内置模型下拉选项（+自定义）。"""
+    opts = [ft.dropdown.Option(mid, label) for mid, label in MODEL_CATALOG.get(provider, [])]
+    opts.append(ft.dropdown.Option(_CUSTOM, "自定义…"))
+    return opts
+
+
+def _build_llm_service_card(ctx):
+    """构建设置页「AI 模型服务」卡片：Provider/Key/Model/高级(任务模型)/测试。"""
+    from paperpilot.config import load_config, save_config as do_save
+    from paperpilot.llm_client import _load_llm_cfg
+
+    cur = _load_llm_cfg()
+    cur_provider = cur.get("provider", "deepseek") or "deepseek"
+    cur_model = cur.get("model", "") or PROVIDERS[cur_provider]["default_model"]
+
+    # ── 控件 ──
+    provider_dd = ft.Dropdown(
+        options=[ft.dropdown.Option(k, v["label"])
+                 for k, v in PROVIDERS.items()],
+        value=cur_provider, expand=True,
+    )
+    model_dd = ft.Dropdown(
+        options=_model_options_for(cur_provider),
+        value=cur_model, expand=True,
+    )
+    custom_model_field = ft.TextField(
+        label="自定义模型 ID", hint_text="如 deepseek-v4-lab / 其他模型名",
+        value=cur_model if cur_model not in dict(MODEL_CATALOG.get(cur_provider, [])) else "",
+        expand=True, visible=False,
+    )
+    api_key_field = ft.TextField(
+        label="API Key",
+        hint_text=PROVIDERS[cur_provider]["key_hint"],
+        value=cur.get("api_key", "") or "",
+        password=True, can_reveal_password=True, expand=True,
+    )
+    base_url_field = ft.TextField(
+        label="Base URL（可选）", hint_text="留空用内置默认地址",
+        value=cur.get("base_url", "") or "", expand=True,
+    )
+    score_model_field = ft.TextField(
+        label="精排打分模型（可选）", hint_text="留空用主模型",
+        value=cur.get("score_model", "") or "", expand=True,
+    )
+    chat_model_field = ft.TextField(
+        label="对话模型（可选）", hint_text="留空用主模型",
+        value=cur.get("chat_model", "") or "", expand=True,
+    )
+    reasoning_model_field = ft.TextField(
+        label="推理模型（两步推理，可选）", hint_text="留空=单步直答；填写才启用先推理再生成",
+        value=cur.get("reasoning_model", "") or "", expand=True,
+    )
+    key_status = ft.Text("", size=13)
+    test_status = ft.Text("", size=13)
+    save_status = ft.Text("", size=13)
+
+    # 已配置提示
+    if cur.get("api_key") or cur_provider == "ollama":
+        provider_label = PROVIDERS[cur_provider]["label"]
+        key_status.value = f"已配置：{provider_label}"
+        key_status.color = ft.Colors.GREEN
+    else:
+        key_status.value = "未配置 API Key，AI 精读/对话/关键词提取不可用"
+        key_status.color = ft.Colors.ORANGE
+
+    def on_change_provider(e):
+        new_p = provider_dd.value or "deepseek"
+        model_dd.options = _model_options_for(new_p)
+        model_dd.value = PROVIDERS[new_p]["default_model"]
+        api_key_field.hint_text = PROVIDERS[new_p]["key_hint"]
+        custom_model_field.visible = False
+        custom_model_field.value = ""
+        # Provider 切换后重置为未保存态
+        api_key_field.value = ""
+        model_dd.update(); api_key_field.update(); custom_model_field.update()
+
+    provider_dd.on_change = on_change_provider
+
+    def on_change_model(e):
+        custom_model_field.visible = (model_dd.value == _CUSTOM)
+        custom_model_field.update()
+
+    model_dd.on_change = on_change_model
+
+    def on_test(e):
+        test_status.value = "正在测试连通性..."
+        test_status.color = ft.Colors.OUTLINE
+        test_status.update()
+        save_status.value = ""; save_status.update()
+
+        # 用当前控件值（未保存）构造配置测试
+        p = provider_dd.value or "deepseek"
+        key = (api_key_field.value or "").strip()
+        model = custom_model_field.value.strip() if model_dd.value == _CUSTOM \
+            else (model_dd.value or "").strip()
+
+        def _run():
+            from paperpilot.llm_client import OpenAICompatClient, AnthropicClient
+            base = (base_url_field.value or "").strip()
+            base_url = base or PROVIDERS[p]["base_url"]
+            if p == "anthropic":
+                c = AnthropicClient(api_key=key, model=model or PROVIDERS[p]["default_model"],
+                                    base_url=base)
+            else:
+                c = OpenAICompatClient(provider=p, base_url=base_url,
+                                       api_key=key, model=model or PROVIDERS[p]["default_model"])
+            ok, msg = c.test_connection()
+            def _show():
+                test_status.value = msg
+                test_status.color = ft.Colors.GREEN if ok else ft.Colors.ERROR
+                test_status.update()
+            ctx.page.run_task(_show)
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _collect_model(e=None, field=None):
+        """保存时解析模型：自定义优先，否则下拉值。"""
+        if model_dd.value == _CUSTOM:
+            v = custom_model_field.value.strip()
+            if v:
+                return v
+            return ""
+        return model_dd.value or ""
+
+    def on_save(e):
+        from paperpilot.llm_client import PROVIDERS as _P
+        p = provider_dd.value or "deepseek"
+        model = _collect_model()
+        if not model:
+            save_status.value = "请选择或输入一个模型"
+            save_status.color = ft.Colors.ERROR
+            save_status.update()
+            return
+        updates = {
+            "llm": {
+                "provider": p,
+                "api_key": (api_key_field.value or "").strip(),
+                "base_url": (base_url_field.value or "").strip(),
+                "model": model,
+                "score_model": (score_model_field.value or "").strip(),
+                "chat_model": (chat_model_field.value or "").strip(),
+                "reasoning_model": (reasoning_model_field.value or "").strip(),
+            }
+        }
+        do_save(updates)
+        label = _P[p]["label"]
+        save_status.value = f"已保存：{label} / {model}，下次 AI 调用生效"
+        save_status.color = ft.Colors.GREEN
+        key_status.value = (f"已配置：{label} / {model}"
+                            if (api_key_field.value or p == "ollama")
+                            else "未配置 API Key")
+        if not (api_key_field.value or p == "ollama"):
+            key_status.color = ft.Colors.ORANGE
+        else:
+            key_status.color = ft.Colors.GREEN
+        save_status.update()
+        key_status.update()
+
+    # 高级选项折叠
+    advanced_wrap = ft.Container(
+        content=ft.Column([
+            base_url_field,
+            score_model_field,
+            chat_model_field,
+            reasoning_model_field,
+            ft.Text(
+                "「推理模型」非空才启用两步推理（先深度推理再生成回复）。"
+                "多数模型单步即可，填了会增加一次 API 调用。",
+                size=FS_SM, color=text_secondary(),
+            ),
+        ], spacing=SP_MD, tight=True),
+        visible=False, padding=ft.padding.Padding(top=SP_SM),
+    )
+
+    advanced_toggle = ft.TextButton(
+        content=ft.Text("高级选项 ▾", size=FS_MD), on_click=lambda e: (
+            advanced_wrap.__setattr__("visible", not advanced_wrap.visible)
+            or advanced_wrap.update()
+        ),
+    )
+
+    return card(
+        ft.Column([
+            ft.Text("AI 模型服务", size=FS_LG, weight=FW_SEMIBOLD, color=text_primary()),
+            ft.Text("选择 AI 服务商并配置密钥；支持多家主流模型", size=FS_SM, color=text_secondary()),
+            ft.Divider(height=1, color=border_color()),
+            key_status,
+            ft.Row([
+                provider_dd,
+                model_dd,
+            ], spacing=SP_SM),
+            custom_model_field,
+            ft.Row([
+                api_key_field,
+                ft.FilledTonalButton(
+                    content=ft.Text("测试"), on_click=on_test,
+                ),
+                ft.FilledButton(
+                    content=ft.Text("保存"), icon=ft.Icons.SAVE, on_click=on_save,
+                ),
+            ], spacing=SP_SM),
+            test_status,
+            save_status,
+            advanced_toggle,
+            advanced_wrap,
+        ], spacing=SP_MD, tight=True),
+        padding=SP_XL,
+    )
 
 def _save_setting(key: str, value):
     """保存单个搜索/数据源设置到 config.yaml。"""
@@ -41,85 +257,8 @@ ce_candidates_slider = ft.Slider(min=10, max=200, value=100, divisions=19,
 ce_candidates_slider.on_change = lambda e: _on_slider_saved(e, "search.ce_candidates")
 
 
-def _make_model_selector():
-    """创建模型选择下拉框，读取/写入 config.yaml。"""
-    from paperpilot.config import load_config as _lc, save_config as _sc
-
-    current = _lc().get("deepseek", {}).get("model", "deepseek-v4-flash")
-
-    model_options = [
-        ft.dropdown.Option("deepseek-v4-flash", "DeepSeek V4 Flash"),
-        ft.dropdown.Option("deepseek-chat", "DeepSeek V3 (chat) - 7月下线"),
-    ]
-
-    model_dd = ft.Dropdown(
-        options=model_options,
-        value=current if current in ("deepseek-v4-flash", "deepseek-chat") else "deepseek-v4-flash",
-        expand=True,
-    )
-
-    model_status = ft.Text("", size=13)
-
-    def on_change_model(e):
-        _sc(updates={"deepseek": {"model": e.control.value}})
-        model_status.value = f"已切换至 {e.control.value}，下次搜索生效"
-        model_status.color = ft.Colors.GREEN
-        model_status.update()
-
-    model_dd.on_change = on_change_model
-
-    return ft.Column([
-        ft.Row([model_dd], spacing=8),
-        model_status,
-    ], spacing=4)
-
-
 def build_settings_page(ctx):
     from paperpilot.config import load_config, save_config as do_save
-
-    current_config = load_config()
-    current_key = current_config.get("deepseek", {}).get("api_key", "")
-
-    def mask_key(key: str) -> str:
-        if not key:
-            return ""
-        if len(key) <= 8:
-            return key[:3] + "****" + key[-1:]
-        return key[:3] + "****" + key[-4:]
-
-    key_status = ft.Text("", size=13)
-    if current_key:
-        key_status.value = f"已配置: {mask_key(current_key)}"
-        key_status.color = ft.Colors.GREEN
-    else:
-        key_status.value = "未配置 API Key，关键词提取和翻译功能不可用"
-        key_status.color = ft.Colors.ORANGE
-
-    api_key_field = ft.TextField(
-        label="DeepSeek API Key",
-        hint_text="sk-...",
-        value=current_key,
-        password=True,
-        can_reveal_password=True,
-        expand=True,
-    )
-
-    save_status = ft.Text("", size=13)
-
-    def on_save_key(e):
-        new_key = api_key_field.value.strip()
-        if not new_key:
-            save_status.value = "API Key 不能为空"
-            save_status.color = ft.Colors.ERROR
-            save_status.update()
-            return
-        do_save(updates={"deepseek": {"api_key": new_key}})
-        save_status.value = "API Key 已保存，下次搜索生效"
-        save_status.color = ft.Colors.GREEN
-        save_status.update()
-        key_status.value = f"已配置: {mask_key(new_key)}"
-        key_status.color = ft.Colors.GREEN
-        key_status.update()
 
     # ── 主题切换 ──
     theme_buttons: dict[str, ft.Container] = {}
@@ -194,21 +333,7 @@ def build_settings_page(ctx):
         ], alignment=ft.MainAxisAlignment.START),
         ft.Text("配置 PaperPilot 的 AI 服务、数据源与外观", size=FS_MD, color=text_secondary()),
         ft.Container(height=SP_SM),
-        _section(
-            "DeepSeek API", "用于关键词提取和中英翻译，密钥仅存储在本地 config.yaml",
-            key_status,
-            ft.Row([
-                api_key_field,
-                ft.FilledTonalButton(
-                    content=ft.Text("保存"), icon=ft.Icons.SAVE, on_click=on_save_key,
-                ),
-            ], spacing=SP_SM),
-            save_status,
-        ),
-        _section(
-            "模型", "选择 DeepSeek API 模型，7月后 V3 将下线",
-            _make_model_selector(),
-        ),
+        _build_llm_service_card(ctx),
         _section(
             "数据源", "选择从哪些来源获取论文",
             arxiv_switch,
