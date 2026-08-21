@@ -143,9 +143,11 @@ copy config.example.yaml config.yaml
 然后用记事本（或其他文本编辑器）打开 `config.yaml`，修改以下内容：
 
 ```yaml
-deepseek:
-  api_key: sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx  # 替换为你的 DeepSeek API Key
-  model: deepseek-v4-flash                       # 模型选择，默认即可
+llm:
+  provider: deepseek       # deepseek/openai/anthropic/glm/kimi/qwen/ollama
+  api_key: sk-xxxxxxxxxxxx  # 对应 provider 的 API Key
+  model: deepseek-v4-flash  # 主模型
+  # score_model / chat_model / reasoning_model 可留空用主模型
 
 data_sources:
   arxiv: true      # 是否从 arXiv 检索（需要网络）
@@ -155,6 +157,8 @@ ui:
   theme: cyan      # 默认主题色（可选 mint/ocean/sand/dusk/rose/cyan）
   dark_mode: true  # 是否默认夜间模式
 ```
+
+> 也可以直接在软件「设置」页的「AI 模型服务」卡片中配置，无需手动编辑文件。
 
 > **如何获取 DeepSeek API Key？**
 > 1. 打开 https://platform.deepseek.com/
@@ -365,8 +369,7 @@ python app.py
 
 | 设置项 | 说明 |
 |--------|------|
-| **DeepSeek API Key** | 用于关键词提取、AI 精读、对话助手。以 `sk-` 开头 |
-| **模型选择** | DeepSeek V4 Flash（推荐）/ V3（7月将下线） |
+| **AI 模型服务** | 选择 Provider（DeepSeek / OpenAI / Anthropic / GLM / Kimi / 通义 / Ollama），填入对应的 API Key，选择或输入模型名，可测试连通性；高级选项可配置 Base URL、精排/对话/推理专用模型 |
 | **数据源** | 开关 arXiv / OpenAlex 检索 |
 | **检索数量** | 每个来源的最大检索结果数（100–500 篇，默认 250） |
 | **显示/精排数量** | 最终显示论文数（10–200）和送入精排的候选数（10–200） |

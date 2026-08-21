@@ -9,6 +9,7 @@
 ## 核心功能
 
 - **智能检索**：AI 自动提取课题核心技术术语，支持 arXiv + OpenAlex 双源并行检索，Cross-Encoder 语义模型精排
+- **多模型 AI 服务**：统一 LLM 抽象层，支持 DeepSeek / OpenAI / Anthropic(Claude) / GLM / Kimi / 通义千问 / Ollama(本地) 等多服务商，设置页一键切换 Provider、Key 与模型（含各家最新旗舰如 GPT-5.6 系列、Opus 5、GLM-5 系列、Kimi K3 等）
 - **AI 精读**：基于 RLM 三层阅读策略，对论文全文进行结构化分析（核心贡献 / 研究方法 / 关键证据 / 创新亮点 / 局限不足 / 三维评分）
 - **AI 对话助手（StudyCopilot）**：课题上下文感知的学术对话助手，支持 Markdown 富文本渲染、自动检测论文引用、多篇对比分析、Agent 主动执行操作，对话历史自动持久化
 - **文献管理**：课题/论文 CRUD、阅读状态追踪、本地 PDF 导入（自动提取标题/作者/摘要）、回收站、BibTeX/CSV 导出
@@ -28,6 +29,6 @@ copy config.example.yaml config.yaml   # 编辑填入 DeepSeek API Key
 python app.py
 ```
 
-**主要依赖**：Flet、SQLAlchemy、sentence-transformers、KeyBERT、arxiv、PyMuPDF、pywebview、jieba、PyYAML
+**主要依赖**：Flet、SQLAlchemy、sentence-transformers、KeyBERT、arxiv、PyMuPDF、pywebview、jieba、PyYAML、openai、anthropic
 
 详细使用指南见 [USER_GUIDE.md](USER_GUIDE.md) 或项目文档。
