@@ -261,6 +261,7 @@ class AppContext:
         self.ai_service = None
         self.build_nav = None
         self.top_nav_ref = None
+        self.switch_page = None  # app.py 注入 page_switcher；调用方需判 None
 
         # 检索页注册给 Agent 的回调 + 多选状态
         self.search_actions: dict = {}
