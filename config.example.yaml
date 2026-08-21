@@ -1,6 +1,15 @@
-deepseek:
-  api_key: sk-your-key-here
-  model: deepseek-v4-flash
+# ── LLM 模型服务（多模型，功能三）──
+# provider 可选：deepseek / openai / anthropic / glm / kimi / qwen / ollama
+# 旧版 deepseek: 配置节仍兼容：未设置 llm.provider 时自动回退到 old deepseek 的 key/model
+llm:
+  provider: deepseek        # 默认 DeepSeek
+  api_key: "sk-your-key-here"   # 对应 provider 的 API Key（ollama 本地可留空）
+  base_url: ""              # 留空用内置默认地址；第三方兼容镜像可在此覆盖
+  model: deepseek-v4-flash  # 主模型
+  # 任务级模型覆盖（留空 = 用主 model）
+  score_model: ""           # AI 精排打分专用
+  chat_model: ""            # 对话输出专用
+  reasoning_model: ""       # 非空才启用"两步推理"（先深度推理再生成），多数模型无需
 embedding:
   local_model: paraphrase-multilingual-MiniLM-L12-v2
   cache_dir: ./cache/embedding
