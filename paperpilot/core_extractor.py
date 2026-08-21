@@ -10,27 +10,8 @@
 """
 
 import json
-import urllib.request
-import urllib.error
 from paperpilot.config import load_config
-
-# DeepSeek API endpoint (OpenAI-compatible)
-_API_URL = "https://api.deepseek.com/v1/chat/completions"
-_DEFAULT_MODEL = "deepseek-v4-flash"
-
-# V4 Flash/V4 Pro 默认开启推理模式，会消耗 reasoning tokens 导致无实际输出
-# 必须显式禁用 thinking 才能用于关键词提取等简单任务
-_THINKING_DISABLED = {"type": "disabled"}
-
-
-def _get_model():
-    """从 config.yaml 读取用户选择的模型，未配置时用 V4 Flash。"""
-    model = load_config().get("deepseek", {}).get("model", "").strip()
-    return model or _DEFAULT_MODEL
-
-
-def _is_v4_model(model: str) -> bool:
-    return "v4" in model.lower()
+from paperpilot.llm_client import get_client
 
 _SYSTEM_PROMPT = (
     "你是一个科研关键词提取专家。你的任务是从科研课题标题中提取1-3个最核心、"
@@ -68,35 +49,17 @@ def extract_core_keywords(topic: str) -> list[str]:
     if not api_key:
         return []
 
-    payload = {
-        "messages": [
+    client = get_client()
+    if not client or not client.is_available:
+        return []
+
+    content = client.chat(
+        [
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": topic},
         ],
-        "temperature": 0.3,
-        "max_tokens": 30,
-        "stream": False,
-    }
-    model = _get_model()
-    payload["model"] = model
-    if _is_v4_model(model):
-        payload["thinking"] = _THINKING_DISABLED
-
-    try:
-        req = urllib.request.Request(
-            _API_URL,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-            },
-        )
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError):
-        return []
-
-    content = body.get("choices", [{}])[0].get("message", {}).get("content", "")
+        temperature=0.3, max_tokens=30, timeout=15, thinking=False,
+    ).content
     return _parse_response(content, max_results=3)
 
 
@@ -137,35 +100,17 @@ def extract_regular_keywords(topic: str) -> list[str]:
     if not api_key:
         return []
 
-    payload = {
-        "messages": [
+    client = get_client()
+    if not client or not client.is_available:
+        return []
+
+    content = client.chat(
+        [
             {"role": "system", "content": _REGULAR_SYSTEM_PROMPT},
             {"role": "user", "content": topic},
         ],
-        "temperature": 0.3,
-        "max_tokens": 80,
-        "stream": False,
-    }
-    model = _get_model()
-    payload["model"] = model
-    if _is_v4_model(model):
-        payload["thinking"] = _THINKING_DISABLED
-
-    try:
-        req = urllib.request.Request(
-            _API_URL,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-            },
-        )
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError):
-        return []
-
-    content = body.get("choices", [{}])[0].get("message", {}).get("content", "")
+        temperature=0.3, max_tokens=80, timeout=15, thinking=False,
+    ).content
     return _parse_response(content, max_results=8)
 
 
