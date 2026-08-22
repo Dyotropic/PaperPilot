@@ -17,6 +17,8 @@ data_sources:
   arxiv: false
   openalex: true
   local_pdf: true
+  # Europe PMC：生物医学+最新预印本，免 key 免配置；默认关，开启可降低漏检
+  europepmc: false
 search:
   max_results: 100
   top_k: 20
