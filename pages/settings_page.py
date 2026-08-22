@@ -242,6 +242,8 @@ arxiv_switch = ft.Switch(label="arXiv", value=True)
 arxiv_switch.on_change = lambda e: _save_setting("data_sources.arxiv", e.control.value)
 openalex_switch = ft.Switch(label="OpenAlex", value=True)
 openalex_switch.on_change = lambda e: _save_setting("data_sources.openalex", e.control.value)
+europepmc_switch = ft.Switch(label="Europe PMC", value=False)
+europepmc_switch.on_change = lambda e: _save_setting("data_sources.europepmc", e.control.value)
 max_results_slider = ft.Slider(min=100, max=500, value=250, divisions=40,
                                 label="{value} 篇")
 max_results_slider.on_change = lambda e: _on_slider_saved(e, "search.max_results")
@@ -334,6 +336,7 @@ def build_settings_page(ctx):
                     "数据源", "选择从哪些来源获取论文",
                     arxiv_switch,
                     openalex_switch,
+                    europepmc_switch,
                 ),
                 ft.Divider(height=1, color=border_color()),
                 _section(

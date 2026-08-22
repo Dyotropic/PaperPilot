@@ -36,7 +36,7 @@ class Paper(Base):
     authors = Column(String(500), comment="作者，逗号分隔")
     abstract = Column(Text, comment="摘要")
     year = Column(Integer, nullable=True, comment="发表年份")
-    source = Column(String(50), nullable=False, comment="来源: arxiv / openalex / local_pdf")
+    source = Column(String(50), nullable=False, comment="来源: arxiv / openalex / europepmc / local_pdf")
     url = Column(String(500), nullable=True, comment="论文链接")
     doi = Column(String(200), nullable=True, comment="DOI")
     embedding_id = Column(Integer, nullable=True, comment="FAISS索引中的位置，-1表示未向量化")

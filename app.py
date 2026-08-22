@@ -22,7 +22,7 @@ from pages.sidebar import build_sidebar, ensure_submenu_expanded
 from pages.search_page import build_search_page
 from pages.library_page import build_library_page
 from pages.settings_page import (
-    build_settings_page, arxiv_switch, openalex_switch,
+    build_settings_page, arxiv_switch, openalex_switch, europepmc_switch,
     max_results_slider, top_k_slider, ce_candidates_slider,
 )
 
@@ -110,6 +110,8 @@ def main(page: ft.Page):
         arxiv_switch.value = bool(ds_cfg["arxiv"])
     if "openalex" in ds_cfg:
         openalex_switch.value = bool(ds_cfg["openalex"])
+    if "europepmc" in ds_cfg:
+        europepmc_switch.value = bool(ds_cfg["europepmc"])
 
     # 左侧导航栏（内容后续由 page_switcher 动态替换）
     nav_ref = ft.Container(

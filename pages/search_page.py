@@ -15,14 +15,14 @@ from pages.context import (
     subtle_shadow, card,
 )
 from pages.settings_page import (
-    arxiv_switch, openalex_switch, max_results_slider,
+    arxiv_switch, openalex_switch, europepmc_switch, max_results_slider,
     top_k_slider, ce_candidates_slider,
 )
 from paperpilot.keywords import extract_all_keywords, merge_keywords
 from paperpilot.mt_translator import translate_terms
 from paperpilot.fetcher import (
-    fetch_arxiv, fetch_openalex, fetch_with_cascade, fetch_multi_primary,
-    deduplicate, get_article_type_label,
+    fetch_arxiv, fetch_openalex, fetch_europepmc, fetch_with_cascade,
+    fetch_multi_primary, deduplicate, get_article_type_label,
 )
 from paperpilot.indexer import rank_papers, unload_cross_encoder
 from paperpilot import library
@@ -49,7 +49,7 @@ def _has_cjk(text: str) -> bool:
 
 
 def _run_pipeline(max_per: int, year_min: str, year_max: str,
-                  use_arxiv: bool, use_openalex: bool,
+                  use_arxiv: bool, use_openalex: bool, use_europepmc: bool,
                   top_k: int, ce_candidates: int):
     """在后台线程中运行完整的搜索流水线。
 
@@ -149,6 +149,33 @@ def _run_pipeline(max_per: int, year_min: str, year_max: str,
                 papers += desc_papers
             except Exception as e:
                 print(f"[PaperPilot] OpenAlex（描述）失败: {e}")
+
+    if use_europepmc:
+        state.status_text = "Europe PMC 抓取中..."
+        try:
+            epmc_papers = fetch_multi_primary(
+                primary_kw=primary_kw_list,
+                secondary_kw=secondary_en,
+                regular_kw=regular_en,
+                source="europepmc",
+                max_results=max_per,
+                min_results=3,
+                year_min=year_min,
+                year_max=year_max,
+            )
+            print(f"[PaperPilot] Europe PMC 返回: {len(epmc_papers)} 篇 ({len(primary_kw_list)}路主关键词)")
+            papers += epmc_papers
+        except Exception as e:
+            print(f"[PaperPilot] Europe PMC 失败: {e}")
+
+        if desc_en_query:
+            try:
+                desc_papers = fetch_europepmc([desc_en_query], max_results=max_per, logic="OR",
+                                              year_min=year_min, year_max=year_max)
+                print(f"[PaperPilot] Europe PMC（描述）返回: {len(desc_papers)} 篇")
+                papers += desc_papers
+            except Exception as e:
+                print(f"[PaperPilot] Europe PMC（描述）失败: {e}")
 
     # 4. 去重
     state.status_text = "去重中..."
@@ -283,7 +310,7 @@ def refresh_results_table():
         year_str = str(paper.get("year") or "—")
         cit = paper.get("cited_by_count")
         cit_str = str(cit) if cit is not None else "—"
-        source_label = {"arxiv": "arXiv", "openalex": "OpenAlex", "local_pdf": "本地"}
+        source_label = {"arxiv": "arXiv", "openalex": "OpenAlex", "europepmc": "EPMC", "local_pdf": "本地"}
         src = source_label.get(paper.get("source", ""), paper.get("source", ""))
 
         score_color = (
@@ -400,7 +427,7 @@ def show_paper_detail(paper: dict):
         return
     _sidebar_busy = True
     sb._title.value = paper.get("title", "")
-    source = {"arxiv": "arXiv", "openalex": "OpenAlex", "local_pdf": "本地"}.get(
+    source = {"arxiv": "arXiv", "openalex": "OpenAlex", "europepmc": "EPMC", "local_pdf": "本地"}.get(
         paper.get("source", ""), paper.get("source", "")
     )
     type_label = get_article_type_label(paper)
@@ -1378,6 +1405,7 @@ def build_search_page(ctx):
         _year_max = ""
         _use_arxiv = arxiv_switch.value
         _use_openalex = openalex_switch.value
+        _use_europepmc = europepmc_switch.value
         _top_k = int(top_k_slider.value)
         _ce_candidates = int(ce_candidates_slider.value)
 
@@ -1391,6 +1419,7 @@ def build_search_page(ctx):
                 papers, scores = _run_pipeline(
                     max_per=_max_per, year_min=_year_min, year_max=_year_max,
                     use_arxiv=_use_arxiv, use_openalex=_use_openalex,
+                    use_europepmc=_use_europepmc,
                     top_k=_top_k, ce_candidates=_ce_candidates,
                 )
                 _result["papers"] = papers
