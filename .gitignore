@@ -46,6 +46,14 @@ paper-scraper-main/
 .env.local
 config.yaml
 
+# Deliverables (local only, not committed)
+PaperPilot项目中期报告.docx
+PaperPilot_项目文档.docx
+PaperPilot_答辩ppt_v6.pptx
+PHASE2_REPORT.md
+Phase1_Report.md
+pptd_ref.md
+
 # OS
 .DS_Store
 Thumbs.db

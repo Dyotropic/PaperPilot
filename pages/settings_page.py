@@ -27,8 +27,8 @@ def _model_options_for(provider: str) -> list:
     return opts
 
 
-def _build_llm_service_card(ctx):
-    """构建设置页「AI 模型服务」卡片：Provider/Key/Model/高级(任务模型)/测试。"""
+def _build_llm_service_section(ctx) -> ft.Column:
+    """「AI 模型服务」分节内容（不含外层卡片，供单卡布局拼装）。"""
     from paperpilot.config import load_config, save_config as do_save
     from paperpilot.llm_client import _load_llm_cfg
 
@@ -202,33 +202,29 @@ def _build_llm_service_card(ctx):
         ),
     )
 
-    return card(
-        ft.Column([
-            ft.Text("AI 模型服务", size=FS_LG, weight=FW_SEMIBOLD, color=text_primary()),
-            ft.Text("选择 AI 服务商并配置密钥；支持多家主流模型", size=FS_SM, color=text_secondary()),
-            ft.Divider(height=1, color=border_color()),
-            key_status,
-            ft.Row([
-                provider_dd,
-                model_dd,
-            ], spacing=SP_SM),
-            custom_model_field,
-            ft.Row([
-                api_key_field,
-                ft.FilledTonalButton(
-                    content=ft.Text("测试"), on_click=on_test,
-                ),
-                ft.FilledButton(
-                    content=ft.Text("保存"), icon=ft.Icons.SAVE, on_click=on_save,
-                ),
-            ], spacing=SP_SM),
-            test_status,
-            save_status,
-            advanced_toggle,
-            advanced_wrap,
-        ], spacing=SP_MD, tight=True),
-        padding=SP_XL,
-    )
+    return ft.Column([
+        ft.Text("AI 模型服务", size=FS_LG, weight=FW_SEMIBOLD, color=text_primary()),
+        ft.Text("选择 AI 服务商并配置密钥；支持多家主流模型", size=FS_SM, color=text_secondary()),
+        key_status,
+        ft.Row([
+            provider_dd,
+            model_dd,
+        ], spacing=SP_SM),
+        custom_model_field,
+        ft.Row([
+            api_key_field,
+            ft.FilledTonalButton(
+                content=ft.Text("测试"), on_click=on_test,
+            ),
+            ft.FilledButton(
+                content=ft.Text("保存"), icon=ft.Icons.SAVE, on_click=on_save,
+            ),
+        ], spacing=SP_SM),
+        test_status,
+        save_status,
+        advanced_toggle,
+        advanced_wrap,
+    ], spacing=SP_MD, tight=True)
 
 def _save_setting(key: str, value):
     """保存单个搜索/数据源设置到 config.yaml。"""
@@ -316,16 +312,13 @@ def build_settings_page(ctx):
     )
 
     def _section(title: str, desc: str, *controls):
-        """构建设置分区卡片。"""
-        return card(
-            ft.Column([
-                ft.Text(title, size=FS_LG, weight=FW_SEMIBOLD, color=text_primary()),
-                ft.Text(desc, size=FS_SM, color=text_secondary()),
-                ft.Divider(height=1, color=border_color()),
-                *controls,
-            ], spacing=SP_MD, tight=True),
-            padding=SP_XL,
-        )
+        """分区标题+说明+控件（用于单卡片内的分节）。"""
+        return ft.Column([
+            ft.Text(title, size=FS_LG, weight=FW_SEMIBOLD, color=text_primary()),
+            ft.Text(desc, size=FS_SM, color=text_secondary()),
+            ft.Container(height=SP_SM),
+            *controls,
+        ], spacing=SP_MD, tight=True)
 
     return ft.Column([
         ft.Row([
@@ -333,30 +326,40 @@ def build_settings_page(ctx):
         ], alignment=ft.MainAxisAlignment.START),
         ft.Text("配置 PaperPilot 的 AI 服务、数据源与外观", size=FS_MD, color=text_secondary()),
         ft.Container(height=SP_SM),
-        _build_llm_service_card(ctx),
-        _section(
-            "数据源", "选择从哪些来源获取论文",
-            arxiv_switch,
-            openalex_switch,
-        ),
-        _section(
-            "检索数量", "每个来源的最大检索结果数",
-            max_results_slider,
-        ),
-        _section(
-            "结果显示与精排", "控制最终显示的论文数量和送入精排的候选数",
-            top_k_slider,
-            ce_candidates_slider,
-        ),
-        _section(
-            "外观", "选择配色主题和夜间模式",
-            theme_selector,
-            dark_switch,
-        ),
-        _section(
-            "离线模式", "本地语义模型",
-            ft.Text("Embedding 模型：paraphrase-multilingual-MiniLM-L12-v2",
-                    size=FS_MD, color=text_primary()),
-            ft.Text("已下载至本地缓存，无需联网", size=FS_MD, color=ft.Colors.GREEN),
+        card(
+            ft.Column([
+                _build_llm_service_section(ctx),
+                ft.Divider(height=1, color=border_color()),
+                _section(
+                    "数据源", "选择从哪些来源获取论文",
+                    arxiv_switch,
+                    openalex_switch,
+                ),
+                ft.Divider(height=1, color=border_color()),
+                _section(
+                    "检索数量", "每个来源的最大检索结果数",
+                    max_results_slider,
+                ),
+                ft.Divider(height=1, color=border_color()),
+                _section(
+                    "结果显示与精排", "控制最终显示的论文数量和送入精排的候选数",
+                    top_k_slider,
+                    ce_candidates_slider,
+                ),
+                ft.Divider(height=1, color=border_color()),
+                _section(
+                    "外观", "选择配色主题和夜间模式",
+                    theme_selector,
+                    dark_switch,
+                ),
+                ft.Divider(height=1, color=border_color()),
+                _section(
+                    "离线模式", "本地语义模型",
+                    ft.Text("Embedding 模型：paraphrase-multilingual-MiniLM-L12-v2",
+                            size=FS_MD, color=text_primary()),
+                    ft.Text("已下载至本地缓存，无需联网", size=FS_MD, color=ft.Colors.GREEN),
+                ),
+            ], spacing=SP_XL, tight=True),
+            padding=SP_XL, expand=True,
         ),
     ], spacing=SP_MD, scroll=ft.ScrollMode.AUTO)

@@ -18,7 +18,7 @@ from pages.agent_panel import (
     send_agent_message, set_agent_project, build_agent_panel,
     _trigger_compare_papers,  # noqa: F401  再导出保持模块级可访问
 )
-from pages.sidebar import build_sidebar
+from pages.sidebar import build_sidebar, ensure_submenu_expanded
 from pages.search_page import build_search_page
 from pages.library_page import build_library_page
 from pages.settings_page import (
@@ -57,7 +57,7 @@ def page_switcher(idx: int):
 
     if idx == 1:
         # 切到文献页：展开课题子菜单 + 刷新课题列表
-        sidebar.ensure_submenu_expanded()
+        ensure_submenu_expanded()
         if ctx.refresh_library is not None:
             ctx.refresh_library()
 
