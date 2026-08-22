@@ -7,7 +7,7 @@
         "authors": str,         # 逗号分隔
         "abstract": str,
         "year": int | None,
-        "source": str,          # "arxiv" | "openalex" | "local_pdf"
+        "source": str,          # "arxiv" | "openalex" | "europepmc" | "local_pdf"
         "url": str | None,
         "doi": str | None,
         "api_score": float,     # 0.0-1.0, API 原始排序位置归一化
@@ -551,6 +551,14 @@ def fetch_europepmc(keywords: list[str], max_results: int = 30,
     return _fetch_europepmc_raw(query, max_results, year_min=year_min, year_max=year_max)
 
 
+# source → raw 抓取函数映射（fetch_with_cascade 分发用）
+_FETCH_RAW = {
+    "arxiv": _fetch_arxiv_raw,
+    "openalex": _fetch_openalex_raw,
+    "europepmc": _fetch_europepmc_raw,
+}
+
+
 def fetch_with_cascade(
     primary_kw: list[str],
     secondary_kw: list[str],
@@ -562,7 +570,8 @@ def fetch_with_cascade(
     year_max: str = "",
 ) -> tuple[list[dict], int]:
     """三级级联检索：核心AND → 主关键词AND → 全部OR。"""
-    fetch_raw = _fetch_arxiv_raw if source == "arxiv" else _fetch_openalex_raw
+    # source → 抓取函数映射（arxiv/openalex/europepmc）
+    fetch_raw = _FETCH_RAW.get(source, _fetch_arxiv_raw)
     all_kw = primary_kw + secondary_kw + regular_kw
     all_core = primary_kw + secondary_kw
 
@@ -612,7 +621,7 @@ def fetch_multi_primary(
         primary_kw: 用户标记的主关键词列表
         secondary_kw: 副关键词
         regular_kw: 普通关键词
-        source: "arxiv" 或 "openalex"
+        source: "arxiv" / "openalex" / "europepmc"
         max_results: 最终返回的最大论文数
         min_results: 每路检索触发降级的结果数阈值
         year_min: 起始年份筛选（仅 OpenAlex 生效）
