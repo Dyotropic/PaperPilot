@@ -59,7 +59,8 @@ def make_pdf_name(paper: dict) -> str:
     if surname.lower() in _PLACEHOLDER_AUTHORS:
         surname = "Unknown"
 
-    year = paper.get("year") or "????"
+    # 无年份用 "Unknown" 占位：不能用 "????"，`?` 在 Windows 文件名中非法
+    year = str(paper.get("year") or "Unknown")
     title = (paper.get("title") or "untitled").strip()
     title_slug = re.sub(r"[^\w\s-]", "", title[:60])
     title_slug = re.sub(r"[-\s]+", "_", title_slug).strip("_") or "untitled"
@@ -67,11 +68,13 @@ def make_pdf_name(paper: dict) -> str:
     journal = (paper.get("journal") or "").strip()
     journal_slug = re.sub(r"[^\w]", "", journal)[:20] if journal else ""
 
-    parts = [surname, str(year), title_slug]
+    parts = [surname, year, title_slug]
     if journal_slug:
         parts.append(journal_slug)
-    name = "_".join(parts)[:200] + ".pdf"
-    return name
+    name = "_".join(parts)[:200]
+    # 最终防线：清除 Windows 保留非法字符（<>:"/\|?*），防止未来字段变动引入
+    name = re.sub(r'[<>:"/\\|?*]', "_", name)
+    return name + ".pdf"
 
 
 # ── Catalog 管理 ──
