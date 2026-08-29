@@ -97,13 +97,13 @@ def _build_llm_service_section(ctx) -> ft.Column:
         api_key_field.value = ""
         model_dd.update(); api_key_field.update(); custom_model_field.update()
 
-    provider_dd.on_change = on_change_provider
+    provider_dd.on_select = on_change_provider  # Flet 0.85 新版 Dropdown 事件为 on_select（无 on_change）
 
     def on_change_model(e):
         custom_model_field.visible = (model_dd.value == _CUSTOM)
         custom_model_field.update()
 
-    model_dd.on_change = on_change_model
+    model_dd.on_select = on_change_model  # 同上：0.85 Dropdown 用 on_select
 
     def on_test(e):
         test_status.value = "正在测试连通性..."
@@ -233,6 +233,33 @@ def _save_setting(key: str, value):
     save_config({section: {field: value}})
 
 
+def _build_openalex_key_field() -> ft.TextField:
+    """OpenAlex API Key 输入框（密文，失焦/回车保存）。
+
+    背景：OpenAlex 2026-02-13 起废除 polite pool，无 key 每日仅 100 次额度。
+    """
+    from paperpilot.config import load_config
+    cur_key = str((load_config().get("data_sources", {}) or {}).get("openalex_api_key", "") or "")
+
+    field = ft.TextField(
+        label="OpenAlex API Key（可选，建议配置）",
+        hint_text="免费注册 openalex.org 获取，10 万次/天；留空则每日仅 100 次",
+        value=cur_key,
+        password=True, can_reveal_password=True, expand=True,
+        text_size=13,
+    )
+
+    def _save(e=None):
+        v = (field.value or "").strip()
+        _save_setting("data_sources.openalex_api_key", v)
+        field.value = v
+        field.update()
+
+    field.on_blur = _save
+    field.on_submit = _save
+    return field
+
+
 def _on_slider_saved(e, key: str):
     _save_setting(key, int(e.control.value))
 
@@ -337,6 +364,15 @@ def build_settings_page(ctx):
                     arxiv_switch,
                     openalex_switch,
                     europepmc_switch,
+                    ft.Container(
+                        content=ft.Column([
+                            _build_openalex_key_field(),
+                            ft.Text("提示：OpenAlex 自 2026 年 2 月起改为 API Key 计费制，"
+                                    "未配置 Key 时每日仅 100 次请求，检索易触发限流(429)。",
+                                    size=FS_XS, color=text_secondary()),
+                        ], spacing=SP_XS, tight=True),
+                        padding=ft.padding.Padding(top=SP_XS),
+                    ),
                 ),
                 ft.Divider(height=1, color=border_color()),
                 _section(
