@@ -84,6 +84,12 @@ class PushRecord(Base):
 #### 目标
 在现有 arXiv + OpenAlex 基础上，接入中文学术源和更多英文源，同时支持 Zotero 文献库导入。
 
+> **修订（2026-08-28）**：Semantic Scholar 经实测不可用（API 稳定性差），**弃用**；
+> 已改接 **Europe PMC**（免 Key、含生物医学与最新预印本，按被引数降序）作为第三数据源。
+> 数据源统一抽象层已落地：`paperpilot/sources/`（base.py 定义 `PaperSource` 接口 + 注册表，
+> 三个内置源已迁移接入，`fetcher.py` 保留编排逻辑并重导出兼容）。
+> Zotero 只读导入仍按本节计划推进；CrossRef 维持可选增强。
+
 #### 子功能拆解
 
 | 数据源 | 接入方式 | 说明 |

@@ -62,3 +62,6 @@ Thumbs.db
 repository/
 outputs/
 *.log
+
+# ZCode CLI session artifacts
+.zcode/
