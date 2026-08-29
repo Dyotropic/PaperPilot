@@ -174,6 +174,16 @@ llm:
 
 **知识图谱**
 
+> **修订（2026-08-29，已落地）**：渲染方案定为 **pywebview 独立窗口 + ECharts graph**
+> （复用 PDF 阅读器的子进程窗口方案，经 `pdf_viewer._create_window` 新增的
+> `js_api_factory` 键注入 JS↔Python 桥）；引用关系数据源由 Semantic Scholar
+> （已弃用）改为 **OpenAlex `referenced_works` 两级缓存**：
+> ① 检索入库时顺带把响应中本就携带的 `referenced_works`/`keywords` 写入
+> diskcache（`refs:{doi}`，零额外请求）；② 图谱构建时未命中者按 DOI 批量补查
+> （每批 ≤50 篇 1 次请求，`select=id,doi,referenced_works,keywords`），写回后
+> 不再联网。实现见 `paperpilot/graph_service.py`（数据构建）与
+> `paperpilot/graph_window.py`（窗口），入口为文献库页工具栏「知识图谱」按钮。
+
 | 子功能 | 说明 |
 |--------|------|
 | 引用关系图 | 以 DOI/标题为节点，引用关系为边，展示论文间的引用网络 |
