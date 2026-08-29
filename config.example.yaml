@@ -19,6 +19,10 @@ data_sources:
   local_pdf: true
   # Europe PMC：生物医学+最新预印本，免 key 免配置；默认关，开启可降低漏检
   europepmc: false
+  # OpenAlex API Key（可选，强烈建议）：OpenAlex 自 2026-02-13 起废除 polite pool 改为
+  # API key 制——无 key 每日仅 100 次额度（极易触发 429 限流），免费注册后 10 万次/天。
+  # 注册：https://openalex.org → Sign in → API Key
+  openalex_api_key: ""
 search:
   max_results: 100
   top_k: 20

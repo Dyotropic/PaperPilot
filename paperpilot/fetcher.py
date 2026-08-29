@@ -1,5 +1,10 @@
 """论文数据获取接口。
 
+各数据源的抓取实现已按 PHASE3_PLAN §2.2 迁入 paperpilot/sources/ 包
+（base.py 抽象 + 注册表；arxiv_source / openalex_source / europepmc_source）。
+本模块保留检索编排逻辑（级联策略 / 多主关键词 / 去重 / 类型标签 / 本地导入），
+并重导出各源函数以保持既有导入路径兼容。
+
 所有函数返回统一的 paper dict 格式：
 
     {
@@ -12,45 +17,61 @@
         "doi": str | None,
         "api_score": float,     # 0.0-1.0, API 原始排序位置归一化
         "type": str | None,     # 文章类型 (OpenAlex: review/article/...; arXiv: None)
-        "cited_by_count": int | None,  # 引用次数 (仅 OpenAlex)
+        "cited_by_count": int | None,  # 引用次数 (仅 OpenAlex/Europe PMC)
         "journal": str | None,  # 期刊/会议名 (OpenAlex source; arXiv journal_ref)
     }
+
+新增数据源：实现 paperpilot.sources.base.PaperSource 并注册，
+在 sources/__init__.py import 即可被 fetch_with_cascade / fetch_multi_primary 分发。
 """
 
 import os
 import re
-import socket
-import time
 from difflib import SequenceMatcher
-from pathlib import Path
 
-import arxiv
 import fitz
-import requests
 
-from paperpilot.config import config
+# ── 各源实现（迁自本文件，重导出保持兼容）──
+from paperpilot.sources.arxiv_source import (  # noqa: F401
+    ArxivSource,
+    _fetch_arxiv_raw,
+    _parse_arxiv_result,
+    _wait_arxiv_rate_limit,
+    fetch_arxiv,
+)
+from paperpilot.sources.openalex_source import (  # noqa: F401
+    OpenAlexSource,
+    _decode_inverted_index,
+    _fetch_missing_abstracts,
+    _fetch_openalex_raw,
+    _oa_cache,
+    _parse_openalex_work,
+    fetch_openalex,
+)
+from paperpilot.sources.europepmc_source import (  # noqa: F401
+    EuropePMCSource,
+    _epmc_cache,
+    _EPMC_BASE,
+    _EPMC_SORT,
+    _fetch_europepmc_raw,
+    _parse_europepmc_result,
+    fetch_europepmc,
+)
+from paperpilot.sources.base import (  # noqa: F401
+    PaperSource,
+    SourceRateLimited,
+    _build_search_query,
+    all_sources,
+    get_source,
+)
 
-# ── OpenAlex 响应缓存（diskCache，TTL 24h）──
-# 搜索分页结果与摘要补齐都可缓存，重复检索几乎瞬时返回。
-_OA_CACHE_DIR = Path(config.get("cache", {}).get("dir", "./cache/api")) / "openalex"
-_CACHE_TTL = int(config.get("cache", {}).get("ttl_hours", 24)) * 3600
-
-try:
-    from diskcache import Cache as _Cache
-    _oa_cache = _Cache(str(_OA_CACHE_DIR))
-except Exception:
-    _oa_cache = None  # diskcache 不可用时降级为不缓存
-
-
-def _build_search_query(keywords: list[str], logic: str = "OR") -> str:
-    """Build quoted-phrase query for search APIs (arXiv, OpenAlex).
-
-    Args:
-        keywords: list of keyword phrases
-        logic: "OR" (default, broad recall) or "AND" (strict, all must match)
-    """
-    joiner = " AND " if logic == "AND" else " OR "
-    return joiner.join(f'"{kw}"' for kw in keywords)
+# source → raw 抓取函数映射（fetch_with_cascade 分发用）。
+# 由数据源注册表自动构建，新源注册后无需改动本文件。
+_FETCH_RAW: dict = {
+    _src.name: _src.raw_fetcher
+    for _src in all_sources()
+    if _src.raw_fetcher is not None
+}
 
 
 def _build_mixed_query(and_kw: list[str], or_kw: list[str]) -> str:
@@ -75,158 +96,6 @@ def _build_mixed_query(and_kw: list[str], or_kw: list[str]) -> str:
     elif or_kw:
         return " OR ".join(f'"{kw}"' for kw in or_kw)
     return ""
-
-
-def _parse_arxiv_result(r) -> dict:
-    authors = ", ".join(a.name for a in r.authors[:10])
-    year = r.published.year if r.published else None
-    doi = None
-    if r.doi:
-        doi = r.doi if r.doi.startswith("10.") else None
-    return {
-        "title": r.title.strip() if r.title else "",
-        "authors": authors,
-        "abstract": r.summary.strip() if r.summary else "",
-        "year": year,
-        "source": "arxiv",
-        "url": r.entry_id or None,
-        "doi": doi,
-        "type": None,
-        "cited_by_count": None,
-        "journal": getattr(r, "journal_ref", None) or None,
-        "openalex_id": None,
-    }
-
-
-# arXiv API 频控：两次请求间隔 ≥ _ARXIV_RATE_LIMIT 秒
-_ARXIV_LAST_CALL = 0.0
-_ARXIV_RATE_LIMIT = 5.0  # arXiv 官方建议 ≤1 req/s，保守取 5s
-
-
-def _wait_arxiv_rate_limit():
-    """在 arXiv API 调用前等待，确保不触发限流。"""
-    global _ARXIV_LAST_CALL
-    elapsed = time.time() - _ARXIV_LAST_CALL
-    if elapsed < _ARXIV_RATE_LIMIT:
-        wait = _ARXIV_RATE_LIMIT - elapsed
-        print(f"[arXiv] 频控等待 {wait:.1f}s...", flush=True)
-        time.sleep(wait)
-    _ARXIV_LAST_CALL = time.time()
-
-
-def _fetch_arxiv_raw(query: str, max_results: int = 30,
-                     year_min: str = "", year_max: str = "") -> list[dict]:
-    """Fetch papers from arXiv with a raw query string (internal helper).
-
-    Uses ThreadPoolExecutor + timeout to guard against the arxiv library's
-    underlying requests.Session which has no default timeout and can hang.
-    """
-    import concurrent.futures
-    import random
-
-    _wait_arxiv_rate_limit()
-
-    print(f"[arXiv] 开始抓取: query={query[:80]}... max={max_results}", flush=True)
-
-    client = arxiv.Client(num_retries=2, delay_seconds=3)
-    search = arxiv.Search(
-        query=query,
-        max_results=max_results,
-        sort_by=arxiv.SortCriterion.Relevance,
-    )
-    papers: list[dict] = []
-
-    for attempt in range(2):
-        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        try:
-            future = executor.submit(
-                lambda: list(client.results(search))
-            )
-            results = future.result(timeout=45)
-            for r in results:
-                papers.append(_parse_arxiv_result(r))
-            break
-        except concurrent.futures.TimeoutError:
-            print(f"[arXiv] 超时(45s) attempt {attempt+1}/2", flush=True)
-            if attempt < 1:
-                time.sleep(3)
-        except Exception as e:
-            msg = str(e)
-            if "429" in msg or "403" in msg:
-                wait = (2 ** attempt) * 5 + random.uniform(0, 3)
-                print(f"[arXiv] 限流(attempt {attempt+1}/2)，等待 {wait:.0f}s...", flush=True)
-                time.sleep(wait)
-            else:
-                print(f"[arXiv] 错误: {e}", flush=True)
-                break
-        finally:
-            executor.shutdown(wait=False)
-    else:
-        print(f"[arXiv] 请求超时/失败，返回空结果", flush=True)
-
-    total = max(len(papers), 1)
-    for i, p in enumerate(papers):
-        p["api_score"] = 1.0 - (i / total)
-    return papers
-
-
-def fetch_arxiv(keywords: list[str], max_results: int = 30,
-                logic: str = "OR",
-                year_min: str = "", year_max: str = "") -> list[dict]:
-    """通过 arXiv API 检索论文。
-
-    Args:
-        keywords: 关键词列表
-        max_results: 最大返回数
-        logic: "OR"（宽召回，默认）或 "AND"（核心词全部命中）
-
-    Returns:
-        paper dict 列表，含 api_score 字段（0.0-1.0，API 排序位置归一化）
-    """
-    if not keywords:
-        return []
-    query = _build_search_query(keywords, logic=logic)
-    return _fetch_arxiv_raw(query, max_results, year_min=year_min, year_max=year_max)
-
-
-def _parse_openalex_work(w: dict) -> dict | None:
-    title = (w.get("title") or "").strip()
-    if not title:
-        return None
-    authorship = w.get("authorships") or []
-    authors = ", ".join(
-        a.get("author", {}).get("display_name", "")
-        for a in authorship[:10]
-    )
-    year = w.get("publication_year") or None
-    doi = w.get("doi") or None
-    if doi:
-        doi = doi.removeprefix("https://doi.org/")
-    abstract = ""
-    abstract_inverted = w.get("abstract_inverted_index")
-    if abstract_inverted:
-        abstract = _decode_inverted_index(abstract_inverted)
-    # 新增字段
-    paper_type = w.get("type")  # "review", "article", "book-chapter", ...
-    cited_by = w.get("cited_by_count")
-    primary_loc = w.get("primary_location") or {}
-    source_info = primary_loc.get("source") or {}
-    journal = source_info.get("display_name") or None
-    oa_id = w.get("id") or None  # "https://openalex.org/W2023271753"
-
-    return {
-        "title": title,
-        "authors": authors,
-        "abstract": abstract,
-        "year": year,
-        "source": "openalex",
-        "url": primary_loc.get("landing_page_url") or None,
-        "doi": doi,
-        "type": paper_type,
-        "cited_by_count": cited_by,
-        "journal": journal,
-        "openalex_id": oa_id,
-    }
 
 
 # ── 文章类型标签映射 ──
@@ -265,298 +134,12 @@ def get_article_type_label(paper: dict) -> str:
     return "研究论文"
 
 
-def _decode_inverted_index(inv: dict) -> str:
-    max_pos = max(p[-1] for p in inv.values())
-    words = [""] * (max_pos + 1)
-    for word, positions in inv.items():
-        for pos in positions:
-            words[pos] = word
-    return " ".join(words)
-
-
-def _fetch_openalex_raw(query: str, max_results: int = 30,
-                        year_min: str = "", year_max: str = "") -> list[dict]:
-    """Fetch papers from OpenAlex with a raw query string (internal helper)."""
-    url = "https://api.openalex.org/works"
-    papers = []
-    per_page = min(50, max_results)
-    pages = (max_results + per_page - 1) // per_page
-    headers = {"User-Agent": "PaperPilot/1.0 (mailto:paperpilot@example.com)"}
-    # 构建年份筛选
-    year_filter = None
-    if year_min and year_max:
-        year_filter = f"publication_year:{year_min}-{year_max}"
-    elif year_min:
-        year_filter = f"publication_year:>{int(year_min)-1}"
-    elif year_max:
-        year_filter = f"publication_year:<{int(year_max)+1}"
-    old_timeout = socket.getdefaulttimeout()
-    socket.setdefaulttimeout(15)
-    try:
-        for page in range(1, pages + 1):
-            params = {
-                "search": query,
-                "per_page": per_page,
-                "page": page,
-                "mailto": "paperpilot@example.com",
-            }
-            if year_filter:
-                params["filter"] = year_filter
-            ckey = f"page:{query}|{page}|{per_page}|{year_filter or ''}"
-            results = None
-            fetched = False
-            if _oa_cache is not None:
-                results = _oa_cache.get(ckey)
-            if results is None:
-                try:
-                    resp = requests.get(url, params=params, headers=headers, timeout=15)
-                    for retry in range(3):
-                        if resp.status_code != 429:
-                            break
-                        time.sleep(1 * (retry + 1))
-                        resp = requests.get(url, params=params, headers=headers, timeout=15)
-                    resp.raise_for_status()
-                    data = resp.json()
-                    results = data.get("results", [])
-                    fetched = True
-                    if _oa_cache is not None:
-                        _oa_cache.set(ckey, results, expire=_CACHE_TTL)
-                except requests.RequestException:
-                    continue
-            page_total = len(results)
-            for i, w in enumerate(results):
-                paper = _parse_openalex_work(w)
-                if paper:
-                    api_rel = w.get("relevance_score")
-                    if api_rel is not None:
-                        paper["api_score"] = float(api_rel)
-                    else:
-                        paper["api_score"] = 1.0 - (i / max(page_total, 1))
-                    papers.append(paper)
-            if len(papers) >= max_results:
-                break
-            if fetched:
-                time.sleep(0.1)  # 网络请求后的礼貌速率
-    finally:
-        socket.setdefaulttimeout(old_timeout)
-    # Normalize api_score to [0, 1] — OpenAlex relevance_score may exceed [0, 1]
-    api_scores = [p.get("api_score") for p in papers if p.get("api_score") is not None]
-    if api_scores:
-        min_s, max_s = min(api_scores), max(api_scores)
-        if max_s > 1.0 or min_s < 0.0:
-            if max_s > min_s:
-                for p in papers:
-                    if p.get("api_score") is not None:
-                        p["api_score"] = (p["api_score"] - min_s) / (max_s - min_s)
-            else:
-                for p in papers:
-                    if p.get("api_score") is not None:
-                        p["api_score"] = 0.5
-    # Fill remaining None with position-based scores
-    total = max(len(papers), 1)
-    for i, p in enumerate(papers):
-        if p.get("api_score") is None:
-            p["api_score"] = 1.0 - (i / total)
-    papers = papers[:max_results]
-    papers = _fetch_missing_abstracts(papers)
-    return papers
-
-
-def _fetch_missing_abstracts(papers: list[dict]) -> list[dict]:
-    """对缺少摘要的 OpenAlex 论文，并行请求完整摘要（带缓存）。
-
-    OpenAlex 搜索结果常截断摘要，需用 works/{id} 端点获取完整数据。
-    并发 4 路，较原串行 ~10 req/s 更快且更礼貌；重复检索命中缓存。
-    """
-    to_fetch = [
-        p for p in papers
-        if p.get("openalex_id") and not (p.get("abstract") or "").strip()
-    ]
-
-    if not to_fetch:
-        return papers
-
-    headers = {"User-Agent": "PaperPilot/1.0 (mailto:paperpilot@example.com)"}
-    old_timeout = socket.getdefaulttimeout()
-    socket.setdefaulttimeout(10)
-
-    def _fetch_one(paper: dict) -> bool:
-        oa_id = paper["openalex_id"]
-        ckey = f"abs:{oa_id}"
-        if _oa_cache is not None:
-            cached = _oa_cache.get(ckey)
-            if cached:
-                paper["abstract"] = cached
-                return True
-        try:
-            resp = requests.get(oa_id, headers=headers, timeout=10)
-            if resp.status_code == 200:
-                w = resp.json()
-                inv = w.get("abstract_inverted_index")
-                if inv:
-                    text = _decode_inverted_index(inv)
-                    paper["abstract"] = text
-                    if _oa_cache is not None:
-                        _oa_cache.set(ckey, text, expire=_CACHE_TTL)
-                    return True
-        except requests.RequestException:
-            pass
-        return False
-
-    count = 0
-    try:
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-            count = sum(1 for ok in executor.map(_fetch_one, to_fetch) if ok)
-    finally:
-        socket.setdefaulttimeout(old_timeout)
-
-    if count:
-        print(f"[OpenAlex] 补齐 {count} 篇摘要", flush=True)
-    return papers
-
-
-def fetch_openalex(keywords: list[str], max_results: int = 30,
-                   logic: str = "OR",
-                   year_min: str = "", year_max: str = "") -> list[dict]:
-    """通过 OpenAlex API 检索论文（免 Key）。"""
-    if not keywords:
-        return []
-    query = _build_search_query(keywords, logic=logic)
-    return _fetch_openalex_raw(query, max_results, year_min=year_min, year_max=year_max)
-
-
-# ── Europe PMC（第三数据源，免 key 免配置）──
-_EPMC_BASE = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
-_EPMC_CACHE_DIR = Path(config.get("cache", {}).get("dir", "./cache/api")) / "europepmc"
-# 排序：按被引数降序，服务高引发现（智能推送铺垫），区别于相关度排序
-_EPMC_SORT = "CITED desc"
-
-try:
-    _epmc_cache = _Cache(str(_EPMC_CACHE_DIR))
-except Exception:
-    _epmc_cache = None  # diskcache 不可用时降级为不缓存
-
-
-def _parse_europepmc_result(r: dict) -> dict | None:
-    """将 Europe PMC core 结果解析为统一 paper dict。"""
-    title = (r.get("title") or "").strip()
-    if not title:
-        return None
-    jinfo = r.get("journalInfo") or {}
-    jtitle = (jinfo.get("journal") or {}).get("title")
-    pub_year = jinfo.get("yearOfPublication") or r.get("pubYear")
-    try:
-        year = int(pub_year) if pub_year else None
-    except (TypeError, ValueError):
-        year = None
-    doi = (r.get("doi") or "").strip() or None
-    pmid = r.get("pmid")
-    return {
-        "title": title,
-        "authors": r.get("authorString") or "",
-        "abstract": (r.get("abstractText") or "").strip(),
-        "year": year,
-        "source": "europepmc",
-        "url": f"https://europepmc.org/article/MED/{pmid}" if pmid else
-               (f"https://doi.org/{doi}" if doi else None),
-        "doi": doi,
-        "type": None,
-        "cited_by_count": r.get("citedByCount"),
-        "journal": jtitle,
-        "openalex_id": None,
-    }
-
-
-def _fetch_europepmc_raw(query: str, max_results: int = 30,
-                         year_min: str = "", year_max: str = "") -> list[dict]:
-    """Fetch papers from Europe PMC with a raw query string (internal helper)."""
-    papers: list[dict] = []
-    page_size = min(1000, max_results)
-    params = {
-        "query": query,
-        "format": "json",
-        "resultType": "core",  # core 才含 abstractText
-        "pageSize": page_size,
-        "sort": _EPMC_SORT,
-    }
-    if year_max or year_min:
-        # EPMC 年份过滤（FIRST_PDATE 区间）
-        if year_min and year_max:
-            params["filter"] = f"FIRST_PDATE:[{year_min}-01-01 TO {year_max}-12-31]"
-        elif year_min:
-            params["filter"] = f"FIRST_PDATE:[{year_min}-01-01 TO *]"
-        elif year_max:
-            params["filter"] = f"FIRST_PDATE:[1900-01-01 TO {year_max}-12-31]"
-
-    ckey = f"search:{query}|{page_size}|{params.get('filter', '')}|{_EPMC_SORT}"
-    cached = None
-    if _epmc_cache is not None:
-        cached = _epmc_cache.get(ckey)
-    if cached is not None:
-        data = cached
-        fetched = False
-    else:
-        data = None
-        fetched = False
-        old_timeout = socket.getdefaulttimeout()
-        socket.setdefaulttimeout(15)
-        try:
-            for attempt in range(3):
-                try:
-                    resp = requests.get(_EPMC_BASE, params=params,
-                                        headers={"User-Agent": "PaperPilot/1.0"},
-                                        timeout=15)
-                    if resp.status_code == 429:
-                        time.sleep(1 * (attempt + 1))
-                        continue
-                    resp.raise_for_status()
-                    body = resp.json()
-                    data = (body.get("resultList") or {}).get("result") or []
-                    fetched = True
-                    if _epmc_cache is not None:
-                        _epmc_cache.set(ckey, data, expire=_CACHE_TTL)
-                    break
-                except requests.RequestException:
-                    time.sleep(1 * (attempt + 1))
-                    continue
-        finally:
-            socket.setdefaulttimeout(old_timeout)
-
-    if data is None:
-        return []
-
-    total = max(len(data), 1)
-    collected: list[dict] = []
-    for i, item in enumerate(data):
-        paper = _parse_europepmc_result(item)
-        if paper:
-            paper["api_score"] = 1.0 - (i / total)
-            collected.append(paper)
-        if len(collected) >= max_results:
-            break
-    return collected[:max_results]
-
-
-def fetch_europepmc(keywords: list[str], max_results: int = 30,
-                    logic: str = "OR",
-                    year_min: str = "", year_max: str = "") -> list[dict]:
-    """通过 Europe PMC API 检索论文（免 Key，生物医学+最新预印本）。
-
-    排序按被引数降序（CITED desc），高引论文排前。
-    """
-    if not keywords:
-        return []
-    query = _build_search_query(keywords, logic=logic)
-    return _fetch_europepmc_raw(query, max_results, year_min=year_min, year_max=year_max)
-
-
-# source → raw 抓取函数映射（fetch_with_cascade 分发用）
-_FETCH_RAW = {
-    "arxiv": _fetch_arxiv_raw,
-    "openalex": _fetch_openalex_raw,
-    "europepmc": _fetch_europepmc_raw,
-}
+def _record_source_error(errors: list | None, source: str, kind: str, msg: str) -> None:
+    """记录源级错误（去重），供 UI 提示；errors=None 时静默（向后兼容）。"""
+    if errors is None:
+        return
+    if not any(e[0] == source and e[1] == kind for e in errors):
+        errors.append((source, kind, msg))
 
 
 def fetch_with_cascade(
@@ -568,8 +151,14 @@ def fetch_with_cascade(
     min_results: int = 3,
     year_min: str = "",
     year_max: str = "",
+    errors: list | None = None,
 ) -> tuple[list[dict], int]:
-    """三级级联检索：核心AND → 主关键词AND → 全部OR。"""
+    """三级级联检索：核心AND → 主关键词AND → 全部OR。
+
+    Args:
+        errors: 可选错误收集列表（如传 OpenAlex 429）：
+                [(source, "rate_limited"|"error", message), ...]
+    """
     # source → 抓取函数映射（arxiv/openalex/europepmc）
     fetch_raw = _FETCH_RAW.get(source, _fetch_arxiv_raw)
     all_kw = primary_kw + secondary_kw + regular_kw
@@ -595,7 +184,12 @@ def fetch_with_cascade(
     for level, query in strategies:
         if not query:
             continue
-        papers = fetch_raw(query, max_results, year_min=year_min, year_max=year_max)
+        try:
+            papers = fetch_raw(query, max_results, year_min=year_min, year_max=year_max)
+        except SourceRateLimited as e:
+            # 同源后续策略必然同样限流，记录后直接终止该源降级（保持"单源失败不拖垮整体"）
+            _record_source_error(errors, e.source, "rate_limited", e.message)
+            break
         if len(papers) >= min_results or level == strategies[-1][0]:
             return papers, level
 
@@ -611,6 +205,7 @@ def fetch_multi_primary(
     min_results: int = 3,
     year_min: str = "",
     year_max: str = "",
+    errors: list | None = None,
 ) -> list[dict]:
     """多主关键词独立检索 + 合并加权。
 
@@ -626,6 +221,7 @@ def fetch_multi_primary(
         min_results: 每路检索触发降级的结果数阈值
         year_min: 起始年份筛选（仅 OpenAlex 生效）
         year_max: 结束年份筛选（仅 OpenAlex 生效）
+        errors: 可选错误收集列表（限流等），见 fetch_with_cascade
 
     Returns:
         papers 列表，含 api_score（多路命中已加权）
@@ -635,7 +231,7 @@ def fetch_multi_primary(
             primary_kw=[], secondary_kw=secondary_kw,
             regular_kw=regular_kw, source=source,
             max_results=max_results, min_results=min_results,
-            year_min=year_min, year_max=year_max)
+            year_min=year_min, year_max=year_max, errors=errors)
         return papers
 
     seen: dict[str, tuple[dict, int]] = {}
@@ -655,7 +251,11 @@ def fetch_multi_primary(
             min_results=min_results,
             year_min=year_min,
             year_max=year_max,
+            errors=errors,
         )
+        # 已被限流：后续主关键词路必然同样失败，短路避免重复退避等待
+        if errors and any(e[0] == source and e[1] == "rate_limited" for e in errors):
+            break
         for p in papers:
             pid = (p.get("title", "") + "|" + p.get("source", "") + "|"
                    + str(p.get("year", ""))).lower()
