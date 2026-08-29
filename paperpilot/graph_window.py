@@ -118,25 +118,30 @@ def _make_bridge(data_path: str, theme_seed: str = "#0097A7",
 # ── 主题配色 ──
 
 def _theme_colors(seed: str, dark: bool) -> dict:
-    """从主题种子色推导图谱窗口配色（与主窗口观感一致）。"""
+    """从主题种子色推导图谱窗口配色。
+
+    画布保持中性高对比（浅色≈白、深色≈炭黑），主题色仅轻微点缀——
+    分析用图可读性优先，像 dusk 这类高饱和主题不能把背景染紫。
+    """
     if dark:
         return {
-            "bg": _blend_with(seed, 0.88, "#0f1420"),
-            "panel": _blend_with(seed, 0.80, "#161c2c"),
-            "panel2": _blend_with(seed, 0.76, "#1b2234"),
+            "bg": _blend_with(seed, 0.90, "#10141d"),
+            "panel": _blend_with(seed, 0.85, "#171d29"),
+            "panel2": _blend_with(seed, 0.80, "#1d2432"),
             "text": "#e8ecf4",
             "muted": "#9aa4bb",
-            "border": _blend_with(seed, 0.55, "#2a3247"),
-            "hover": _blend_with(seed, 0.70, "#232c42"),
+            "border": _blend_with(seed, 0.60, "#2a3247"),
+            "hover": _blend_with(seed, 0.72, "#242e44"),
         }
     return {
-        "bg": _blend_with(seed, 0.08, "#f6f7fb"),
+        # factor 是"向目标色混合的比例"：浅色画布要 9 成以上的中性色，只留一点主题色调
+        "bg": _blend_with(seed, 0.94, "#f5f6f8"),
         "panel": "#ffffff",
-        "panel2": _blend_with(seed, 0.05, "#f2f4f9"),
-        "text": "#1c2333",
+        "panel2": _blend_with(seed, 0.92, "#eef0f4"),
+        "text": "#1f2637",
         "muted": "#5b6478",
-        "border": _blend_with(seed, 0.18, "#dfe4ee"),
-        "hover": _blend_with(seed, 0.10, "#edf0f7"),
+        "border": _blend_with(seed, 0.80, "#dfe3ec"),
+        "hover": _blend_with(seed, 0.88, "#edf0f5"),
     }
 
 
@@ -271,18 +276,21 @@ function nodeDegree(n){ return n.cite_in * 2 + n.cite_out + n.cooccur; }
 function buildNodes(view, catIndex){
   return DATA.nodes.map(function(n){
     var m = srcMeta(n.source);
-    var size = view === "timeline" ? 13 : 12 + Math.min(30, nodeDegree(n) * 2.2);
+    var size = view === "timeline" ? 14 : 14 + Math.min(30, nodeDegree(n) * 2.2);
     return {
       id: String(n.id), name: n.label || n.title,
-      symbolSize: size, x: n.tx, y: n.ty,
+      symbolSize: size,
+      // 力导向视图不喂时间线坐标做初值（会把节点压成一条横带），交给随机初始化
+      x: view === "timeline" ? n.tx : undefined,
+      y: view === "timeline" ? n.ty : undefined,
       category: catIndex[n.source] !== undefined ? catIndex[n.source] : 0,
-      itemStyle: { color: m.color },
-      label: view === "timeline"
-        ? { show:true, position:"right", fontSize:10, color:IS_DARK ? "#c8d0e0" : "#475069",
-            width:130, overflow:"truncate" }
-        : { show: nodeDegree(n) > 0 || DATA.nodes.length <= 60, position:"right",
-            fontSize:10, color:IS_DARK ? "#c8d0e0" : "#475069",
-            width:110, overflow:"truncate" },
+      itemStyle: { color: m.color,
+                   borderColor: IS_DARK ? "#10141d" : "#ffffff",
+                   borderWidth: 1.2 },
+      label: { show: DATA.nodes.length <= 80, position: "right",
+               fontSize: 12, fontWeight: 500,
+               color: IS_DARK ? "#dbe2ef" : "#2a3346",
+               width: 170, overflow: "truncate" },
       paper: n
     };
   });
@@ -303,11 +311,11 @@ function buildEdges(view){
       source: String(e.source), target: String(e.target),
       shared: e.shared, kind: e.kind, weight: e.weight,
       lineStyle: e.kind === "cites"
-        ? { color: IS_DARK ? "rgba(150,160,185,0.35)" : "rgba(70,80,110,0.45)",
-            width: 1.1, curveness: 0.18,
+        ? { color: IS_DARK ? "rgba(150,160,185,0.4)" : "rgba(70,80,110,0.5)",
+            width: 1.4, curveness: 0.18,
             type: "solid" }
-        : { color: IS_DARK ? "rgba(120,200,170,0.22)" : "rgba(16,140,100,0.26)",
-            width: 0.6 + Math.min(4, e.weight * 0.7), curveness: 0.12,
+        : { color: IS_DARK ? "rgba(120,200,170,0.22)" : "rgba(16,140,100,0.28)",
+            width: 0.7 + Math.min(4, e.weight * 0.7), curveness: 0.12,
             type: "dashed" },
       emphasis: { lineStyle: { width: e.kind === "cites" ? 2.2 : 1.2 + Math.min(4, e.weight * 0.7) } }
     };
@@ -347,9 +355,12 @@ function currentOption(){
     series: [{
       type: "graph", layout: view === "timeline" ? "none" : "force",
       roam: true, draggable: true,
+      // 斥力/边长随节点数缩放；共现图更稀疏（其边天然偏多）
       force: view === "cooccur"
-        ? { repulsion: 2600, edgeLength: [80, 260], gravity: 0.08, friction: 0.25 }
-        : { repulsion: 900, edgeLength: [60, 190], gravity: 0.12, friction: 0.25 },
+        ? { repulsion: Math.max(3200, DATA.nodes.length * 70),
+            edgeLength: [110, 320], gravity: 0.06, friction: 0.2 }
+        : { repulsion: Math.max(1800, DATA.nodes.length * 45),
+            edgeLength: [90, 260], gravity: 0.08, friction: 0.2 },
       categories: categories,
       data: buildNodes(view, catIndex),
       links: buildEdges(view),
