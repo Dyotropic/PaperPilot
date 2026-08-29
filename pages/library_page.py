@@ -318,6 +318,7 @@ def build_library_page(ctx):
             ctx.agent_paper_selection = [p for p in _project_papers if p["project_paper_id"] in _selected_ids]
         else:
             ctx.agent_paper_selection.clear()
+        _refresh_graph_menu()
 
     def _clear_library():
         """Agent 发消息后清除文献库选中状态。"""
@@ -1581,19 +1582,29 @@ def build_library_page(ctx):
         dlg.open = True
         ctx.page.update()
 
-    def on_open_graph(e=None):
-        """构建并打开当前课题的知识图谱窗口（后台线程 + 进度弹窗）。"""
+    def on_open_graph_scope(all_papers: bool):
+        """构建并打开当前课题的知识图谱窗口（范围：全部 / 仅选中文献）。"""
         if _selected_project_id is None:
             _show_graph_dialog("请先在左侧选择一个课题。")
             return
         if not _project_papers:
             _show_graph_dialog("当前课题暂无论文，请先检索并保存论文，或导入本地 PDF。")
             return
+        scope_label = ""
+        if all_papers:
+            papers = list(_project_papers)
+        else:
+            papers = [p for p in _project_papers
+                      if p.get("project_paper_id") in _selected_ids]
+            if not papers:
+                _show_graph_dialog("未选中任何文献：请先开启「多选」并勾选要作图的文献。")
+                return
+            scope_label = f"（选中 {len(papers)} 篇）"
         if not _graph_window.is_graph_window_available():
             _show_graph_dialog("窗口组件（pywebview）不可用，无法打开图谱。")
             return
 
-        project_name = selected_project_title.value or "课题"
+        project_name = (selected_project_title.value or "课题") + scope_label
         status = {"text": "准备构建…"}
         prog_dlg = ft.AlertDialog(
             title=ft.Text("正在构建知识图谱", size=15, weight=ft.FontWeight.W_600),
@@ -1612,7 +1623,7 @@ def build_library_page(ctx):
         def _run():
             try:
                 _result["data"] = _graph_service.build_graph_data(
-                    _selected_project_id, list(_project_papers),
+                    _selected_project_id, papers,
                     on_progress=lambda s: status.__setitem__("text", s))
             except Exception as ex:
                 _result["err"] = str(ex)
@@ -1657,6 +1668,30 @@ def build_library_page(ctx):
 
         ctx.page.run_task(_poll)
 
+    # 「知识图谱」折叠菜单：构建范围二选一（全部 / 仅选中文献），条目随数据动态刷新
+    graph_btn = ft.PopupMenuButton(icon=ft.Icons.HUB, tooltip="知识图谱", items=[])
+
+    def _update_graph_menu():
+        n, m = len(_project_papers), len(_selected_ids)
+        graph_btn.items = [
+            ft.PopupMenuItem(
+                content=ft.Text(f"全部文献（{n} 篇）", size=13),
+                on_click=lambda e: on_open_graph_scope(True),
+            ),
+            ft.PopupMenuItem(
+                content=ft.Text(f"仅选中的文献（{m} 篇）", size=13),
+                on_click=lambda e: on_open_graph_scope(False),
+                disabled=(m == 0),
+            ),
+        ]
+
+    def _refresh_graph_menu():
+        _update_graph_menu()
+        try:
+            graph_btn.update()
+        except Exception:
+            pass  # 未挂载到页面时静默（构建期调用）
+
     # ── 注册课题能力回调（供左侧导航省略号菜单 / 子菜单调用）──
     ctx.library_select_project = on_select_project
     ctx.library_new_project = lambda: on_new_project(None)
@@ -1696,11 +1731,7 @@ def build_library_page(ctx):
                     sort_btn,
                     ai_sort_btn,
                     sort_mode_text,
-                    ft.IconButton(
-                        icon=ft.Icons.HUB,
-                        tooltip="知识图谱",
-                        on_click=on_open_graph,
-                    ),
+                    graph_btn,
                     ft.PopupMenuButton(
                         icon=ft.Icons.DOWNLOAD,
                         tooltip="导出",
