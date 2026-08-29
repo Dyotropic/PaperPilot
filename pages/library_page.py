@@ -19,6 +19,8 @@ from paperpilot import repo_manager, downloader
 from paperpilot.local_import import scan_folder, extract_pdfs
 from paperpilot.indexer import rank_papers, unload_cross_encoder
 from paperpilot.pdf_viewer import open_full_reader, is_full_reader_available
+from paperpilot import graph_service as _graph_service
+from paperpilot import graph_window as _graph_window
 from paperpilot.ai_service import save_deep_read_json, get_full_text_for_paper
 from paperpilot.library import save_deep_read_notes
 
@@ -1568,6 +1570,93 @@ def build_library_page(ctx):
         dlg.open = True
         ctx.page.update()
 
+    def _show_graph_dialog(message: str, title: str = "知识图谱"):
+        """图谱入口的轻量提示框。"""
+        dlg = ft.AlertDialog(
+            title=ft.Text(title, size=15, weight=ft.FontWeight.W_600),
+            content=ft.Text(message, size=13),
+            actions=[ft.TextButton("确定", on_click=lambda e: _close_dlg(dlg))],
+        )
+        ctx.page.overlay.append(dlg)
+        dlg.open = True
+        ctx.page.update()
+
+    def on_open_graph(e=None):
+        """构建并打开当前课题的知识图谱窗口（后台线程 + 进度弹窗）。"""
+        if _selected_project_id is None:
+            _show_graph_dialog("请先在左侧选择一个课题。")
+            return
+        if not _project_papers:
+            _show_graph_dialog("当前课题暂无论文，请先检索并保存论文，或导入本地 PDF。")
+            return
+        if not _graph_window.is_graph_window_available():
+            _show_graph_dialog("窗口组件（pywebview）不可用，无法打开图谱。")
+            return
+
+        project_name = selected_project_title.value or "课题"
+        status = {"text": "准备构建…"}
+        prog_dlg = ft.AlertDialog(
+            title=ft.Text("正在构建知识图谱", size=15, weight=ft.FontWeight.W_600),
+            content=ft.Row([
+                ft.ProgressRing(width=28, height=28, stroke_width=3),
+                ft.Text(status["text"], size=13),
+            ], spacing=14, tight=True),
+        )
+        ctx.page.overlay.append(prog_dlg)
+        prog_dlg.open = True
+        ctx.page.update()
+
+        _done = threading.Event()
+        _result: dict = {"data": None, "err": None}
+
+        def _run():
+            try:
+                _result["data"] = _graph_service.build_graph_data(
+                    _selected_project_id, list(_project_papers),
+                    on_progress=lambda s: status.__setitem__("text", s))
+            except Exception as ex:
+                _result["err"] = str(ex)
+            finally:
+                _done.set()
+
+        threading.Thread(target=_run, daemon=True).start()
+
+        async def _poll():
+            import asyncio
+            prog_text = prog_dlg.content.controls[1]
+            while not _done.is_set():
+                prog_text.value = status["text"]
+                try:
+                    prog_dlg.update()
+                except Exception:
+                    pass
+                await asyncio.sleep(0.3)
+            prog_dlg.open = False
+            try:
+                ctx.page.overlay.remove(prog_dlg)
+            except Exception:
+                pass
+
+            if _result["err"] is not None:
+                ctx.page.update()
+                _show_graph_dialog(f"图谱构建失败：{_result['err']}")
+                return
+            opened = False
+            try:
+                opened = _graph_window.open_graph_window(
+                    project_name, _result["data"],
+                    theme_seed=THEMES[state.theme_name]["seed"],
+                    dark_mode=state.dark_mode)
+            except Exception as ex:
+                ctx.page.update()
+                _show_graph_dialog(f"图谱窗口打开失败：{ex}")
+                return
+            if not opened:
+                _show_graph_dialog("图谱窗口未能打开（窗口组件不可用）。")
+            ctx.page.update()
+
+        ctx.page.run_task(_poll)
+
     # ── 注册课题能力回调（供左侧导航省略号菜单 / 子菜单调用）──
     ctx.library_select_project = on_select_project
     ctx.library_new_project = lambda: on_new_project(None)
@@ -1607,6 +1696,11 @@ def build_library_page(ctx):
                     sort_btn,
                     ai_sort_btn,
                     sort_mode_text,
+                    ft.IconButton(
+                        icon=ft.Icons.HUB,
+                        tooltip="知识图谱",
+                        on_click=on_open_graph,
+                    ),
                     ft.PopupMenuButton(
                         icon=ft.Icons.DOWNLOAD,
                         tooltip="导出",
