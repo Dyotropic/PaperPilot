@@ -4,8 +4,7 @@
 """
 
 import re
-from paperpilot.config import load_config
-from paperpilot.llm_client import get_client
+from paperpilot.llm_client import get_client, llm_configured
 
 _SYSTEM_PROMPT = (
     "You are a scientific translator. Translate Chinese academic keywords into "
@@ -26,11 +25,6 @@ def translate_terms(chinese_terms: list[str]) -> list[str]:
     if not chinese_terms:
         return []
 
-    config = load_config()
-    api_key = config.get("deepseek", {}).get("api_key", "").strip()
-    if not api_key:
-        return [""] * len(chinese_terms)
-
     # Separate: already-ASCII terms pass through, Chinese terms need translation
     to_translate = []
     indices = []
@@ -48,6 +42,9 @@ def translate_terms(chinese_terms: list[str]) -> list[str]:
         indices.append(i)
 
     if not to_translate:
+        return results
+
+    if not llm_configured():
         return results
 
     # Build numbered list for reliable parsing

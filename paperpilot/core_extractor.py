@@ -10,8 +10,7 @@
 """
 
 import json
-from paperpilot.config import load_config
-from paperpilot.llm_client import get_client
+from paperpilot.llm_client import get_client, llm_configured
 
 _SYSTEM_PROMPT = (
     "你是一个科研关键词提取专家。你的任务是从科研课题标题中提取1-3个最核心、"
@@ -44,9 +43,7 @@ def extract_core_keywords(topic: str) -> list[str]:
     Returns:
         核心关键词列表（1-3个），失败时返回空列表
     """
-    config = load_config()
-    api_key = config.get("deepseek", {}).get("api_key", "").strip()
-    if not api_key:
+    if not llm_configured():
         return []
 
     client = get_client()
@@ -95,9 +92,7 @@ def extract_regular_keywords(topic: str) -> list[str]:
     Returns:
         细分关键词列表（5-8个），失败时返回空列表
     """
-    config = load_config()
-    api_key = config.get("deepseek", {}).get("api_key", "").strip()
-    if not api_key:
+    if not llm_configured():
         return []
 
     client = get_client()

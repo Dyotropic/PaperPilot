@@ -209,6 +209,24 @@ class AIService:
                 return json.loads(m.group(1))
             except json.JSONDecodeError:
                 pass
+        # 数组路径优先于单对象：避免贪婪 {...} 正则对截断数组只捞回首元素。
+        # ① 数组闭合但尾部有垃圾 → 取括号内内容；② 被 max_tokens 截断、
+        # 连闭合 ] 都没有 → 直接扫描全部完整 {...} 对象，逐条恢复。
+        arr_m = re.search(r"\[([\s\S]*)\]", content)
+        if arr_m:
+            scan_segment = arr_m.group(1)
+        elif content.lstrip().startswith("["):
+            scan_segment = content.lstrip()[1:]
+        else:
+            scan_segment = None
+        if scan_segment is not None:
+            items = self._extract_json_objects(scan_segment)
+            if items:
+                logger.info(
+                    f"Truncated JSON recovery: salvaged {len(items)} items"
+                )
+                return items
+
         # 尝试找 { ... } 块
         m = re.search(r"\{[\s\S]*\}", content)
         if m:
@@ -216,29 +234,25 @@ class AIService:
                 return json.loads(m.group(0))
             except json.JSONDecodeError:
                 pass
-        # 兜底：截断 JSON 数组恢复 —— 逐条提取完整 {...} 对象
-        arr_m = re.search(r"\[([\s\S]*)\]", content)
-        if arr_m:
-            inner = arr_m.group(1)
-            items = []
-            for obj_m in re.finditer(
-                r"\{(?:[^{}]|\{(?:[^{}]|\{[^{}]*\})*\})*\}",
-                inner,
-            ):
-                try:
-                    items.append(json.loads(obj_m.group(0)))
-                except json.JSONDecodeError:
-                    continue
-            if items:
-                logger.info(
-                    f"Truncated JSON recovery: salvaged {len(items)} items"
-                )
-                return items
         logger.warning(
             f"Failed to parse JSON from API response "
             f"(len={len(content)}, preview={content[:300]})"
         )
         return {}
+
+    @staticmethod
+    def _extract_json_objects(segment: str) -> list:
+        """从字符串段中逐条提取完整 JSON 对象（容忍对象间存在残缺内容）。"""
+        items = []
+        for obj_m in re.finditer(
+            r"\{(?:[^{}]|\{(?:[^{}]|\{[^{}]*\})*\})*\}",
+            segment,
+        ):
+            try:
+                items.append(json.loads(obj_m.group(0)))
+            except json.JSONDecodeError:
+                continue
+        return items
 
     # ── RLM 分层阅读 ──
 
@@ -548,11 +562,14 @@ class AIService:
             {"role": "user", "content": "\n".join(lines)},
         ]
 
-        # token 配额：每篇 600 + 500 余量，上限 8000（DeepSeek 8192 安全边际）
-        dyn_tokens = min(8000, chunk_size * 600 + 500)
+        # token 配额：每篇 850 + 500 余量，上限 8000（DeepSeek 8192 安全边际）
+        # 中文理由实测每篇可达 700+ tokens，篇均 600 会截断响应导致整批解析失败
+        dyn_tokens = min(8000, chunk_size * 850 + 500)
+        # DeepSeek v4 默认开启思考模式，reasoning tokens 会烧掉输出预算导致空响应
+        # （Phase1 报告 §7.6），非推理类调用必须显式关闭
         content = self._call_api(
             messages, temperature=0.2, max_tokens=dyn_tokens, timeout=120,
-            model=self._resolve_task_model("score"),
+            model=self._resolve_task_model("score"), thinking=False,
         )
         if not content:
             logger.warning(
@@ -568,6 +585,9 @@ class AIService:
             items = raw["papers"]
         elif isinstance(raw, dict) and "results" in raw:
             items = raw["results"]
+        elif isinstance(raw, dict) and "index" in raw:
+            # 截断恢复只捞回单个完整对象时，兜底为单元素列表而不是整批丢弃
+            items = [raw]
         else:
             logger.warning(
                 f"score_papers: chunk {chunk_idx} parse returned "
@@ -953,7 +973,8 @@ class AIService:
         ]
 
         try:
-            summary = self._call_api(api_messages, temperature=0.2, max_tokens=800, timeout=60)
+            summary = self._call_api(api_messages, temperature=0.2, max_tokens=800,
+                                     timeout=60, thinking=False)
             return summary.strip() if summary else None
         except Exception:
             logger.warning("压缩对话失败", exc_info=True)
@@ -1085,7 +1106,7 @@ class AIService:
         })
 
         reply = self._call_api(messages, temperature=0.5, max_tokens=2000,
-                               timeout=120)
+                               timeout=120, thinking=False)
 
         # 保存多轮对话历史
         if session_id and reply:
