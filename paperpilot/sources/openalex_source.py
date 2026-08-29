@@ -17,6 +17,8 @@ from paperpilot.sources.base import (
 
 _OA_CACHE_DIR = "openalex"
 _CACHE_TTL = cache_ttl_seconds()
+# 引用列表/关键词属于几乎不可变的历史事实，TTL 独立于检索页缓存（至少 30 天）
+_REFS_TTL = max(_CACHE_TTL, 30 * 24 * 3600)
 
 _oa_cache = open_cache(_OA_CACHE_DIR)
 
@@ -28,6 +30,142 @@ def _get_api_key() -> str:
     无 key 每日仅 100 credits，免费 key 100,000 credits/天。
     """
     return str((config.get("data_sources", {}) or {}).get("openalex_api_key", "") or "").strip()
+
+
+def _normalize_doi(doi) -> str:
+    """DOI 规范化：小写、去 https://doi.org/ 前缀；空值返回空串。"""
+    if not doi:
+        return ""
+    d = str(doi).strip().lower()
+    if d.startswith("https://doi.org/"):
+        d = d[len("https://doi.org/"):]
+    elif d.startswith("http://doi.org/"):
+        d = d[len("http://doi.org/"):]
+    return d
+
+
+def _norm_oa_id(v) -> str:
+    """OpenAlex ID 规范化：兼容 URL 与裸 W-id 两种形态，统一为 W 开头短 id。"""
+    if not v:
+        return ""
+    return str(v).strip().rsplit("/", 1)[-1]
+
+
+def _extract_work_refs_payload(w: dict) -> dict | None:
+    """从 OpenAlex work JSON 提取图谱引用缓存载荷（无 DOI 返回 None）。
+
+    载荷字段：doi（小写规范形）、openalex_id（W 短 id）、
+    referenced_works（W 短 id 列表）、keywords（display_name 列表）。
+    """
+    doi = _normalize_doi(w.get("doi"))
+    if not doi:
+        return None
+    keywords = [
+        (k.get("display_name") or "").strip()
+        for k in (w.get("keywords") or [])
+        if isinstance(k, dict) and (k.get("display_name") or "").strip()
+    ]
+    return {
+        "doi": doi,
+        "openalex_id": _norm_oa_id(w.get("id")),
+        "referenced_works": [_norm_oa_id(r) for r in (w.get("referenced_works") or []) if r],
+        "keywords": keywords,
+    }
+
+
+def _cache_work_refs(w: dict) -> None:
+    """检索解析时顺带缓存 work 的引用列表与关键词（图谱第一级数据源，零额外请求）。"""
+    if _oa_cache is None:
+        return
+    payload = _extract_work_refs_payload(w)
+    if payload:
+        _oa_cache.set(f"refs:{payload['doi']}", payload, expire=_REFS_TTL)
+
+
+def get_work_refs(dois: list, errors: list | None = None) -> dict:
+    """按 DOI 批量获取 openalex_id / referenced_works / keywords（cache-aside）。
+
+    图谱引用边的第二级数据源：先查 refs:{doi} 缓存，未命中的每批 ≤50 个 DOI
+    一次请求补查（select 最小字段集），结果写回缓存。
+    OpenAlex 未收录的 DOI 不做负缓存（下次构建仍会重查，一批请求开销可忽略）。
+
+    Args:
+        dois: 原始 DOI 列表（大小写 / https 前缀均可）
+        errors: 可选收集列表 ("openalex", "rate_limited"|"network", 信息)；
+                提供时限流/网络失败不抛异常而是记录后返回已得结果，
+                未提供时持续 429 抛 SourceRateLimited（其余网络失败仍静默跳过）
+
+    Returns:
+        {小写doi: {"doi","openalex_id","referenced_works","keywords"}}（仅含查到的 DOI）
+    """
+    norm, seen = [], set()
+    for d in dois:
+        nd = _normalize_doi(d)
+        if nd and nd not in seen:
+            seen.add(nd)
+            norm.append(nd)
+
+    out: dict = {}
+    missing: list = []
+    for nd in norm:
+        cached = _oa_cache.get(f"refs:{nd}") if _oa_cache is not None else None
+        if cached is not None:
+            out[nd] = cached
+        else:
+            missing.append(nd)
+
+    api_key = _get_api_key()
+    headers = {"User-Agent": "PaperPilot/1.0 (mailto:paperpilot@example.com)"}
+    url = "https://api.openalex.org/works"
+    old_timeout = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(15)
+    try:
+        for i in range(0, len(missing), 50):
+            batch = missing[i:i + 50]
+            params = {
+                "filter": "doi:" + "|".join(batch),
+                "select": "id,doi,referenced_works,keywords",
+                "per_page": 50,
+                "mailto": "paperpilot@example.com",
+            }
+            if api_key:
+                params["api_key"] = api_key
+            try:
+                resp = requests.get(url, params=params, headers=headers, timeout=15)
+                # 429 退避 2s/5s/10s（遵循 Retry-After），与检索链路同策略
+                for wait in (2, 5, 10):
+                    if resp.status_code != 429:
+                        break
+                    retry_after = resp.headers.get("Retry-After", "")
+                    try:
+                        time.sleep(min(float(retry_after), 30) if retry_after else wait)
+                    except ValueError:
+                        time.sleep(wait)
+                    resp = requests.get(url, params=params, headers=headers, timeout=15)
+                if resp.status_code == 429:
+                    hint = "OpenAlex 被限流(429)，未能补查部分论文的引用关系"
+                    if errors is not None:
+                        errors.append(("openalex", "rate_limited", hint))
+                        break
+                    raise SourceRateLimited("openalex", 429, hint)
+                resp.raise_for_status()
+                for w in resp.json().get("results", []):
+                    payload = _extract_work_refs_payload(w)
+                    if not payload:
+                        continue
+                    out[payload["doi"]] = payload
+                    if _oa_cache is not None:
+                        _oa_cache.set(f"refs:{payload['doi']}", payload,
+                                      expire=_REFS_TTL)
+                time.sleep(0.1)  # 批间礼貌速率
+            except requests.RequestException:
+                # 网络失败：放弃该批继续（图谱降级为仅共现/时间线）
+                if errors is not None:
+                    errors.append(("openalex", "network", "OpenAlex 引用补查网络失败"))
+                continue
+    finally:
+        socket.setdefaulttimeout(old_timeout)
+    return out
 
 
 def _parse_openalex_work(w: dict) -> dict | None:
@@ -141,6 +279,8 @@ def _fetch_openalex_raw(query: str, max_results: int = 30,
                     continue
             page_total = len(results)
             for i, w in enumerate(results):
+                if fetched:
+                    _cache_work_refs(w)  # 图谱第一级：检索响应本就带引用/关键词，顺带入库
                 paper = _parse_openalex_work(w)
                 if paper:
                     api_rel = w.get("relevance_score")
@@ -208,6 +348,7 @@ def _fetch_missing_abstracts(papers: list[dict]) -> list[dict]:
             resp = requests.get(oa_id, headers=headers, timeout=10)
             if resp.status_code == 200:
                 w = resp.json()
+                _cache_work_refs(w)  # 全量 work JSON 顺带缓存引用/关键词
                 inv = w.get("abstract_inverted_index")
                 if inv:
                     text = _decode_inverted_index(inv)
