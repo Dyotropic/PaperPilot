@@ -195,7 +195,7 @@ def build_sidebar(active_idx: int) -> ft.Column:
         # 底部版本信息
         ft.Container(expand=True),
         ft.Container(
-            content=ft.Text("v1.0  Phase 2", size=FS_XS, color=text_tertiary()),
+            content=ft.Text("v2  Phase 3", size=FS_XS, color=text_tertiary()),
             padding=ft.padding.Padding(left=SP_LG, top=SP_SM, right=SP_LG, bottom=SP_SM),
         ),
     ], spacing=0, expand=True)
