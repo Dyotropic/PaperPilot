@@ -163,6 +163,23 @@ def extract_keywords(topic_description: str, top_n: int = 10) -> list[str]:
     return _english_extract(topic_description, top_n)
 
 
+def extract_keywords_local(text: str, top_n: int = 10) -> list[str]:
+    """纯本地关键词提取（绝不调用 LLM）：中文 jieba+语义打分，英文 KeyBERT。
+
+    供知识图谱逐篇提取论文关键词等批处理场景使用——批量调用时
+    不能走 extract_keywords 的 LLM 优先路径（N 篇 = N 次 API 调用）。
+    """
+    text = (text or "").strip()
+    if not text:
+        return []
+    try:
+        if _has_chinese(text):
+            return _chinese_extract(text, top_n)
+        return _english_extract(text, top_n)
+    except Exception:
+        return []
+
+
 def extract_all_keywords(topic: str, top_n: int = 10) -> list[tuple[str, float]]:
     """提取带权重的关键词列表：核心关键词（权重高）+ 普通关键词（权重低）。
 
