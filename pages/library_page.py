@@ -1229,18 +1229,32 @@ def build_library_page(ctx):
                 return
 
             # 无 PDF/HTML → 弹 Flet 原生提示框
+            from paperpilot.downloader import pdf_direct_url
             content_parts = [
                 ft.Text("抱歉，暂时无法获取本文 PDF。", size=14),
-                ft.Text("该论文无法通过直链下载，也不在 arXiv 上。", size=13,
+                ft.Text("出版商反爬拦截了程序化下载，但浏览器通常可以通过。", size=13,
                        color=ft.Colors.OUTLINE),
-                ft.Text("请尝试手动下载 PDF 后，通过「导入 PDF」添加到文献库。", size=13),
+                ft.Text("点击下方按钮用浏览器下载，完成后通过「导入 PDF」添加。", size=13),
             ]
             if _error_msg:
                 content_parts.append(ft.Text(f"调试信息: {_error_msg}", size=12,
                                    color=ft.Colors.ERROR))
+            browser_url = pdf_direct_url(paper)
+            if not browser_url:
+                browser_url = (f"https://doi.org/{doi}" if doi
+                               else (paper.get("url") or ""))
+
+            def _open_browser_dl(e, u=browser_url):
+                import webbrowser
+                if u:
+                    webbrowser.open(u)
+
+            if browser_url:
+                content_parts.append(ft.Row([
+                    ft.FilledButton("用浏览器下载 PDF", on_click=_open_browser_dl),
+                ], spacing=8))
             if doi:
                 import webbrowser
-                content_parts.append(ft.Divider(height=8))
                 content_parts.append(ft.Row([
                     ft.Text("DOI: ", size=13, color=ft.Colors.OUTLINE),
                     ft.TextButton(

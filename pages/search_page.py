@@ -22,7 +22,7 @@ from paperpilot.keywords import extract_all_keywords, merge_keywords
 from paperpilot.mt_translator import translate_terms
 from paperpilot.fetcher import (
     fetch_arxiv, fetch_openalex, fetch_europepmc, fetch_with_cascade,
-    fetch_multi_primary, deduplicate, get_article_type_label,
+    fetch_multi_primary, deduplicate, get_article_type_label, SourceRateLimited,
 )
 from paperpilot.indexer import rank_papers, unload_cross_encoder
 from paperpilot import library
@@ -48,12 +48,37 @@ def _has_cjk(text: str) -> bool:
     return any('一' <= c <= '鿿' for c in text)
 
 
+_SOURCE_LABELS = {"arxiv": "arXiv", "openalex": "OpenAlex", "europepmc": "Europe PMC"}
+
+
+def _rate_limited_names(errors: list) -> list[str]:
+    """从源错误列表提取被限流的源显示名（保持稳定顺序）。"""
+    order = ["openalex", "arxiv", "europepmc"]
+    limited = {s for s, kind, _ in errors or [] if kind == "rate_limited"}
+    return [_SOURCE_LABELS[s] for s in order if s in limited]
+
+
+def _openalex_key_hint() -> str:
+    """OpenAlex 被限流时的补充引导（未配置 key 时提示免费注册）。"""
+    from paperpilot.sources.openalex_source import _get_api_key
+    if not _get_api_key():
+        return "（2026-02 起 OpenAlex 无 key 每日仅 100 次，可在设置页免费配置 API Key 提升至 10 万次/天）"
+    return ""
+
+
+def _add_src_error(src_errors: list, e: "SourceRateLimited") -> None:
+    """记录限流错误（按 source+kind 去重）。"""
+    if not any(s == e.source and k == "rate_limited" for s, k, _ in src_errors):
+        src_errors.append((e.source, "rate_limited", e.message))
+
+
 def _run_pipeline(max_per: int, year_min: str, year_max: str,
                   use_arxiv: bool, use_openalex: bool, use_europepmc: bool,
                   top_k: int, ce_candidates: int):
     """在后台线程中运行完整的搜索流水线。
 
     所有 Flet 控件值由主线程读取后传入，避免跨线程访问控件。
+    返回 (papers, scores, src_errors)；src_errors 收集各源限流/错误信息。
     """
     import time as _time
     _t0 = _time.time()
@@ -61,6 +86,7 @@ def _run_pipeline(max_per: int, year_min: str, year_max: str,
           f"openalex={use_openalex}, top_k={top_k}, ce_candidates={ce_candidates}", flush=True)
 
     papers = []
+    src_errors: list = []
 
     # 0. 年份筛选
     if year_min or year_max:
@@ -108,6 +134,7 @@ def _run_pipeline(max_per: int, year_min: str, year_max: str,
                 min_results=3,
                 year_min=year_min,
                 year_max=year_max,
+                errors=src_errors,
             )
             print(f"[PaperPilot] arXiv 返回: {len(arxiv_papers)} 篇 (level={arxiv_level})")
             papers += arxiv_papers
@@ -120,6 +147,8 @@ def _run_pipeline(max_per: int, year_min: str, year_max: str,
                                           year_min=year_min, year_max=year_max)
                 print(f"[PaperPilot] arXiv（描述）返回: {len(desc_papers)} 篇")
                 papers += desc_papers
+            except SourceRateLimited as e:
+                _add_src_error(src_errors, e)
             except Exception as e:
                 print(f"[PaperPilot] arXiv（描述）失败: {e}")
 
@@ -135,6 +164,7 @@ def _run_pipeline(max_per: int, year_min: str, year_max: str,
                 min_results=3,
                 year_min=year_min,
                 year_max=year_max,
+                errors=src_errors,
             )
             print(f"[PaperPilot] OpenAlex 返回: {len(oa_papers)} 篇 ({len(primary_kw_list)}路主关键词)")
             papers += oa_papers
@@ -147,6 +177,8 @@ def _run_pipeline(max_per: int, year_min: str, year_max: str,
                                              year_min=year_min, year_max=year_max)
                 print(f"[PaperPilot] OpenAlex（描述）返回: {len(desc_papers)} 篇")
                 papers += desc_papers
+            except SourceRateLimited as e:
+                _add_src_error(src_errors, e)
             except Exception as e:
                 print(f"[PaperPilot] OpenAlex（描述）失败: {e}")
 
@@ -162,6 +194,7 @@ def _run_pipeline(max_per: int, year_min: str, year_max: str,
                 min_results=3,
                 year_min=year_min,
                 year_max=year_max,
+                errors=src_errors,
             )
             print(f"[PaperPilot] Europe PMC 返回: {len(epmc_papers)} 篇 ({len(primary_kw_list)}路主关键词)")
             papers += epmc_papers
@@ -174,6 +207,8 @@ def _run_pipeline(max_per: int, year_min: str, year_max: str,
                                               year_min=year_min, year_max=year_max)
                 print(f"[PaperPilot] Europe PMC（描述）返回: {len(desc_papers)} 篇")
                 papers += desc_papers
+            except SourceRateLimited as e:
+                _add_src_error(src_errors, e)
             except Exception as e:
                 print(f"[PaperPilot] Europe PMC（描述）失败: {e}")
 
@@ -184,7 +219,7 @@ def _run_pipeline(max_per: int, year_min: str, year_max: str,
 
     if not papers:
         print("[PaperPilot] 未找到论文")
-        return [], []
+        return [], [], src_errors
 
     # 5. 排序打分（首次会加载 942MB 语义模型，约需 10-30 秒）
     state.status_text = f"语义精排中（{len(papers)} 篇）..."
@@ -198,7 +233,7 @@ def _run_pipeline(max_per: int, year_min: str, year_max: str,
         secondary_kw=secondary_en,
         regular_kw=regular_en,
     )
-    return papers, scores
+    return papers, scores, src_errors
 
 
 # ── 检索结果表头 / 排序 / 渲染 ──
@@ -641,12 +676,14 @@ def show_paper_detail(paper: dict):
 
     def _show_manual_download_dialog(p):
         import webbrowser as _wb
+        from paperpilot.downloader import pdf_direct_url
         doi = p.get("doi", "")
-        doi_url = f"https://doi.org/{doi}" if doi else p.get("url", "")
+        # 优先用猜测 PDF 直链：浏览器可通过反爬挑战，通常直接触发下载
+        browser_url = pdf_direct_url(p) or (f"https://doi.org/{doi}" if doi else p.get("url", ""))
 
         def _go_download(e):
-            if doi_url:
-                _wb.open(doi_url)
+            if browser_url:
+                _wb.open(browser_url)
             dlg.open = False
             dlg.update()
 
@@ -657,14 +694,14 @@ def show_paper_detail(paper: dict):
         dlg = ft.AlertDialog(
             title=ft.Text("无法自动获取全文"),
             content=ft.Text(
-                "该论文无法自动下载 PDF 或提取全文。\n\n"
-                "请先点击「去下载」在浏览器中打开，\n"
-                "下载 PDF 后回到此处点击「导入PDF」选择文件。\n\n"
+                "该论文的出版商拦截了程序化下载（反爬挑战），但浏览器通常可以。\n\n"
+                "点击「用浏览器下载」，在浏览器中完成下载后，\n"
+                "回到此处点击「导入PDF」选择文件即可。\n\n"
                 f"论文 DOI: {doi or '无'}"
             ),
             actions=[
                 ft.TextButton("取消", on_click=_cancel),
-                ft.FilledButton("去下载", on_click=_go_download),
+                ft.FilledButton("用浏览器下载", on_click=_go_download),
             ],
         )
         ctx.page.overlay.append(dlg)
@@ -1416,7 +1453,7 @@ def build_search_page(ctx):
         def _run_in_thread():
             """在独立线程中执行流水线，避免 run_in_executor 嵌套回调丢失。"""
             try:
-                papers, scores = _run_pipeline(
+                papers, scores, src_errors = _run_pipeline(
                     max_per=_max_per, year_min=_year_min, year_max=_year_max,
                     use_arxiv=_use_arxiv, use_openalex=_use_openalex,
                     use_europepmc=_use_europepmc,
@@ -1424,6 +1461,7 @@ def build_search_page(ctx):
                 )
                 _result["papers"] = papers
                 _result["scores"] = scores
+                _result["errors"] = src_errors
             except Exception as ex:
                 _result["error"] = ex
             finally:
@@ -1444,13 +1482,20 @@ def build_search_page(ctx):
 
             # 流水线完成，执行一次性 UI 更新
             try:
+                src_errors = _result.get("errors") or []
+                limited = _rate_limited_names(src_errors)
                 if "error" in _result:
                     state.status_text = f"检索失败: {_result['error']}"
                     traceback.print_exception(
                         type(_result["error"]), _result["error"],
                         _result["error"].__traceback__)
                 elif not _result.get("papers"):
-                    state.status_text = "未找到相关论文"
+                    if limited:
+                        key_hint = _openalex_key_hint() if "OpenAlex" in limited else ""
+                        state.status_text = (f"未找到论文：{'、'.join(limited)} "
+                                             f"被限流(429)，请稍后重试{key_hint}")
+                    else:
+                        state.status_text = "未找到相关论文"
                     state.papers = []
                     state.scores = []
                     results_section.visible = True
@@ -1462,6 +1507,10 @@ def build_search_page(ctx):
                     state.papers = _result["papers"]
                     state.scores = _result["scores"]
                     state.status_text = f"完成！共 {len(_result['scores'])} 篇"
+                    if limited:
+                        key_hint = _openalex_key_hint() if "OpenAlex" in limited else ""
+                        state.status_text += (f"  ⚠ {'、'.join(limited)} 限流(429)，"
+                                              f"本次结果可能不完整{key_hint}")
                     results_section.visible = True
                     save_to_library_btn.visible = True
                     ai_score_btn.visible = ctx.ai_service.is_available
