@@ -25,6 +25,7 @@ from pages.context import (
     text_primary, text_secondary, text_tertiary, border_color,
     seed_color, app_bg, surface, surface_hi, accent_container,
 )
+from pages.components import clamp_width, make_resize_handle
 
 logger = logging.getLogger(__name__)
 
@@ -47,39 +48,49 @@ _thinking_active: bool = False
 
 # ── Agent 面板拖拽拉伸 ──
 _AGENT_PANEL_MIN = 320
-_AGENT_PANEL_MAX_RATIO = 0.5
-_agent_panel_width = 380
+_AGENT_PANEL_MAX_RATIO = 0.5   # 运行时上限：窗宽的 50%
+_AGENT_PANEL_DEFAULT = 380
+_AGENT_PANEL_ABS_MAX = 900     # 配置值钳制上限（运行时上限仍随窗宽）
+_agent_panel_width = clamp_width(
+    380, _AGENT_PANEL_MIN, _AGENT_PANEL_ABS_MAX, _AGENT_PANEL_DEFAULT)
 _agent_panel_ref: ft.Container | None = None
-_resize_start_x: float = 0
-_resize_start_width: float = 0
 
 
-def _on_agent_resize_update(e):
-    global _agent_panel_width, _resize_start_x, _resize_start_width
-    if _resize_start_x == 0:
-        _resize_start_x = e.global_position.x
-        _resize_start_width = _agent_panel_width
-    page_w = ctx.page.width if ctx.page else 1200
-    delta_x = _resize_start_x - e.global_position.x
-    _agent_panel_width = _resize_start_width + delta_x
-    _agent_panel_width = max(_AGENT_PANEL_MIN, min(_agent_panel_width, int(page_w * _AGENT_PANEL_MAX_RATIO)))
+def _load_saved_agent_width() -> None:
+    """从 config 恢复上次拖拽保存的面板宽度（缺失/非法回退默认）。"""
+    global _agent_panel_width
+    try:
+        from paperpilot.config import load_config
+        saved = (load_config().get("ui", {}) or {}).get(
+            "agent_panel_width", _AGENT_PANEL_DEFAULT)
+        _agent_panel_width = clamp_width(
+            saved, _AGENT_PANEL_MIN, _AGENT_PANEL_ABS_MAX, _AGENT_PANEL_DEFAULT)
+    except Exception:
+        pass
+
+
+def _set_agent_panel_width(w: int) -> None:
+    """写入面板宽度（拖拽 update 高频调用，控件更新失败静默）。"""
+    global _agent_panel_width
+    _agent_panel_width = w
     if _agent_panel_ref:
-        _agent_panel_ref.width = _agent_panel_width
+        _agent_panel_ref.width = w
         try:
             _agent_panel_ref.update()
         except Exception:
             pass
 
 
-def _on_agent_resize_end(e):
-    global _resize_start_x
-    if _agent_panel_ref:
-        _agent_panel_ref.width = _agent_panel_width
-        try:
-            _agent_panel_ref.update()
-        except Exception:
-            pass
-    _resize_start_x = 0
+def _save_agent_width() -> None:
+    """拖拽结束持久化宽度到 config ui.agent_panel_width。"""
+    try:
+        from paperpilot.config import save_config
+        save_config({"ui": {"agent_panel_width": _agent_panel_width}})
+    except Exception:
+        pass
+
+
+_load_saved_agent_width()
 
 
 def _agent_theme_colors():
@@ -1056,15 +1067,13 @@ def build_agent_panel() -> tuple[ft.Container, ft.GestureDetector]:
     )
     _agent_panel_ref = agent_panel
 
-    resize_handle = ft.GestureDetector(
-        content=ft.Container(
-            width=8,
-            bgcolor=border_color(),
-            border_radius=4,
-        ),
-        mouse_cursor=ft.MouseCursor.RESIZE_LEFT_RIGHT,
-        on_horizontal_drag_update=_on_agent_resize_update,
-        on_horizontal_drag_end=_on_agent_resize_end,
+    def _max_panel_w() -> int:
+        page_w = ctx.page.width if ctx.page else 1200
+        return int(page_w * _AGENT_PANEL_MAX_RATIO)
+
+    resize_handle = make_resize_handle(
+        lambda: _agent_panel_width, _set_agent_panel_width,
+        _AGENT_PANEL_MIN, _max_panel_w, on_end=_save_agent_width,
     )
 
     return agent_panel, resize_handle

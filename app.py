@@ -19,6 +19,7 @@ from pages.agent_panel import (
     _trigger_compare_papers,  # noqa: F401  再导出保持模块级可访问
 )
 from pages.sidebar import build_sidebar, ensure_submenu_expanded
+from pages.components import clamp_width, make_resize_handle
 from pages.search_page import build_search_page
 from pages.library_page import build_library_page
 from pages.settings_page import (
@@ -96,14 +97,20 @@ def main(page: ft.Page):
     state.dark_mode = ui_config.get("dark_mode", False)
     apply_theme(page, state.theme_name, state.dark_mode)
 
-    # 恢复搜索/数据源设置
+    # 恢复搜索/数据源设置（钳制到滑条合法区间，防止手改 config 越界导致渲染崩溃）
+    def _clamp_slider(v, lo, hi) -> int:
+        try:
+            return max(lo, min(hi, int(v)))
+        except (TypeError, ValueError):
+            return lo
+
     search_cfg = cfg.get("search", {})
     if search_cfg.get("max_results"):
-        max_results_slider.value = int(search_cfg["max_results"])
+        max_results_slider.value = _clamp_slider(search_cfg["max_results"], 100, 500)
     if search_cfg.get("top_k"):
-        top_k_slider.value = int(search_cfg["top_k"])
+        top_k_slider.value = _clamp_slider(search_cfg["top_k"], 10, 200)
     if search_cfg.get("ce_candidates"):
-        ce_candidates_slider.value = int(search_cfg["ce_candidates"])
+        ce_candidates_slider.value = _clamp_slider(search_cfg["ce_candidates"], 10, 200)
 
     ds_cfg = cfg.get("data_sources", {})
     if "arxiv" in ds_cfg:
@@ -113,14 +120,36 @@ def main(page: ft.Page):
     if "europepmc" in ds_cfg:
         europepmc_switch.value = bool(ds_cfg["europepmc"])
 
-    # 左侧导航栏（内容后续由 page_switcher 动态替换）
+    # 左侧导航栏（内容后续由 page_switcher 动态替换；宽度可拖拽，配置持久化）
+    _NAV_MIN, _NAV_MAX, _NAV_DEFAULT = 150, 320, 190
+    sidebar_w = clamp_width(ui_config.get("sidebar_width", _NAV_DEFAULT),
+                            _NAV_MIN, _NAV_MAX, _NAV_DEFAULT)
     nav_ref = ft.Container(
         content=build_sidebar(1),
-        width=190,
+        width=sidebar_w,
         bgcolor=surface(),
         border=ft.Border(right=ft.BorderSide(1, border_color())),
     )
     ctx.top_nav_ref = nav_ref
+
+    def _set_nav_width(w: int):
+        nav_ref.width = w
+        try:
+            nav_ref.update()
+        except Exception:
+            pass
+
+    def _save_nav_width():
+        try:
+            from paperpilot.config import save_config
+            save_config({"ui": {"sidebar_width": nav_ref.width}})
+        except Exception:
+            pass
+
+    nav_resize_handle = make_resize_handle(
+        lambda: nav_ref.width, _set_nav_width, _NAV_MIN, _NAV_MAX,
+        on_end=_save_nav_width, side="left",
+    )
 
     container_project = ft.Container(
         content=build_search_page(ctx), visible=False, expand=True,
@@ -144,6 +173,7 @@ def main(page: ft.Page):
     page.add(
         ft.Row([
             nav_ref,
+            nav_resize_handle,
             ft.Stack([
                 container_project,
                 container_results,
