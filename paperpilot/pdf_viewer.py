@@ -448,6 +448,12 @@ def _create_window(create_kwargs: dict) -> bool:
     else:
         cleanup_script = "pass"
 
+    # 可选 JS↔Python 桥：js_api_factory 为 "模块路径:工厂函数名"（或 module.func），
+    # 子进程内 importlib 构造桥对象后传 webview.create_window(js_api=...)。
+    # 两键均从 create_kwargs 剔除（非 pywebview 参数）；缺省时行为与旧版完全一致。
+    api_factory = create_kwargs.pop("js_api_factory", None)
+    api_args = create_kwargs.pop("js_api_args", None) or []
+
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".json", delete=False, encoding="utf-8",
         dir=str(_html_dir) if html_content else None,
@@ -462,6 +468,16 @@ def _create_window(create_kwargs: dict) -> bool:
         f"with open({args_path!r},'r',encoding='utf-8') as f:\n"
         "  k=json.load(f)\n"
         f"os.unlink({args_path!r})\n"
+        "_jsapi=None\n"
+        f"_af={api_factory!r}\n"
+        f"_aa=json.loads({json.dumps(json.dumps(api_args))})\n"
+        "if _af:\n"
+        "  try:\n"
+        "    import importlib\n"
+        "    _mod,_name=(_af.split(':',1) if ':' in _af else _af.rsplit('.',1))\n"
+        "    _jsapi=getattr(importlib.import_module(_mod),_name)(*_aa)\n"
+        "  except Exception as _e:\n"
+        "    print(f'[pdf_viewer] js_api factory error: {_e}',file=sys.stderr)\n"
         "def _remove_topmost():\n"
         "    if sys.platform!='win32': return\n"
         "    import ctypes\n"
@@ -503,7 +519,7 @@ def _create_window(create_kwargs: dict) -> bool:
         "        print(f'[pdf_viewer] window not found: {ktitle[:50]}',file=sys.stderr)\n"
         "t=threading.Thread(target=_remove_topmost,daemon=True)\n"
         "t.start()\n"
-        "webview.create_window(**k)\n"
+        "webview.create_window(js_api=_jsapi,**k) if _jsapi is not None else webview.create_window(**k)\n"
         "webview.start(gui='edgechromium')\n"
         f"{cleanup_script}\n"
     )
