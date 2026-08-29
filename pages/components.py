@@ -3,9 +3,26 @@
 提供 VSCode 式拖拽调宽分隔手柄：按住手柄水平拖动即可调整相邻面板宽度，
 拖拽结束触发 on_end 回调（用于持久化到 config）。
 """
+import sys
+
 import flet as ft
 
 from pages.context import border_color
+
+
+def is_shift_pressed() -> bool:
+    """读取 Shift 键的实时物理按下状态（仅 Windows；其它平台或失败返回 False）。
+
+    Flet 控件事件不携带键盘修饰符，而勾选事件到达 Python 时用户通常仍按着
+    Shift（点击与事件处理间隔为毫秒级），故用 GetAsyncKeyState 判定 Shift+点击。
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        return bool(ctypes.windll.user32.GetAsyncKeyState(0x10) & 0x8000)
+    except Exception:
+        return False
 
 
 def make_resize_handle(get_width, set_width, min_w, max_w, on_end=None,

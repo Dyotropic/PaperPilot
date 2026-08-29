@@ -20,6 +20,7 @@ from pages.settings_page import (
 )
 from paperpilot.keywords import extract_all_keywords, merge_keywords
 from paperpilot.mt_translator import translate_terms
+from pages.components import is_shift_pressed
 from paperpilot.fetcher import (
     fetch_arxiv, fetch_openalex, fetch_europepmc, fetch_with_cascade,
     fetch_multi_primary, deduplicate, get_article_type_label, SourceRateLimited,
@@ -340,6 +341,7 @@ def refresh_results_table():
     global _search_list
     scored = state.scores
     ctx.search_checkboxes.clear()
+    ctx.search_last_checked_idx = None  # 新一批结果重置 Shift 范围勾选锚点
     rows = [_build_search_header()]
     for i, (paper, score) in enumerate(scored):
         year_str = str(paper.get("year") or "—")
@@ -977,8 +979,23 @@ def build_search_page(ctx):
     def _on_search_check_one(e, idx: int):
         if e.control.value:
             ctx.search_selected_ids.add(idx)
+            # Shift+点击：勾选上次点击行到本次行之间的全部行（Gmail 式范围勾选）。
+            # 检索结果复选框按 scores 顺序渲染，ctx.search_checkboxes[k] ↔ 索引 k；
+            # 锚点不移动，便于从同一锚点连续扩展区间。
+            last = getattr(ctx, "search_last_checked_idx", None)
+            if is_shift_pressed() and last is not None and last != idx:
+                i1, i2 = sorted((last, idx))
+                for i in range(i1, i2 + 1):
+                    ctx.search_selected_ids.add(i)
+                    if i < len(ctx.search_checkboxes):
+                        ctx.search_checkboxes[i].value = True
+                try:
+                    ctx.page.update()  # 区间内的勾选框同步显示为已勾选
+                except Exception:
+                    pass
         else:
             ctx.search_selected_ids.discard(idx)
+        ctx.search_last_checked_idx = idx
         _update_search_count()
 
     ctx.search_select_count_ref = search_select_count

@@ -14,6 +14,7 @@ from pages.context import (
     seed_color, app_bg, surface, surface_hi, accent_container,
     subtle_shadow, card,
 )
+from pages.components import is_shift_pressed
 from paperpilot import library
 from paperpilot import repo_manager, downloader
 from paperpilot.local_import import scan_folder, extract_pdfs
@@ -252,6 +253,9 @@ def build_library_page(ctx):
 
     # ── 多选（始终可见）──
     _selected_ids: set[int] = set()
+    # Shift 范围勾选：锚点（上次点击的行）与当前页的勾选顺序表
+    _last_checked_pp_id: int | None = None
+    _page_pp_ids: list[int] = []
     _compare_btn = None  # 文献库"对比分析"按钮引用
 
     multi_select_bar = ft.Row(visible=True, spacing=8)
@@ -296,10 +300,26 @@ def build_library_page(ctx):
         refresh_paper_list()
 
     def on_check_one(e, pp_id: int):
+        nonlocal _last_checked_pp_id
         if e.control.value:
             _selected_ids.add(pp_id)
+            # Shift+点击：勾选上次点击行到本次行之间的全部行（Gmail 式范围勾选）。
+            # 锚点不移动，便于从同一锚点连续扩展区间；只在当前页顺序表内生效。
+            if (is_shift_pressed() and _last_checked_pp_id is not None
+                    and _last_checked_pp_id != pp_id
+                    and _last_checked_pp_id in _page_pp_ids
+                    and pp_id in _page_pp_ids):
+                i1 = _page_pp_ids.index(_last_checked_pp_id)
+                i2 = _page_pp_ids.index(pp_id)
+                if i1 > i2:
+                    i1, i2 = i2, i1
+                for pid in _page_pp_ids[i1:i2 + 1]:
+                    _selected_ids.add(pid)
+                refresh_paper_list()  # 区间内的勾选框同步显示为已勾选
+                return
         else:
             _selected_ids.discard(pp_id)
+        _last_checked_pp_id = pp_id
         update_count()
 
     def update_count():
@@ -853,6 +873,7 @@ def build_library_page(ctx):
         start = _pagination_page * PAGE_SIZE
         end = min(start + PAGE_SIZE, len(papers))
         page_papers = papers[start:end]
+        _page_pp_ids[:] = [p["project_paper_id"] for p in page_papers]
 
         status_colors = {"unread": ft.Colors.OUTLINE, "skimmed": ft.Colors.AMBER, "deep_read": ft.Colors.GREEN}
         rows = [_build_library_header()]
