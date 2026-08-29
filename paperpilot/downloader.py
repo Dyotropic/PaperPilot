@@ -79,28 +79,62 @@ def detect_publisher(paper: dict) -> str:
 # ══════════════════════════════════════════════════════════════════
 
 def _direct_download(paper: dict) -> bytes | None:
-    """纯 HTTP 直链下载 PDF。
+    """下载 PDF（浏览器指纹伪装 + 落地页预热会话）。
 
-    链路: arXiv → Nature → Springer → Guessed URL → citation_pdf_url meta
+    链路: arXiv → Nature → Springer → Guessed URL（先预热落地页）→ citation_pdf_url meta
+
+    反爬现状（2026-08 实测）：Wiley/ACS/RSC/Science 等对自动化客户端在
+    落地页阶段就返回 403 挑战页（浏览器可静默通过 JS 挑战，脚本不能），
+    因此直链下载仅对开放获取/轻防护出版商稳定；其余依赖浏览器兜底。
 
     Returns:
         PDF bytes 或 None
     """
+    session, impersonate = _new_session()
     try:
-        from curl_cffi import requests as _http
-        _HAS_CFFI = True
-    except ImportError:
-        import requests as _http
-        _HAS_CFFI = False
+        return _direct_download_with(paper, session, impersonate)
+    finally:
+        try:
+            session.close()
+        except Exception:
+            pass
 
-    def _get(url, timeout=15, impersonate=None, allow_redirects=True):
-        """HTTP GET，自动适配 curl_cffi / requests 的 impersonate 差异。"""
-        kwargs = {"headers": headers, "timeout": timeout}
-        if allow_redirects is not True:
-            kwargs["allow_redirects"] = allow_redirects
-        if _HAS_CFFI and impersonate:
-            kwargs["impersonate"] = impersonate
-        return _http.get(url, **kwargs)
+
+def _new_session():
+    """构建带浏览器指纹的下载会话；不支持高档位时逐级回退。
+
+    Returns:
+        (session, impersonate) — curl_cffi 不可用时返回 (None, "")
+    """
+    try:
+        from curl_cffi.requests import Session
+    except ImportError:
+        return None, ""
+
+    for target in ("chrome136", "chrome133a", "chrome124", "chrome120"):
+        try:
+            return Session(impersonate=target, timeout=20), target
+        except Exception:
+            continue
+    return None, ""
+
+
+def _direct_download_with(paper: dict, session, impersonate: str) -> bytes | None:
+    """_direct_download 的会话化实现（session 为 None 时回退纯 requests）。"""
+    if session is not None:
+        def _get(url, timeout=20, allow_redirects=True):
+            kw = {"timeout": timeout, "impersonate": impersonate}
+            if allow_redirects is not True:
+                kw["allow_redirects"] = allow_redirects
+            return session.get(url, headers=headers, **kw)
+    else:
+        import requests as _http
+
+        def _get(url, timeout=20, allow_redirects=True):
+            kw = {"timeout": timeout}
+            if allow_redirects is not True:
+                kw["allow_redirects"] = allow_redirects
+            return _http.get(url, headers=headers, **kw)
 
     doi = paper.get("doi") or ""
     url = paper.get("url") or ""
@@ -111,70 +145,76 @@ def _direct_download(paper: dict) -> bytes | None:
         "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8",
     }
 
-    # ① arXiv
+    # ① arXiv（服务端渲染，无需预热）
     arxiv_id = None
     m = _ARXIV_ID_RE.search(doi or url or "")
     if m:
         arxiv_id = m.group(1)
     if arxiv_id:
         try:
-            resp = _get(_ARXIV_PDF.format(arxiv_id), timeout=15,
-                       impersonate="chrome120")
+            resp = _get(_ARXIV_PDF.format(arxiv_id), timeout=15)
             if resp.status_code == 200 and resp.content[:5] == b"%PDF-":
                 logger.info("PDF 来源: arXiv 直链")
                 return resp.content
         except Exception:
             pass
 
-    # ② Nature
+    # ② 落地页预热：建立 cookie 会话，供后续出版商直链使用
+    referer = _warm_landing(_get, doi)
+
+    # ③ Nature（paper.url 与预热落地页都参与匹配：DOI 直链场景落地页才含 nature.com）
     nature_id = None
-    m = re.search(r"nature\.com/articles/([^/?\s]+)", url)
+    m = re.search(r"nature\.com/articles/([^/?\s]+)", f"{url} {referer}")
     if m:
         nature_id = m.group(1)
     if nature_id:
         try:
-            resp = _get(_NATURE_PDF.format(nature_id), timeout=15,
-                       impersonate="chrome120")
+            resp = _get(_NATURE_PDF.format(nature_id), timeout=15)
             if resp.status_code == 200 and resp.content[:5] == b"%PDF-":
                 logger.info("PDF 来源: Nature 直链")
                 return resp.content
         except Exception:
             pass
 
-    # ③ Springer
+    # ④ Springer
     if doi:
         try:
-            resp = _get(_SPRINGER_PDF.format(doi), timeout=15,
-                       impersonate="chrome120")
+            resp = _get(_SPRINGER_PDF.format(doi), timeout=15)
             if resp.status_code == 200 and resp.content[:5] == b"%PDF-":
                 logger.info("PDF 来源: Springer 直链")
                 return resp.content
         except Exception:
             pass
 
-    # ④ Guessed PDF URL (ACS, Science, Wiley, IOP, RSC…)
+    # ⑤ Guessed PDF URL (ACS, Science, Wiley, IOP, RSC…)，带落地页 Referer
     guessed = _guess_pdf_url(paper)
     if guessed:
         try:
-            imp = "chrome124" if "wiley.com" in guessed else "chrome120"
-            resp = _get(guessed, timeout=15, impersonate=imp)
+            warm_headers = dict(headers)
+            if referer:
+                warm_headers["Referer"] = referer
+            if session is not None:
+                resp = session.get(guessed, headers=warm_headers,
+                                   timeout=20, impersonate=impersonate)
+            else:
+                import requests as _http
+                resp = _http.get(guessed, headers=warm_headers, timeout=20)
             if resp.status_code == 200 and resp.content[:5] == b"%PDF-":
                 logger.info("PDF 来源: %s", guessed[:80])
                 return resp.content
         except Exception:
             pass
 
-    # ⑤ citation_pdf_url meta tag
+    # ⑥ citation_pdf_url meta tag
     if doi:
         try:
-            doi_url = f"https://doi.org/{doi}"
-            resp = _get(doi_url, timeout=15, impersonate="chrome120")
+            resp = _get(f"https://doi.org/{doi}", timeout=15)
             if resp.status_code == 200:
                 soup = BeautifulSoup(resp.text, "lxml")
                 meta = soup.find("meta", attrs={"name": "citation_pdf_url"})
                 if meta and meta.get("content"):
                     pdf_url = meta["content"]
-                    pdf_resp = _get(pdf_url, timeout=15, impersonate="chrome120")
+                    pdf_resp = _get(pdf_url, timeout=15)
                     if pdf_resp.status_code == 200 and pdf_resp.content[:5] == b"%PDF-":
                         logger.info("PDF 来源: citation_pdf_url")
                         return pdf_resp.content
@@ -182,6 +222,22 @@ def _direct_download(paper: dict) -> bytes | None:
             pass
 
     return None
+
+
+def _warm_landing(_get, doi: str) -> str:
+    """预热：访问 DOI 落地页建立 cookie 会话，返回最终落地 URL（作 Referer）。
+
+    纯增进性步骤：失败静默返回空串，不影响主链路。
+    """
+    if not doi:
+        return ""
+    try:
+        resp = _get(f"https://doi.org/{doi}", timeout=15)
+        if resp.status_code == 200:
+            return str(resp.url)
+    except Exception:
+        pass
+    return ""
 
 
 def _guess_pdf_url(paper: dict) -> str | None:
@@ -210,6 +266,18 @@ def _guess_pdf_url(paper: dict) -> str | None:
 # ══════════════════════════════════════════════════════════════════
 # 公开 API
 # ══════════════════════════════════════════════════════════════════
+
+def pdf_direct_url(paper: dict) -> str | None:
+    """返回论文的猜测 PDF 直链（供"用浏览器下载"兜底按钮使用）。
+
+    浏览器可通过 Cloudflare 的 JS 挑战（脚本不能），对被反爬拦截的
+    出版商（Wiley/ACS/RSC/Science 等）是最可靠的获取途径。
+
+    Returns:
+        PDF 直链 URL；无可用猜测链时返回 None（调用方回退 DOI 落地页）
+    """
+    return _guess_pdf_url(paper)
+
 
 def download_pdf(paper: dict) -> bytes | None:
     """下载论文 PDF（直链 HTTP）。
