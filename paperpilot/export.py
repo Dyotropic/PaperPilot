@@ -74,14 +74,21 @@ def _bibtex_type(paper: dict) -> str:
     return "misc"
 
 
+_BIBTEX_ESCAPES = {
+    "\\": "\\textbackslash{}",
+    "&": "\\&", "%": "\\%", "$": "\\$", "#": "\\#", "_": "\\_",
+    "{": "\\{", "}": "\\}",
+    "~": "\\textasciitilde{}", "^": "\\textasciicircum{}",
+}
+
+
 def _escape_bibtex(text: str) -> str:
-    """转义 LaTeX 特殊字符。"""
-    chars = {"&": "\\&", "%": "\\%", "$": "\\$", "#": "\\#", "_": "\\_",
-             "{": "\\{", "}": "\\}", "~": "\\textasciitilde{}", "^": "\\textasciicircum{}",
-             "\\": "\\textbackslash{}"}
-    for ch, repl in chars.items():
-        text = text.replace(ch, repl)
-    return text
+    """转义 LaTeX 特殊字符。
+
+    必须单遍替换：逐字符 replace 会让先插入的反斜杠被后继规则二次转义
+    （旧实现 `&` → `\\&` 后，`\\` 再被转成 `\\textbackslash{}`，产出非法 BibTeX）。
+    """
+    return re.sub(r'[\\&%$#_{}~^]', lambda m: _BIBTEX_ESCAPES[m.group(0)], text)
 
 
 def _format_bibtex_authors(authors: str) -> str:
