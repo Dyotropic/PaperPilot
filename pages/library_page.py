@@ -969,6 +969,7 @@ def build_library_page(ctx):
         _project_papers[:] = papers
 
         if not papers:
+            select_all_cb.visible = False
             _library_list.controls = [_build_library_header()]
             _pagination_row.visible = False
             empty_hint.value = "此课题暂无保存的论文，请在检索页保存结果到此课题"

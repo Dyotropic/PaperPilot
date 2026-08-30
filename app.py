@@ -199,6 +199,20 @@ def main(page: ft.Page):
 
     _threading.Thread(target=_startup_clean_recycle, daemon=True).start()
 
+    # 文献页启动落位：尚无选中课题且存在课题时自动选中第一个，
+    # 保证「全选 / CE 语义排序 / AI 精排」按钮可用（挂载后执行）
+    async def _init_library_selection():
+        try:
+            if ctx.selected_project_id is None and ctx.library_select_project:
+                from paperpilot import library as _lib
+                projects = _lib.get_all_projects()
+                if projects:
+                    ctx.library_select_project(projects[0].id)
+        except Exception:
+            pass
+
+    page.run_task(_init_library_selection)
+
     # 欢迎消息（必须在 page.add 之后，控件已挂载才能 update）
     send_agent_message(
         "你好！我是你的学术助理。\n\n"
