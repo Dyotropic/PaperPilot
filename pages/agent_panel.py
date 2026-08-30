@@ -18,7 +18,7 @@ import threading
 import flet as ft
 
 from pages.context import (
-    ctx, AppState,
+    ctx,
     FONT_FAMILY, FS_XS, FS_SM, FS_MD, FS_LG, FS_XL, FS_XXL, FS_HERO,
     FW_REGULAR, FW_MEDIUM, FW_SEMIBOLD, FW_BOLD,
     R_SM, R_MD, R_LG, R_XL, SP_XS, SP_SM, SP_MD, SP_LG, SP_XL, SP_XXL,

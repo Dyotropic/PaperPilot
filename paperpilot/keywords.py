@@ -247,23 +247,3 @@ def merge_keywords(
             seen.add(kw_clean)
             merged.append(kw_clean)
     return merged
-
-
-def merge_keywords_weighted(
-    auto_keywords: list[tuple[str, float]],
-    manual_keywords: list[str],
-) -> list[tuple[str, float]]:
-    """合并带权重关键词，手动关键词权重最高（1.0），保留权重排序。"""
-    seen = set()
-    result = []
-    for kw in manual_keywords:
-        kw_clean = kw.strip().lower()
-        if kw_clean and kw_clean not in seen:
-            seen.add(kw_clean)
-            result.append((kw_clean, 1.0))
-    for kw, weight in auto_keywords:
-        kw_clean = kw.strip().lower()
-        if kw_clean and kw_clean not in seen:
-            seen.add(kw_clean)
-            result.append((kw_clean, weight))
-    return result

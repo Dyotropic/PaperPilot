@@ -280,12 +280,6 @@ def fetch_multi_primary(
     return result[:max_results]
 
 
-def _extract_text_from_page(page, max_chars: int = 3000) -> str:
-    blocks = page.get_text("blocks")
-    blocks = sorted(blocks, key=lambda b: (b[1], b[0]))
-    return " ".join(b[4] for b in blocks if b[6] == 0)[:max_chars]
-
-
 def _guess_title(text: str) -> str:
     lines = [l.strip() for l in text.split("\n") if l.strip()]
     for line in lines[:5]:

@@ -239,7 +239,6 @@ class AppState:
         self.scores: list[tuple[dict, float]] = []
         self.is_searching: bool = False
         self.status_text: str = ""
-        self.selected_paper: dict | None = None
         self.theme_name: str = DEFAULT_THEME
         self.dark_mode: bool = False
 
@@ -252,7 +251,6 @@ class AppContext:
         # 运行时
         self.page: ft.Page | None = None
         self.state = AppState()
-        self.containers: dict[str, ft.Container] = {}
 
         # 由 app.py 注入的 Agent 面板 / 导航能力
         self.send_agent_message = None

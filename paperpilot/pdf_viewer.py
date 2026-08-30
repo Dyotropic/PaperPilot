@@ -12,11 +12,8 @@ open_full_reader 自动获得 PDF 下载 + HTML 全文提取能力，
 无需改动本文件。
 """
 
-import base64
 import logging
 import os
-import re
-import threading
 import urllib.request
 from pathlib import Path
 
@@ -191,7 +188,6 @@ body {
 <script>
 pdfjsLib.GlobalWorkerOptions.workerSrc = '__PDFJS_WORKER__';
 
-var __PDF_DATA__ = '__PDF_BASE64__';
 var __PDF_SRC__ = '__PDF_PATH__';
 
 var totalPages = 1;
@@ -328,13 +324,7 @@ function gotoPage() {
 
 // Start
 var pdfSrc;
-if (__PDF_DATA__) {
-    // base64 data → Uint8Array
-    var binary = atob(__PDF_DATA__);
-    var bytes = new Uint8Array(binary.length);
-    for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    pdfSrc = {data: bytes};
-} else if (__PDF_SRC__) {
+if (__PDF_SRC__) {
     pdfSrc = __PDF_SRC__;
 }
 if (pdfSrc) loadPdf(pdfSrc);
@@ -342,21 +332,6 @@ if (pdfSrc) loadPdf(pdfSrc);
 </body>
 </html>
 """
-
-_ERROR_HTML = """\
-<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>PaperPilot</title>
-<style>
-body { display:flex; align-items:center; justify-content:center;
-       height:100vh; margin:0; font-family:"Segoe UI",sans-serif;
-       background:__BG__; color:__TEXT__; }
-.box { text-align:center; max-width:400px; padding:40px; }
-h2 { font-weight:500; } p { opacity:0.7; margin-top:12px; }
-</style></head>
-<body><div class="box">
-<h2>__MESSAGE__</h2><p>__DETAIL__</p></div></body></html>
-"""
-
 
 def _build_reader_html(
     pdf_path: str | None,
@@ -397,24 +372,12 @@ def _build_reader_html(
     html = html.replace("__TEXT__", text)
     html = html.replace("__TITLEBAR_BG__", titlebar_bg)
     html = html.replace("__BTN_HOVER__", btn_hover)
-    html = html.replace("'__PDF_BASE64__'", "''")
     html = html.replace("'__PDF_PATH__'", f"'file:///{abs_path}'" if abs_path else "''")
     html = html.replace("__PDFJS_SCRIPT__", pdfjs_script)
     html = html.replace("__PDFJS_WORKER__", pdfjs_worker)
     html = html.replace("__SCALE__", str(scale))
 
     return html
-
-
-def _build_error_html(message: str, detail: str, dark_mode: bool, seed_color: str) -> str:
-    bg = _blend_with(seed_color, 0.92, "#000000") if dark_mode else "#ffffff"
-    text = "#e0e0e0" if dark_mode else "#1a1a1a"
-    return (
-        _ERROR_HTML.replace("__MESSAGE__", message)
-        .replace("__DETAIL__", detail)
-        .replace("__BG__", bg)
-        .replace("__TEXT__", text)
-    )
 
 
 # ── 方案 B：pywebview 独立阅读窗口 ──
@@ -658,211 +621,8 @@ def _open_pdfjs_window(
     })
 
 
-def _open_html_window(
-    html_path: str,
-    title: str,
-    theme_seed: str,
-    dark_mode: bool,
-    x: int | None,
-    y: int | None,
-) -> bool:
-    """加载缓存 HTML 文件，注入文字选择修复 + 去除外链，pywebview 渲染。"""
-    try:
-        raw = Path(html_path).read_text(encoding="utf-8")
-    except Exception:
-        return _open_error_window(title, theme_seed, dark_mode, x, y)
-
-    # ── 1. 注入文字选择修复样式 ──
-    fix_css = """<style>
-    body, body * { user-select: text !important; -webkit-user-select: text !important; cursor: auto !important; }
-    a { cursor: pointer !important; }
-    ::selection, ::-moz-selection { background: rgba(0,150,200,0.35) !important; }
-</style>"""
-    raw = raw.replace("</head>", fix_css + "\n</head>")
-
-    # ── 2. 去除正文链接，保留图片链接 ──
-    def _keep_image_hrefs(m: re.Match) -> str:
-        full = m.group(0)
-        href = m.group(1)
-        # 保留 .jpg/.png/.gif/.svg/.webp/.jpeg 链接 + 下载类链接
-        img_exts = (".jpg", ".jpeg", ".png", ".gif", ".svg", ".webp", ".bmp", ".tif", ".tiff")
-        href_lower = href.lower()
-        if any(href_lower.endswith(ext) for ext in img_exts):
-            return full
-        if "download" in href_lower or "/picture/" in href_lower or "/image/" in href_lower:
-            return full
-        # 其他链接：仅保留文字，移除 href
-        return full.replace(f'href="{href}"', "").replace(f"href='{href}'", "")
-
-    raw = re.sub(r'<a\s[^>]*href="([^"]*)"[^>]*>', _keep_image_hrefs, raw)
-    raw = re.sub(r"<a\s[^>]*href='([^']*)'[^>]*>", _keep_image_hrefs, raw)
-
-    # ── 3. 写入临时文件，通过 url 加载（保持页面完整性）──
-    import tempfile
-    tmp_dir = Path.home() / ".paperpilot_pdf_cache"
-    tmp_dir.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".html", delete=False, encoding="utf-8", dir=str(tmp_dir)
-    ) as f:
-        f.write(raw)
-        tmp_path = f.name
-
-    return _create_window({
-        "title": title,
-        "url": f"file:///{tmp_path.replace(chr(92), '/')}",
-        "frameless": False,
-        "width": 960,
-        "height": 750,
-        "x": x,
-        "y": y,
-        "min_size": (400, 300),
-    })
-
-
-def _open_text_window(
-    text: str,
-    title: str,
-    theme_seed: str,
-    dark_mode: bool,
-    x: int | None,
-    y: int | None,
-) -> bool:
-    """将纯文本全文包装为阅读页面，在 pywebview 中展示（ScienceDirect 等无 PDF 时用）。"""
-    # 合并连续非空行为段落（空行作为段落分隔符）
-    paragraphs = []
-    buf = []
-    for line in text.split("\n"):
-        stripped = line.strip()
-        if stripped:
-            buf.append(stripped)
-        elif buf:
-            paragraphs.append(" ".join(buf))
-            buf = []
-    if buf:
-        paragraphs.append(" ".join(buf))
-
-    body = "\n".join(f"<p>{_escape_html(p)}</p>" for p in paragraphs)
-
-    bg = "#1e1e1e" if dark_mode else "#fafafa"
-    fg = "#d4d4d4" if dark_mode else "#333333"
-    accent = theme_seed
-
-    html = f"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<style>
-  * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-  body {{
-    font-family: -apple-system, "Segoe UI", "Noto Sans SC", sans-serif;
-    background: {bg}; color: {fg};
-    line-height: 1.9; font-size: 15px;
-    padding: 40px 48px;
-    max-width: 820px; margin: 0 auto;
-  }}
-  h1 {{
-    font-size: 22px; font-weight: 700; color: {accent};
-    margin-bottom: 32px; padding-bottom: 16px;
-    border-bottom: 2px solid {accent}44;
-  }}
-  p {{ margin-bottom: 16px; text-align: justify; }}
-  ::-webkit-scrollbar {{ width: 6px; }}
-  ::-webkit-scrollbar-track {{ background: transparent; }}
-  ::-webkit-scrollbar-thumb {{ background: {accent}44; border-radius: 3px; }}
-</style>
-<title>{_escape_html(title)}</title>
-</head>
-<body>
-<h1>{_escape_html(title)}</h1>
-{body}
-</body>
-</html>"""
-    return _create_window({
-        "title": title,
-        "html": html,
-        "frameless": False,
-        "width": 900,
-        "height": 700,
-        "x": x,
-        "y": y,
-        "min_size": (400, 300),
-    })
-
-
-def _escape_html(text: str) -> str:
-    """转义 HTML 特殊字符。"""
-    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-
-def _open_error_window(
-    title: str,
-    theme_seed: str,
-    dark_mode: bool,
-    x: int | None,
-    y: int | None,
-    message: str = "无法获取全文",
-    detail: str = "该论文没有可用的本地 PDF 文件或远程链接。",
-) -> bool:
-    """显示错误提示窗口。"""
-    html = _build_error_html(
-        message=message,
-        detail=detail,
-        dark_mode=dark_mode,
-        seed_color=theme_seed,
-    )
-    return _create_window({
-        "title": title,
-        "html": html,
-        "frameless": False,
-        "width": 500,
-        "height": 300,
-        "x": x,
-        "y": y,
-    })
-
-
-# ── 方案 A：Flet 内嵌 PyMuPDF 轻量预览 ──
-
-def render_preview(pdf_path: str, max_pages: int = 5) -> list[ft.Image]:
-    """将 PDF 前 N 页转为 Flet Image 控件列表，用于内嵌快速预览。
-
-    Args:
-        pdf_path: 本地 PDF 文件路径
-        max_pages: 最多渲染页数
-
-    Returns:
-        ft.Image 列表，可直接添加到 Flet Column 中展示
-    """
-    if not pdf_path or not os.path.isfile(pdf_path):
-        return [ft.Text("PDF 文件不存在", italic=True, color=ft.Colors.OUTLINE)]
-
-    images = []
-    try:
-        doc = fitz.open(pdf_path)
-        for i in range(min(len(doc), max_pages)):
-            page = doc[i]
-            pix = page.get_pixmap(dpi=120)
-            images.append(
-                ft.Image(
-                    src=f"data:image/png;base64,{base64.b64encode(pix.tobytes('png')).decode()}",
-                    fit="contain",
-                )
-            )
-        doc.close()
-    except Exception as e:
-        return [ft.Text(f"PDF 预览失败: {e}", italic=True, color=ft.Colors.ERROR)]
-
-    return images or [ft.Text("PDF 无内容", italic=True, color=ft.Colors.OUTLINE)]
-
-
 # ── 可用性检查 ──
 
 def is_full_reader_available() -> bool:
     """检查 pywebview 是否可用（用于 UI 中按钮的 disabled 状态）。"""
     return _webview is not None
-
-
-def is_downloader_available() -> bool:
-    """检查 downloader 是否可用。"""
-    return _download_pdf is not None

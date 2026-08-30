@@ -16,7 +16,7 @@ from pages.context import (
 )
 from pages.components import is_shift_pressed
 from paperpilot import library
-from paperpilot import repo_manager, downloader
+from paperpilot import repo_manager
 from paperpilot.local_import import scan_folder, extract_pdfs
 from paperpilot.indexer import rank_papers, unload_cross_encoder
 from paperpilot.pdf_viewer import open_full_reader, is_full_reader_available

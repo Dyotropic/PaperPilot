@@ -12,9 +12,7 @@ Deep Read 采用 RLM 分层阅读策略（借鉴 Feynman）：
 import hashlib
 import json
 import logging
-import os
 import re
-import uuid
 from pathlib import Path
 
 from paperpilot.llm_client import get_client, get_task_model
@@ -113,7 +111,6 @@ class AIService:
         self._api_key = api_key
         self._model = model
         self._conversations: dict[int, object] = {}  # project_id → ConversationManager
-        self._qa_sessions: dict[str, list[dict]] = {}  # session_id → messages
 
     @property
     def is_available(self) -> bool:
@@ -170,28 +167,6 @@ class AIService:
             timeout=timeout, model=model, thinking=thinking,
         )
         return result.content, result.reasoning
-
-    def _call_api_stream(
-        self,
-        messages: list[dict],
-        temperature: float = 0.3,
-        max_tokens: int = 2000,
-        timeout: int = 120,
-        model: str | None = None,
-        thinking: bool | None = None,
-    ):
-        """流式调用 LLM，yield 每个 content delta 字符串。
-
-        未配置/失败时直接返回（不 yield）。
-        """
-        client = self._get_client()
-        if not client or not client.is_available:
-            return
-        for delta in client.chat_stream(
-            messages, temperature=temperature, max_tokens=max_tokens,
-            timeout=timeout, model=model, thinking=thinking,
-        ):
-            yield delta
 
     def _parse_json_response(self, content: str) -> dict | list:
         """从 LLM 回复中提取 JSON 块，失败返回空 dict。"""
@@ -832,128 +807,6 @@ class AIService:
 
         return {"reply": reply, "compressed": was_compressed}
 
-    def chat_stream(
-        self,
-        project_id: int,
-        project_name: str,
-        message: str,
-        topic_desc: str = "",
-        papers: list[dict] | None = None,
-        project_papers: list[dict] | None = None,
-        thinking_enabled: bool = False,
-        display_message: str = "",
-    ):
-        """课题对话流式版：yield {"chunk": str} | {"done": dict} | {"error": str}。
-
-        与 chat() 逻辑相同，但通过 SSE 流式返回内容增量。
-        对话持久化在流结束后自动完成。
-        """
-        if not self.is_available:
-            yield {"error": "AI 服务未配置。请在 config.yaml 中设置 DeepSeek API Key。"}
-            return
-
-        from paperpilot.conversation import ConversationManager
-
-        if project_id not in self._conversations:
-            cm = ConversationManager(project_name, topic_desc)
-            self._conversations[project_id] = cm
-        else:
-            cm = self._conversations[project_id]
-            if topic_desc:
-                cm.update_topic_desc(topic_desc)
-
-        # 自动检测论文引用
-        auto_papers: list[dict] = []
-        if project_papers:
-            auto_papers = self._detect_paper_refs(message, project_papers)
-        all_papers: list[dict] = list(papers or [])
-        for ap in auto_papers:
-            ap_title = (ap.get("title") or "").strip().lower()
-            if not any((p.get("title") or "").strip().lower() == ap_title
-                       for p in all_papers):
-                all_papers.append(ap)
-
-        attached_refs = None
-        if all_papers:
-            attached_refs = []
-            for p in all_papers:
-                ref = p.get("doi") or p.get("title", "")[:60]
-                attached_refs.append(ref)
-        cm.add_user_message(message, attached_papers=attached_refs,
-                           paper_details=all_papers if all_papers else None,
-                           display_content=display_message)
-
-        # 压缩检查
-        was_compressed = False
-        if cm.needs_compression():
-            batch = cm.get_compress_batch()
-            if batch:
-                summary = self._compress_messages(batch)
-                if summary:
-                    cm.apply_compression(summary, batch)
-                    was_compressed = True
-
-        # 构建论文目录
-        paper_catalog = None
-        if all_papers:
-            paper_catalog = []
-            for p in all_papers:
-                title = (p.get("title") or "无标题")[:100]
-                authors = (p.get("authors") or "未知").split(",")[0].strip()
-                year = p.get("year", "")
-                paper_catalog.append(f"- {title} ({authors}, {year})")
-
-        sys_prompt = self._CHAT_SYSTEM
-        if topic_desc:
-            sys_prompt += f"\n\n当前课题：{project_name}\n课题描述：{topic_desc}"
-
-        messages = cm.build_api_messages(sys_prompt, paper_catalog)
-
-        full_reply = ""
-        try:
-            reasoning_model = self._resolve_task_model("reasoning")
-            chat_model = self._resolve_task_model("chat")
-
-            if reasoning_model:
-                # 两步模式：reasoning_model 推理（同步）→ chat_model 流式输出
-                _, reasoning = self._call_api_full(
-                    messages, temperature=0.6, max_tokens=2000,
-                    timeout=120, thinking=True,
-                    model=reasoning_model,
-                )
-                if reasoning:
-                    messages.append({
-                        "role": "system",
-                        "content": f"[内部推理结果，基于此生成回复]\n{reasoning}"
-                    })
-                thinking = False
-            else:
-                thinking = True if thinking_enabled else None
-
-            for delta in self._call_api_stream(messages, temperature=0.6,
-                                                max_tokens=3000, timeout=120,
-                                                thinking=thinking,
-                                                model=chat_model):
-                full_reply += delta
-                yield {"chunk": delta}
-        except Exception as e:
-            logger.warning(f"Streaming chat failed: {e}")
-            if full_reply:
-                cm.add_assistant_message(full_reply + "\n\n[流输出中断]")
-            yield {"error": str(e)}
-            return
-
-        if full_reply:
-            clean = re.sub(
-                r'\s*\[ACTION:\w+\].+?\[/ACTION\]\s*', '', full_reply, flags=re.DOTALL
-            ).strip()
-            clean = re.sub(
-                r'\s*\[PROJECT_UPDATE\].+?\[/PROJECT_UPDATE\]\s*', '', clean, flags=re.DOTALL
-            ).strip()
-            cm.add_assistant_message(full_reply, display_content=clean if clean != full_reply else "")
-
-        yield {"done": {"reply": full_reply, "compressed": was_compressed}}
-
     def _compress_messages(self, messages: list[dict]) -> str | None:
         """调用 API 将一批消息压缩为摘要。"""
         if not messages:
@@ -979,18 +832,6 @@ class AIService:
         except Exception:
             logger.warning("压缩对话失败", exc_info=True)
             return None
-
-    # ── 论文问答 ──
-
-    _QUESTION_TRIGGERS = {
-        '方法', '实验', '数据', '细节', '具体', '怎么', '如何实现',
-        '图', '表', '证据', '样本', '参数', '指标', '测量', '统计',
-        'protocol', 'procedure', '全文', '正文', '原文',
-        'method', 'experiment', 'data', 'detail', 'figure', 'table',
-        '怎么做', '用了什么', '如何', '怎样', '流程', '步骤',
-        '不足', '局限', '缺陷', '改进', 'limitation',
-        '结果', '发现', '结论', '证明', '验证',
-    }
 
     def _detect_paper_refs(self, message: str,
                            project_papers: list[dict]) -> list[dict]:
@@ -1041,86 +882,6 @@ class AIService:
 
         return matched
 
-    def _needs_full_text(self, question: str) -> bool:
-        """判断问题是否需要全文（而非仅摘要）。"""
-        q = question.lower()
-        return any(t.lower() in q for t in self._QUESTION_TRIGGERS)
-
-    def ask_question(
-        self,
-        paper: dict,
-        question: str,
-        full_text: str | None = None,
-        session_id: str | None = None,
-    ) -> str:
-        """针对单篇论文的深度问答。
-
-        默认注入摘要；若问题涉及方法/数据/细节且全文可获取，则注入全文。
-
-        Args:
-            paper: paper dict（需含 title, abstract）
-            question: 用户问题
-            full_text: 论文全文（可选，为 None 时按需自动获取）
-            session_id: 多轮对话会话 ID（可选）
-
-        Returns:
-            AI 回答文本，失败返回空字符串
-        """
-        if not self.is_available:
-            return ""
-
-        title = (paper.get("title") or "").strip()
-        abstract = (paper.get("abstract") or "").strip()
-        if not title:
-            return ""
-
-        # 按需获取全文
-        if not full_text and self._needs_full_text(question):
-            full_text, _ = get_full_text_for_paper(paper)
-
-        # 构建论文内容
-        content = f"论文标题：《{title}》\n"
-        if abstract:
-            content += f"摘要：{abstract[:1000]}\n"
-        if full_text:
-            content += f"\n全文（{len(full_text)} 字符）：\n{full_text[:30000]}\n"
-
-        system = (
-            "你是一位资深学术审稿人。请基于提供的论文内容回答用户问题。\n\n"
-            "要求：\n"
-            "- 用中文回答，专业术语保留英文原名\n"
-            "- 引用论文中的具体内容支撑你的回答\n"
-            "- 论文未涉及的问题，诚实说明而非编造\n"
-            "- 回答简洁有深度，避免冗长的背景铺垫"
-        )
-
-        messages: list[dict] = [{"role": "system", "content": system}]
-
-        # 多轮对话：追加历史
-        if session_id and session_id in self._qa_sessions:
-            messages.extend(self._qa_sessions[session_id])
-
-        messages.append({
-            "role": "user",
-            "content": f"{content}\n\n用户问题：{question}",
-        })
-
-        reply = self._call_api(messages, temperature=0.5, max_tokens=2000,
-                               timeout=120, thinking=False)
-
-        # 保存多轮对话历史
-        if session_id and reply:
-            if session_id not in self._qa_sessions:
-                self._qa_sessions[session_id] = []
-            self._qa_sessions[session_id].append({
-                "role": "user", "content": question,
-            })
-            self._qa_sessions[session_id].append({
-                "role": "assistant", "content": reply,
-            })
-
-        return reply
-
     def log_message(self, project_id: int, project_name: str,
                     role: str, content: str, topic_desc: str = "") -> None:
         """保存一条消息到课题对话记录（不调用 API）。
@@ -1143,20 +904,7 @@ class AIService:
         else:
             cm.add_assistant_message(content)
 
-    def get_conversation_info(self, project_id: int) -> dict | None:
-        """获取课题对话的摘要信息（不修改对话）。"""
-        cm = self._conversations.get(project_id)
-        if cm is None:
-            return None
-        return {
-            "total_rounds": cm.total_rounds,
-            "estimated_tokens": cm.estimated_tokens,
-            "is_empty": cm.is_empty,
-            "compressed_count": len(cm.compressed_summaries),
-            "display_messages": cm.display_messages,
-            "compressed_summaries": cm.compressed_summaries,
-            "has_more_history": cm.has_more_history,
-        }
+
 
 
 # ── 持久化 ──
