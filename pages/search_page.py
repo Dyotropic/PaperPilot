@@ -973,10 +973,13 @@ def build_search_page(ctx):
             ctx.search_selected_ids.update(range(len(state.scores)))
         else:
             ctx.search_selected_ids.clear()
-        # 直接翻转已有复选框，不重建整表
+        # 直接翻转已有复选框，不重建整表；循环只赋值、末尾一次列表更新
         for cb in ctx.search_checkboxes:
             cb.value = checked
-            cb.update()
+        try:
+            _search_list.update()
+        except Exception:
+            pass
         _update_search_count()
 
     def _on_search_check_one(e, idx: int):
@@ -993,7 +996,7 @@ def build_search_page(ctx):
                     if i < len(ctx.search_checkboxes):
                         ctx.search_checkboxes[i].value = True
                 try:
-                    ctx.page.update()  # 区间内的勾选框同步显示为已勾选
+                    _search_list.update()  # 区间内的勾选框同步显示为已勾选
                 except Exception:
                     pass
         else:

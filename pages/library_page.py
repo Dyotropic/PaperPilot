@@ -265,6 +265,7 @@ def build_library_page(ctx):
     # Shift 范围勾选：锚点（上次点击的行）与当前页的勾选顺序表
     _last_checked_pp_id: int | None = None
     _page_pp_ids: list[int] = []
+    _page_checkboxes: list[ft.Checkbox] = []  # 与 _page_pp_ids 平行：当页勾选框引用
     _compare_btn = None  # 文献库"对比分析"按钮引用
 
     multi_select_bar = ft.Row(visible=True, spacing=8)
@@ -302,11 +303,19 @@ def build_library_page(ctx):
         return ft.Row(cols, spacing=0)
 
     def on_select_all(e):
-        if e.control.value:
+        checked = e.control.value
+        if checked:
             _selected_ids.update(p["project_paper_id"] for p in _project_papers)
         else:
             _selected_ids.clear()
-        refresh_paper_list()
+        # 只翻转当页勾选框并一次列表更新，不再全量重建表格
+        for cb in _page_checkboxes:
+            cb.value = checked
+        try:
+            _library_list.update()
+        except Exception:
+            pass
+        update_count()
 
     def on_check_one(e, pp_id: int):
         nonlocal _last_checked_pp_id
@@ -324,7 +333,14 @@ def build_library_page(ctx):
                     i1, i2 = i2, i1
                 for pid in _page_pp_ids[i1:i2 + 1]:
                     _selected_ids.add(pid)
-                refresh_paper_list()  # 区间内的勾选框同步显示为已勾选
+                # 只同步当页勾选框（避免整表重建）
+                for cb in _page_checkboxes[i1:i2 + 1]:
+                    cb.value = True
+                try:
+                    _library_list.update()
+                except Exception:
+                    pass
+                update_count()
                 return
         else:
             _selected_ids.discard(pp_id)
@@ -887,6 +903,7 @@ def build_library_page(ctx):
         end = min(start + PAGE_SIZE, len(papers))
         page_papers = papers[start:end]
         _page_pp_ids[:] = [p["project_paper_id"] for p in page_papers]
+        _page_checkboxes.clear()
 
         status_colors = {"unread": ft.Colors.OUTLINE, "skimmed": ft.Colors.AMBER, "deep_read": ft.Colors.GREEN}
         rows = [_build_library_header()]
@@ -1150,6 +1167,7 @@ def build_library_page(ctx):
                 scale=0.85,
             )
             cells.insert(0, cb)
+            _page_checkboxes.append(cb)
 
             row = ft.Container(
                 content=ft.Row(cells, spacing=0),
