@@ -20,7 +20,7 @@ from pages.settings_page import (
 )
 from paperpilot.keywords import extract_all_keywords, merge_keywords
 from paperpilot.mt_translator import translate_terms
-from pages.components import is_shift_pressed, safe_update
+from pages.components import is_shift_pressed, safe_update, open_dialog, close_dialog
 from paperpilot.fetcher import (
     fetch_arxiv, fetch_openalex, fetch_europepmc, fetch_with_cascade,
     fetch_multi_primary, deduplicate, get_article_type_label, SourceRateLimited,
@@ -687,12 +687,10 @@ def show_paper_detail(paper: dict):
             def _go_download(e):
                 if browser_url:
                     _wb.open(browser_url)
-                dlg.open = False
-                dlg.update()
+                close_dialog(ctx.page, dlg)
 
             def _cancel(e):
-                dlg.open = False
-                dlg.update()
+                close_dialog(ctx.page, dlg)
 
             dlg = ft.AlertDialog(
                 title=ft.Text("无法自动获取全文"),
@@ -707,9 +705,7 @@ def show_paper_detail(paper: dict):
                     ft.FilledButton("用浏览器下载", on_click=_go_download),
                 ],
             )
-            ctx.page.overlay.append(dlg)
-            dlg.open = True
-            ctx.page.update()
+            open_dialog(ctx.page, dlg)
 
         links.append(read_btn)
         links.append(import_btn)
@@ -1329,12 +1325,10 @@ def build_search_page(ctx):
                 except Exception:
                     pass
 
-            dlg.open = False
-            dlg.update()
+            close_dialog(ctx.page, dlg)
 
         def close_dlg(e):
-            dlg.open = False
-            dlg.update()
+            close_dialog(ctx.page, dlg)
 
         dlg = ft.AlertDialog(
             title=ft.Text("保存到文献库"),
@@ -1352,9 +1346,7 @@ def build_search_page(ctx):
             ],
         )
 
-        ctx.page.overlay.append(dlg)
-        dlg.open = True
-        ctx.page.update()
+        open_dialog(ctx.page, dlg)
 
     save_to_library_btn.on_click = on_save_to_library
 

@@ -40,6 +40,23 @@ def safe_update(ctrl) -> None:
         pass
 
 
+def open_dialog(page, dlg) -> None:
+    """追加到 overlay 并打开对话框的统一入口。"""
+    page.overlay.append(dlg)
+    dlg.open = True
+    page.update()
+
+
+def close_dialog(page, dlg) -> None:
+    """关闭并从 overlay 移除对话框（修复对象泄漏）。"""
+    dlg.open = False
+    try:
+        page.overlay.remove(dlg)
+    except ValueError:
+        pass
+    page.update()
+
+
 def make_resize_handle(get_width, set_width, min_w, max_w, on_end=None,
                        side: str = "right") -> ft.GestureDetector:
     """构建水平拖拽调宽手柄（竖条样式，RESIZE_LEFT_RIGHT 光标）。

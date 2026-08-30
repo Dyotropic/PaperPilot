@@ -25,7 +25,7 @@ from pages.context import (
     text_primary, text_secondary, text_tertiary, border_color,
     seed_color, app_bg, surface, surface_hi, accent_container,
 )
-from pages.components import clamp_width, make_resize_handle
+from pages.components import clamp_width, make_resize_handle, open_dialog, close_dialog
 
 logger = logging.getLogger(__name__)
 
@@ -912,13 +912,11 @@ def _show_project_update_dialog(pid: int, new_name: str, new_desc: str):
         if ctx.refresh_library:
             ctx.refresh_library()
         send_agent_message(f"已更新课题：**{new_name}**", role="system")
-        dlg.open = False
-        page.update()
+        close_dialog(page, dlg)
 
     def do_cancel(e):
         send_agent_message("已取消课题修改。", role="system")
-        dlg.open = False
-        page.update()
+        close_dialog(page, dlg)
 
     dlg = ft.AlertDialog(
         title=ft.Text("AI 建议修改课题"),
@@ -933,9 +931,7 @@ def _show_project_update_dialog(pid: int, new_name: str, new_desc: str):
             ft.FilledButton("确认修改", on_click=do_apply),
         ],
     )
-    page.overlay.append(dlg)
-    dlg.open = True
-    page.update()
+    open_dialog(ctx.page, dlg)
 
 
 # ── 面板构建 ──

@@ -16,7 +16,7 @@ from pages.context import (
     seed_color, app_bg, surface, surface_hi, accent_container,
     subtle_shadow, card,
 )
-from pages.components import is_shift_pressed, safe_update
+from pages.components import is_shift_pressed, safe_update, open_dialog, close_dialog
 from paperpilot import library
 from paperpilot import repo_manager
 from paperpilot.local_import import scan_folder, extract_pdfs
@@ -102,25 +102,21 @@ def build_library_page(ctx):
                 msg.color = ft.Colors.GREEN
                 msg.update()
                 refresh_project_list()
-                dlg.open = False
-                dlg.update()
+                close_dialog(ctx.page, dlg)
             except ValueError as ve:
                 msg.value = str(ve)
                 msg.color = ft.Colors.ERROR
                 msg.update()
 
         def close_dlg(e):
-            dlg.open = False
-            dlg.update()
+            close_dialog(ctx.page, dlg)
 
         dlg = ft.AlertDialog(
             title=ft.Text("新建课题"),
             content=ft.Column([name_field, desc_field, msg], spacing=12, tight=True, height=200),
             actions=[ft.TextButton("取消", on_click=close_dlg), ft.FilledButton("创建", on_click=do_create)],
         )
-        ctx.page.overlay.append(dlg)
-        dlg.open = True
-        ctx.page.update()
+        open_dialog(ctx.page, dlg)
 
     def on_edit_project(e):
         """编辑当前选中课题（名称 + 描述）。"""
@@ -144,8 +140,7 @@ def build_library_page(ctx):
                 ctx.set_agent_project(pid, new_name, new_desc)
                 refresh_project_list()
                 selected_project_title.update()
-                dlg.open = False
-                dlg.update()
+                close_dialog(ctx.page, dlg)
 
         name_field = ft.TextField(value=proj.name, label="课题名称", autofocus=True)
         desc_field = ft.TextField(
@@ -157,17 +152,14 @@ def build_library_page(ctx):
         msg = ft.Text("", size=13)
 
         def close_dlg(e):
-            dlg.open = False
-            dlg.update()
+            close_dialog(ctx.page, dlg)
 
         dlg = ft.AlertDialog(
             title=ft.Text("编辑课题"),
             content=ft.Column([name_field, desc_field, msg], spacing=12, tight=True, height=240),
             actions=[ft.TextButton("取消", on_click=close_dlg), ft.FilledButton("保存", on_click=do_save)],
         )
-        ctx.page.overlay.append(dlg)
-        dlg.open = True
-        ctx.page.update()
+        open_dialog(ctx.page, dlg)
 
     def on_delete_project(e):
         """删除当前选中课题。"""
@@ -184,8 +176,7 @@ def build_library_page(ctx):
                 if not moved:
                     # 目录移动失败（被占用等）：中止删除，避免 DB 记录没了
                     # 而目录残留成孤儿
-                    dlg.open = False
-                    dlg.update()
+                    close_dialog(ctx.page, dlg)
                     _show_graph_dialog(
                         "课题目录移入回收站失败（可能被其它程序占用），已取消删除。"
                         "请关闭相关窗口后重试。", title="删除课题")
@@ -199,8 +190,7 @@ def build_library_page(ctx):
             refresh_project_list()
             refresh_paper_list()
             selected_project_title.update()
-            dlg.open = False
-            dlg.update()
+            close_dialog(ctx.page, dlg)
 
         dlg = ft.AlertDialog(
             title=ft.Text("确认删除"),
@@ -208,9 +198,7 @@ def build_library_page(ctx):
             actions=[ft.TextButton("取消", on_click=lambda e: (setattr(dlg, 'open', False), dlg.update())),
                      ft.FilledButton("确认删除", on_click=do_delete)],
         )
-        ctx.page.overlay.append(dlg)
-        dlg.open = True
-        ctx.page.update()
+        open_dialog(ctx.page, dlg)
 
     # ── 右侧：论文列表 ──
     _filter_options = [
@@ -392,8 +380,7 @@ def build_library_page(ctx):
             _selected_ids.clear()
             upload_progress.value = f"已删除 {n} 篇"
             upload_progress.color = ft.Colors.GREEN
-            dlg.open = False
-            dlg.update()
+            close_dialog(ctx.page, dlg)
             refresh_paper_list()
             def _clear_upload_hint():
                 upload_progress.value = ""
@@ -401,7 +388,7 @@ def build_library_page(ctx):
             threading.Timer(3.0, _clear_upload_hint).start()
 
         def close_dlg(e):
-            dlg.open = False; dlg.update()
+            close_dialog(ctx.page, dlg)
 
         dlg = ft.AlertDialog(
             title=ft.Text("确认删除"),
@@ -411,9 +398,7 @@ def build_library_page(ctx):
                 ft.FilledButton("确认删除", on_click=do_delete),
             ],
         )
-        ctx.page.overlay.append(dlg)
-        dlg.open = True
-        ctx.page.update()
+        open_dialog(ctx.page, dlg)
 
     def _on_library_compare(e):
         """对比分析文献库选中的论文。"""
@@ -866,12 +851,11 @@ def build_library_page(ctx):
                 if match:
                     repo_manager.remove_paper_from_catalog(proj.name, match)
             library.remove_paper_from_project(pp_id)
-            dlg.open = False
-            dlg.update()
+            close_dialog(ctx.page, dlg)
             refresh_paper_list()
 
         def close_dlg(e):
-            dlg.open = False; dlg.update()
+            close_dialog(ctx.page, dlg)
 
         dlg = ft.AlertDialog(
             title=ft.Text("确认删除"),
@@ -881,9 +865,7 @@ def build_library_page(ctx):
                 ft.FilledButton("确认删除", on_click=do_delete),
             ],
         )
-        ctx.page.overlay.append(dlg)
-        dlg.open = True
-        ctx.page.update()
+        open_dialog(ctx.page, dlg)
 
     def _show_detail_dialog(paper: dict):
         """弹出论文详情对话框，显示完整元数据（提升到行循环外，避免每行重建闭包）。"""
@@ -974,8 +956,7 @@ def build_library_page(ctx):
             cparts.append(ft.Text(puser_notes, size=13))
 
         def close_dlg(e):
-            dlg.open = False
-            dlg.update()
+            close_dialog(ctx.page, dlg)
 
         def read_paper_and_close(e):
             close_dlg(e)
@@ -989,9 +970,7 @@ def build_library_page(ctx):
                 ft.TextButton("关闭", on_click=close_dlg),
             ],
         )
-        ctx.page.overlay.append(dlg)
-        dlg.open = True
-        ctx.page.update()
+        open_dialog(ctx.page, dlg)
 
     def refresh_paper_list(target_pid=None, preloaded_papers: list[dict] | None = None):
         """从数据库（或调用方提供的最新数据）刷新当前课题的论文列表。"""
@@ -1345,17 +1324,14 @@ def build_library_page(ctx):
                 ], spacing=0))
 
             def close_dlg(e):
-                dlg.open = False
-                dlg.update()
+                close_dialog(ctx.page, dlg)
 
             dlg = ft.AlertDialog(
                 title=ft.Text("无法获取全文", size=15, weight=ft.FontWeight.W_600),
                 content=ft.Column(content_parts, spacing=8, tight=True),
                 actions=[ft.TextButton("关闭", on_click=close_dlg)],
             )
-            ctx.page.overlay.append(dlg)
-            dlg.open = True
-            ctx.page.update()
+            open_dialog(ctx.page, dlg)
 
         ctx.page.run_task(_poll)
 
@@ -1619,9 +1595,7 @@ def build_library_page(ctx):
             ], spacing=8, tight=True),
             actions=[ft.TextButton("确定", on_click=lambda e: _close_dlg(dlg))],
         )
-        ctx.page.overlay.append(dlg)
-        dlg.open = True
-        ctx.page.update()
+        open_dialog(ctx.page, dlg)
 
     def _show_export_error(msg: str):
         dlg = ft.AlertDialog(
@@ -1629,13 +1603,10 @@ def build_library_page(ctx):
             content=ft.Text(msg, size=13),
             actions=[ft.TextButton("确定", on_click=lambda e: _close_dlg(dlg))],
         )
-        ctx.page.overlay.append(dlg)
-        dlg.open = True
-        ctx.page.update()
+        open_dialog(ctx.page, dlg)
 
     def _close_dlg(dlg):
-        dlg.open = False
-        dlg.update()
+        close_dialog(ctx.page, dlg)
 
     def _show_export_unavailable():
         dlg = ft.AlertDialog(
@@ -1643,9 +1614,7 @@ def build_library_page(ctx):
             content=ft.Text("导出模块尚未完成，请等待后续更新。"),
             actions=[ft.TextButton("确定", on_click=lambda e: _close_dlg(dlg))],
         )
-        ctx.page.overlay.append(dlg)
-        dlg.open = True
-        ctx.page.update()
+        open_dialog(ctx.page, dlg)
 
     def _show_graph_dialog(message: str, title: str = "知识图谱"):
         """图谱入口的轻量提示框。"""
@@ -1654,9 +1623,7 @@ def build_library_page(ctx):
             content=ft.Text(message, size=13),
             actions=[ft.TextButton("确定", on_click=lambda e: _close_dlg(dlg))],
         )
-        ctx.page.overlay.append(dlg)
-        dlg.open = True
-        ctx.page.update()
+        open_dialog(ctx.page, dlg)
 
     def on_open_graph_scope(all_papers: bool):
         """构建并打开当前课题的知识图谱窗口（范围：全部 / 仅选中文献）。"""
@@ -1689,9 +1656,7 @@ def build_library_page(ctx):
                 ft.Text(status["text"], size=13),
             ], spacing=14, tight=True),
         )
-        ctx.page.overlay.append(prog_dlg)
-        prog_dlg.open = True
-        ctx.page.update()
+        open_dialog(ctx.page, prog_dlg)
 
         _done = threading.Event()
         _result: dict = {"data": None, "err": None}
@@ -1718,11 +1683,7 @@ def build_library_page(ctx):
                 except Exception:
                     pass
                 await asyncio.sleep(0.3)
-            prog_dlg.open = False
-            try:
-                ctx.page.overlay.remove(prog_dlg)
-            except Exception:
-                pass
+            close_dialog(ctx.page, prog_dlg)
 
             if _result["err"] is not None:
                 ctx.page.update()
