@@ -237,9 +237,8 @@ def _make_bubble(text: str, role: str = "user") -> ft.Container:
 
 
 def send_agent_message(text: str, role: str = "user"):
-    """向 Agent 对话面板发送一条消息。"""
+    """向 Agent 对话面板发送一条消息（高频路径：只刷新消息列表子树）。"""
     global _agent_msg_list
-    page = ctx.page
     if _agent_msg_list is None:
         return
     bubble = _make_bubble(text, role)
@@ -250,11 +249,6 @@ def send_agent_message(text: str, role: str = "user"):
         _agent_msg_list.update()
     except RuntimeError:
         pass
-    if page:
-        try:
-            page.update()
-        except RuntimeError:
-            pass
     _scroll_agent_to_bottom()
 
 

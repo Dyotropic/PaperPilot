@@ -67,20 +67,23 @@ def _get_cross_encoder():
                     model_kwargs={"torch_dtype": torch.float32},
                 )
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            try:
                 future = executor.submit(_load)
-                try:
-                    _cross_encoder = future.result(timeout=180)
-                    print(f"[CE] Loaded in {_t.time()-_t0:.1f}s", flush=True)
-                    return _cross_encoder
-                except concurrent.futures.TimeoutError:
-                    print(f"[CE] 加载超时(180s)，将使用纯 API 排序", flush=True)
-                    _cross_encoder = None
-                    return None
-                except Exception as e:
-                    logger.warning(f"Cross-encoder load failed: {e}")
-                    _cross_encoder = None
-                    return None
+                _cross_encoder = future.result(timeout=180)
+                print(f"[CE] Loaded in {_t.time()-_t0:.1f}s", flush=True)
+                return _cross_encoder
+            except concurrent.futures.TimeoutError:
+                print(f"[CE] 加载超时(180s)，将使用纯 API 排序", flush=True)
+                _cross_encoder = None
+                return None
+            except Exception as e:
+                logger.warning(f"Cross-encoder load failed: {e}")
+                _cross_encoder = None
+                return None
+            finally:
+                # wait=False：超时后不等待阻塞线程（否则超时保护形同虚设）
+                executor.shutdown(wait=False)
 
         # 本地无缓存，尝试在线下载
         logger.info("Cross-encoder not cached, attempting download...")
@@ -142,18 +145,21 @@ def rerank_with_cross_encoder(
     def _predict():
         return ce.predict(pairs, show_progress_bar=False)
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
         future = executor.submit(_predict)
-        try:
-            scores = future.result(timeout=300)
-        except concurrent.futures.TimeoutError:
-            print("[CE] predict 超时(300s)，回退到 API 分数排序", flush=True)
-            results.sort(key=lambda x: -(x[1] if x[1] is not None else 0))
-            return results[:top_k]
-        except Exception as e:
-            logger.warning(f"Cross-encoder prediction failed: {e}")
-            results.sort(key=lambda x: -(x[1] if x[1] is not None else 0))
-            return results[:top_k]
+        scores = future.result(timeout=300)
+    except concurrent.futures.TimeoutError:
+        print("[CE] predict 超时(300s)，回退到 API 分数排序", flush=True)
+        results.sort(key=lambda x: -(x[1] if x[1] is not None else 0))
+        return results[:top_k]
+    except Exception as e:
+        logger.warning(f"Cross-encoder prediction failed: {e}")
+        results.sort(key=lambda x: -(x[1] if x[1] is not None else 0))
+        return results[:top_k]
+    finally:
+        # wait=False：超时后不等待阻塞线程（否则 300s 超时被 with 块抵消）
+        executor.shutdown(wait=False)
 
     # Sigmoid normalization: preserves score differentiation
     # Unlike min-max, sigmoid doesn't force the best paper to exactly 1.0

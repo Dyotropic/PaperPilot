@@ -1,7 +1,9 @@
 """文献库页（index 1）—— 课题列表 + 论文列表 + 状态筛选 + 阅读 + 导出。"""
 import asyncio
+import json
 import os
 import threading
+import webbrowser
 
 import flet as ft
 
@@ -511,6 +513,7 @@ def build_library_page(ctx):
                 "cited_by_count": None,
                 "journal": None,
                 "pdf_path": p.get("pdf_path"),
+                "project_paper_id": p.get("project_paper_id"),
             }
             paper_dicts.append(d)
 
@@ -536,6 +539,7 @@ def build_library_page(ctx):
 
         async def _poll_sort():
             import asyncio
+            score_map: dict = {}
             while not _sort_done.is_set():
                 await asyncio.sleep(0.3)
             if _sort_result and isinstance(_sort_result[0], Exception):
@@ -547,8 +551,17 @@ def build_library_page(ctx):
                 upload_progress.color = ft.Colors.GREEN
                 _sort_mode = "ce"
                 _update_sort_mode_label()
+                # 用刚算出的分数回填内存列表，跳过 refresh 内部重复查询（C9）
+                for pd_, sc in _sort_result:
+                    ppid = pd_.get("project_paper_id")
+                    if ppid is not None:
+                        score_map[ppid] = sc
+                for ap in all_papers:
+                    if ap["project_paper_id"] in score_map:
+                        ap["total_score"] = score_map[ap["project_paper_id"]]
+                        ap["score_similarity"] = score_map[ap["project_paper_id"]]
             upload_progress.update()
-            refresh_paper_list()
+            refresh_paper_list(preloaded_papers=all_papers if score_map else None)
             unload_cross_encoder()
 
         ctx.page.run_task(_poll_sort)
@@ -614,6 +627,7 @@ def build_library_page(ctx):
 
         async def _poll_ai_sort():
             import asyncio
+            ai_score_map: dict = {}
             while not _ai_sort_done.is_set():
                 await asyncio.sleep(0.5)
             if _ai_sort_result and isinstance(_ai_sort_result[0], Exception):
@@ -629,8 +643,18 @@ def build_library_page(ctx):
                 upload_progress.color = ft.Colors.GREEN
                 _sort_mode = "ai"
                 _update_sort_mode_label()
+                # 用刚算出的 AI 分回填内存列表，跳过 refresh 内部重复查询（C9）
+                for item in _ai_sort_result:
+                    idx = item.get("index", -1)
+                    if 0 <= idx < len(paper_dicts):
+                        ppid = paper_dicts[idx].get("project_paper_id")
+                        if ppid is not None:
+                            ai_score_map[ppid] = item.get("ai_score", 0)
+                for ap in all_papers:
+                    if ap["project_paper_id"] in ai_score_map:
+                        ap["ai_score"] = ai_score_map[ap["project_paper_id"]]
             upload_progress.update()
-            refresh_paper_list()
+            refresh_paper_list(preloaded_papers=all_papers if ai_score_map else None)
 
         ctx.page.run_task(_poll_ai_sort)
 
@@ -861,15 +885,128 @@ def build_library_page(ctx):
         dlg.open = True
         ctx.page.update()
 
-    def refresh_paper_list(target_pid=None):
-        """从数据库刷新当前课题的论文列表（分页 + 精简控件）。"""
+    def _show_detail_dialog(paper: dict):
+        """弹出论文详情对话框，显示完整元数据（提升到行循环外，避免每行重建闭包）。"""
+        ptitle = paper.get("title", "无标题") or "无标题"
+        pauthors = paper.get("authors", "未知") or "未知"
+        pyear = str(paper.get("year") or "—")
+        psource = paper.get("source", "未知") or "未知"
+        pdoi = paper.get("doi", "") or ""
+        purl = paper.get("url", "") or ""
+        pabstract = paper.get("abstract", "") or "（无摘要）"
+        pscore = paper.get("total_score", 0)
+        pstatus = paper.get("status", "unread")
+        pstatus_label = {"unread": "未读", "skimmed": "略读", "deep_read": "精读"}.get(pstatus, pstatus)
+        pai_notes = paper.get("ai_notes", "") or ""
+        puser_notes = paper.get("user_notes", "") or ""
+
+        cparts = [
+            ft.Text(f"作者: {pauthors}", size=13),
+            ft.Text(f"年份: {pyear}  |  来源: {psource}  |  状态: {pstatus_label}", size=13),
+        ]
+        if pdoi:
+            cparts.append(ft.Row([
+                ft.Text("DOI: ", size=13, color=ft.Colors.OUTLINE),
+                ft.TextButton(
+                    content=ft.Text(pdoi, size=13),
+                    on_click=lambda e, d=pdoi: webbrowser.open(f"https://doi.org/{d}"),
+                    style=ft.ButtonStyle(padding=ft.padding.Padding.all(0)),
+                ),
+            ], spacing=0, wrap=True))
+        if purl:
+            cparts.append(ft.Text(f"URL: {purl[:120]}", size=13, color=ft.Colors.OUTLINE))
+        cparts.append(ft.Text(f"CE 得分: {pscore:.3f}", size=13, weight=ft.FontWeight.W_600))
+        pai_score = paper.get("ai_score")
+        if pai_score is not None:
+            pai_reason_str = paper.get("ai_reason") or ""
+            try:
+                pai_reason = json.loads(pai_reason_str)
+                tier = str(pai_reason.get("tier", ""))
+            except (json.JSONDecodeError, TypeError):
+                pai_reason = {}
+                tier = ""
+            tier_badge = f" [{tier}]" if tier else ""
+            cparts.append(ft.Text(f"AI 评分: {int(pai_score)}{tier_badge}", size=13, weight=ft.FontWeight.W_600, color=ft.Colors.GREEN))
+            # 展示各维度理由
+            dims = [
+                ("相关性", pai_reason.get("relevance"), pai_reason.get("reason_relevance", "")),
+                ("方法", pai_reason.get("method"), pai_reason.get("reason_method", "")),
+                ("创新", pai_reason.get("novelty"), pai_reason.get("reason_novelty", "")),
+                ("时效", pai_reason.get("recency"), pai_reason.get("reason_recency", "")),
+            ]
+            for label, score_val, reason_text in dims:
+                if reason_text:
+                    score_str = f"{int(score_val)}/10" if score_val is not None else ""
+                    cparts.append(ft.Text(
+                        f"  {label} {score_str}: {reason_text}",
+                        size=13, color=ft.Colors.OUTLINE,
+                    ))
+            overall = pai_reason.get("overall", "")
+            if overall:
+                cparts.append(ft.Text(
+                    f"  综合: {overall}", size=13,
+                    color=ft.Colors.OUTLINE, weight=ft.FontWeight.W_500,
+                ))
+        cparts.append(ft.Divider(height=8))
+        cparts.append(ft.Text("摘要", size=14, weight=ft.FontWeight.W_600))
+        cparts.append(ft.Text(pabstract, size=13))
+        if pai_notes:
+            cparts.append(ft.Divider(height=8))
+            cparts.append(ft.Text("AI 精读笔记", size=14, weight=ft.FontWeight.W_600))
+            try:
+                parsed = json.loads(pai_notes)
+                if isinstance(parsed, dict):
+                    for k, v in parsed.items():
+                        if k.startswith("_"):
+                            continue
+                        if isinstance(v, dict):
+                            scores_str = "  ".join(f"{sk}: {sv}" for sk, sv in v.items())
+                            cparts.append(ft.Text(f"{k}: {scores_str}", size=13))
+                        else:
+                            cparts.append(ft.Text(f"{k}: {v}", size=13))
+                else:
+                    cparts.append(ft.Text(pai_notes[:500], size=13))
+            except Exception:
+                cparts.append(ft.Text(pai_notes[:500], size=13))
+        if puser_notes:
+            cparts.append(ft.Divider(height=8))
+            cparts.append(ft.Text("用户批注", size=14, weight=ft.FontWeight.W_600))
+            cparts.append(ft.Text(puser_notes, size=13))
+
+        def close_dlg(e):
+            dlg.open = False
+            dlg.update()
+
+        def read_paper_and_close(e):
+            close_dlg(e)
+            _on_read_paper(paper)
+
+        dlg = ft.AlertDialog(
+            title=ft.Text(ptitle, size=16, weight=ft.FontWeight.W_600, max_lines=4),
+            content=ft.Column(cparts, spacing=8, scroll=ft.ScrollMode.AUTO, height=480, width=560),
+            actions=[
+                ft.TextButton("阅读原文", on_click=read_paper_and_close),
+                ft.TextButton("关闭", on_click=close_dlg),
+            ],
+        )
+        ctx.page.overlay.append(dlg)
+        dlg.open = True
+        ctx.page.update()
+
+    def refresh_paper_list(target_pid=None, preloaded_papers: list[dict] | None = None):
+        """从数据库（或调用方提供的最新数据）刷新当前课题的论文列表。"""
         nonlocal _pagination_page, _sort_mode
         if target_pid is not None and target_pid != _selected_project_id:
             return  # 回调来自其他课题，忽略
         ctx.refresh_paper_list = refresh_paper_list
         status_val = _status_filter
         sf = None if status_val == "all" else status_val
-        papers = library.get_project_papers(_selected_project_id, status_filter=sf) if _selected_project_id else []
+        if preloaded_papers is not None:
+            # 排序等调用方已持有最新数据，跳过重复查询（C9）
+            papers = [p for p in preloaded_papers
+                      if sf is None or p.get("status") == sf] if _selected_project_id else []
+        else:
+            papers = library.get_project_papers(_selected_project_id, status_filter=sf) if _selected_project_id else []
 
         # 根据排序模式排序
         if _sort_mode == "ai":
@@ -995,117 +1132,6 @@ def build_library_page(ctx):
                 )
                 status_cell_parts.append(promote_btn)
 
-            def _show_detail_dialog(paper: dict):
-                """弹出论文详情对话框，显示完整元数据。"""
-                ptitle = paper.get("title", "无标题") or "无标题"
-                pauthors = paper.get("authors", "未知") or "未知"
-                pyear = str(paper.get("year") or "—")
-                psource = paper.get("source", "未知") or "未知"
-                pdoi = paper.get("doi", "") or ""
-                purl = paper.get("url", "") or ""
-                pabstract = paper.get("abstract", "") or "（无摘要）"
-                pscore = paper.get("total_score", 0)
-                pstatus = paper.get("status", "unread")
-                pstatus_label = {"unread": "未读", "skimmed": "略读", "deep_read": "精读"}.get(pstatus, pstatus)
-                pai_notes = paper.get("ai_notes", "") or ""
-                puser_notes = paper.get("user_notes", "") or ""
-
-                cparts = [
-                    ft.Text(f"作者: {pauthors}", size=13),
-                    ft.Text(f"年份: {pyear}  |  来源: {psource}  |  状态: {pstatus_label}", size=13),
-                ]
-                if pdoi:
-                    import webbrowser
-                    cparts.append(ft.Row([
-                        ft.Text("DOI: ", size=13, color=ft.Colors.OUTLINE),
-                        ft.TextButton(
-                            content=ft.Text(pdoi, size=13),
-                            on_click=lambda e, d=pdoi: webbrowser.open(f"https://doi.org/{d}"),
-                            style=ft.ButtonStyle(padding=ft.padding.Padding.all(0)),
-                        ),
-                    ], spacing=0, wrap=True))
-                if purl:
-                    cparts.append(ft.Text(f"URL: {purl[:120]}", size=13, color=ft.Colors.OUTLINE))
-                cparts.append(ft.Text(f"CE 得分: {pscore:.3f}", size=13, weight=ft.FontWeight.W_600))
-                pai_score = paper.get("ai_score")
-                if pai_score is not None:
-                    import json as _json2
-                    pai_reason_str = paper.get("ai_reason") or ""
-                    try:
-                        pai_reason = _json2.loads(pai_reason_str)
-                        tier = str(pai_reason.get("tier", ""))
-                    except (_json2.JSONDecodeError, TypeError):
-                        pai_reason = {}
-                        tier = ""
-                    tier_badge = f" [{tier}]" if tier else ""
-                    cparts.append(ft.Text(f"AI 评分: {int(pai_score)}{tier_badge}", size=13, weight=ft.FontWeight.W_600, color=ft.Colors.GREEN))
-                    # 展示各维度理由
-                    dims = [
-                        ("相关性", pai_reason.get("relevance"), pai_reason.get("reason_relevance", "")),
-                        ("方法", pai_reason.get("method"), pai_reason.get("reason_method", "")),
-                        ("创新", pai_reason.get("novelty"), pai_reason.get("reason_novelty", "")),
-                        ("时效", pai_reason.get("recency"), pai_reason.get("reason_recency", "")),
-                    ]
-                    for label, score_val, reason_text in dims:
-                        if reason_text:
-                            score_str = f"{int(score_val)}/10" if score_val is not None else ""
-                            cparts.append(ft.Text(
-                                f"  {label} {score_str}: {reason_text}",
-                                size=13, color=ft.Colors.OUTLINE,
-                            ))
-                    overall = pai_reason.get("overall", "")
-                    if overall:
-                        cparts.append(ft.Text(
-                            f"  综合: {overall}", size=13,
-                            color=ft.Colors.OUTLINE, weight=ft.FontWeight.W_500,
-                        ))
-                cparts.append(ft.Divider(height=8))
-                cparts.append(ft.Text("摘要", size=14, weight=ft.FontWeight.W_600))
-                cparts.append(ft.Text(pabstract, size=13))
-                if pai_notes:
-                    cparts.append(ft.Divider(height=8))
-                    cparts.append(ft.Text("AI 精读笔记", size=14, weight=ft.FontWeight.W_600))
-                    try:
-                        import json as _json
-                        parsed = _json.loads(pai_notes)
-                        if isinstance(parsed, dict):
-                            for k, v in parsed.items():
-                                if k.startswith("_"):
-                                    continue
-                                if isinstance(v, dict):
-                                    scores_str = "  ".join(f"{sk}: {sv}" for sk, sv in v.items())
-                                    cparts.append(ft.Text(f"{k}: {scores_str}", size=13))
-                                else:
-                                    cparts.append(ft.Text(f"{k}: {v}", size=13))
-                        else:
-                            cparts.append(ft.Text(pai_notes[:500], size=13))
-                    except Exception:
-                        cparts.append(ft.Text(pai_notes[:500], size=13))
-                if puser_notes:
-                    cparts.append(ft.Divider(height=8))
-                    cparts.append(ft.Text("用户批注", size=14, weight=ft.FontWeight.W_600))
-                    cparts.append(ft.Text(puser_notes, size=13))
-
-                def close_dlg(e):
-                    dlg.open = False
-                    dlg.update()
-
-                def read_paper_and_close(e):
-                    close_dlg(e)
-                    _on_read_paper(paper)
-
-                dlg = ft.AlertDialog(
-                    title=ft.Text(ptitle, size=16, weight=ft.FontWeight.W_600, max_lines=4),
-                    content=ft.Column(cparts, spacing=8, scroll=ft.ScrollMode.AUTO, height=480, width=560),
-                    actions=[
-                        ft.TextButton("阅读原文", on_click=read_paper_and_close),
-                        ft.TextButton("关闭", on_click=close_dlg),
-                    ],
-                )
-                ctx.page.overlay.append(dlg)
-                dlg.open = True
-                ctx.page.update()
-
             # 已下载论文序号+标题变绿
             pdf_path = p.get("pdf_path", "")
             has_pdf = bool(pdf_path and os.path.isfile(str(pdf_path)))
@@ -1116,8 +1142,7 @@ def build_library_page(ctx):
             if ai_score_val is not None:
                 _reason_str = p.get("ai_reason") or ""
                 try:
-                    import json as _json3
-                    _reason = _json3.loads(_reason_str)
+                    _reason = json.loads(_reason_str)
                     _tt_lines = []
                     if _reason.get("reason_relevance"):
                         _tt_lines.append(f"相关性：{_reason['reason_relevance']}")
@@ -1375,9 +1400,8 @@ def build_library_page(ctx):
 
                 # 保存到数据库
                 if pp_id:
-                    import json as _json
                     try:
-                        save_deep_read_notes(pp_id, _json.dumps(result, ensure_ascii=False))
+                        save_deep_read_notes(pp_id, json.dumps(result, ensure_ascii=False))
                         # 首次 AI 精读后自动从未读 → 略读
                         if paper.get("status") == "unread":
                             library.update_paper_status(pp_id, "skimmed")
