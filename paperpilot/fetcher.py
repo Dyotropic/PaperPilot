@@ -345,16 +345,31 @@ def _normalize_title(t: str) -> str:
 
 
 def deduplicate(papers: list[dict]) -> list[dict]:
-    """去重：按 title 相似度合并重复论文。"""
-    seen = []
+    """去重：按 title 相似度合并重复论文（保留首次出现，阈值 0.9 不变）。
+
+    归一化每篇只做一次；相同标题走集合 O(1) 判重；
+    SequenceMatcher 前按数学界预筛：ratio = 2·min/(l1+l2) ≥ 0.9
+    要求 hi ≤ (11/9)·lo，违反者不可能达阈值，直接跳过。
+    """
+    seen: list[dict] = []
+    seen_norms: list[str] = []
+    seen_set: set[str] = set()
     for paper in papers:
         t1 = _normalize_title(paper["title"])
+        if t1 in seen_set:
+            continue
+        lo = len(t1)
         dup = False
-        for existing in seen:
-            t2 = _normalize_title(existing["title"])
+        for t2 in seen_norms:
+            hi = len(t2)
+            a, b = (lo, hi) if lo <= hi else (hi, lo)
+            if b * 9 > a * 11:  # 长度比超过 11:9 ⇒ ratio 上界 < 0.9
+                continue
             if t1 == t2 or SequenceMatcher(None, t1, t2).ratio() >= 0.9:
                 dup = True
                 break
         if not dup:
             seen.append(paper)
+            seen_norms.append(t1)
+            seen_set.add(t1)
     return seen
