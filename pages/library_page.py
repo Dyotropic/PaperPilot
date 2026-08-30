@@ -14,7 +14,7 @@ from pages.context import (
     seed_color, app_bg, surface, surface_hi, accent_container,
     subtle_shadow, card,
 )
-from pages.components import is_shift_pressed
+from pages.components import is_shift_pressed, safe_update
 from paperpilot import library
 from paperpilot import repo_manager
 from paperpilot.local_import import scan_folder, extract_pdfs
@@ -178,8 +178,17 @@ def build_library_page(ctx):
             nonlocal _selected_project_id
             proj = library.get_project(pid)
             if proj:
-                repo_manager.move_project_to_recycle(proj.name)
-            library.delete_project(pid)
+                moved = repo_manager.move_project_to_recycle(proj.name)
+                if not moved:
+                    # 目录移动失败（被占用等）：中止删除，避免 DB 记录没了
+                    # 而目录残留成孤儿
+                    dlg.open = False
+                    dlg.update()
+                    _show_graph_dialog(
+                        "课题目录移入回收站失败（可能被其它程序占用），已取消删除。"
+                        "请关闭相关窗口后重试。", title="删除课题")
+                    return
+                library.delete_project(pid)
             _selected_project_id = None
             ctx.selected_project_id = None
             ctx.set_agent_project(None)
@@ -329,6 +338,7 @@ def build_library_page(ctx):
         multi_select_count.update()
         if _compare_btn:
             _compare_btn.visible = (n >= 2)
+            _compare_btn.disabled = (n < 2)  # 修复：按钮创建时恒 disabled，从不解禁
             try:
                 _compare_btn.update()
             except RuntimeError:
@@ -367,7 +377,10 @@ def build_library_page(ctx):
             dlg.open = False
             dlg.update()
             refresh_paper_list()
-            threading.Timer(3.0, lambda: setattr(upload_progress, "value", "") or upload_progress.update()).start()
+            def _clear_upload_hint():
+                upload_progress.value = ""
+                safe_update(upload_progress)
+            threading.Timer(3.0, _clear_upload_hint).start()
 
         def close_dlg(e):
             dlg.open = False; dlg.update()

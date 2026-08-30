@@ -25,6 +25,21 @@ def is_shift_pressed() -> bool:
         return False
 
 
+def safe_update(ctrl) -> None:
+    """静默更新控件；控件已 unmount（RuntimeError）时忽略。
+
+    供跨线程回调、Timer、轮询收尾等"控件可能已被销毁"的路径使用。
+    """
+    if ctrl is None:
+        return
+    try:
+        ctrl.update()
+    except RuntimeError:
+        pass
+    except Exception:
+        pass
+
+
 def make_resize_handle(get_width, set_width, min_w, max_w, on_end=None,
                        side: str = "right") -> ft.GestureDetector:
     """构建水平拖拽调宽手柄（竖条样式，RESIZE_LEFT_RIGHT 光标）。

@@ -227,14 +227,19 @@ def import_pdf(paper: dict, project_name: str) -> str | None:
         dst = str(pdf_dir / pdf_name)
 
     # ④ 拷贝
+    copy_failed = False
     if not os.path.isfile(dst):
         try:
             shutil.copy2(src, dst)
         except OSError:
+            # 拷贝失败时不得把 catalog 指向不存在的 pdfs/{pdf_name}——
+            # 登记源文件原名，保证 catalog 条目真实可解析
             dst = src
+            copy_failed = True
 
     # ⑤ 更新 catalog
-    add_to_catalog(project_name, paper, pdf_name)
+    add_to_catalog(project_name, paper,
+                   os.path.basename(dst) if copy_failed else pdf_name)
 
     # ⑥ 同步到其他已有该论文的课题
     if dst != src:

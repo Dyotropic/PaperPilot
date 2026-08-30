@@ -184,6 +184,21 @@ def main(page: ft.Page):
         ], expand=True),
     )
 
+    # 回收站 7 天自动清理（clean_recycle 此前从未接线，USER_GUIDE 承诺过）：
+    # 启动时后台静默清一次，不阻塞窗口出现，失败不影响主流程
+    import threading as _threading
+
+    def _startup_clean_recycle():
+        try:
+            from paperpilot import repo_manager as _rm
+            n = _rm.clean_recycle()
+            if n:
+                print(f"[repo] 回收站清理 {n} 个过期项目", flush=True)
+        except Exception as _ex:
+            print(f"[repo] 回收站清理失败（忽略）: {_ex}", flush=True)
+
+    _threading.Thread(target=_startup_clean_recycle, daemon=True).start()
+
     # 欢迎消息（必须在 page.add 之后，控件已挂载才能 update）
     send_agent_message(
         "你好！我是你的学术助理。\n\n"

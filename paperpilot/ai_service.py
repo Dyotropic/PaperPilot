@@ -13,13 +13,18 @@ import hashlib
 import json
 import logging
 import re
+import sys
 from pathlib import Path
 
 from paperpilot.llm_client import get_client, get_task_model
 
 logger = logging.getLogger(__name__)
 
-_DEEP_READ_DIR = Path("outputs/deep_read")
+if getattr(sys, "frozen", False):
+    _BASE_DIR = Path(sys.executable).parent
+else:
+    _BASE_DIR = Path(__file__).parent.parent
+_DEEP_READ_DIR = _BASE_DIR / "outputs" / "deep_read"
 
 # ── RLM 参数 ──
 _WINDOW_SIZE = 6000    # 每窗字符数
@@ -246,7 +251,8 @@ class AIService:
         text_len = len(full_text)
         notes_parts: list[str] = []
         step = window_size - overlap
-        total_windows = max(1, (text_len - overlap) // step)
+        # 向上取整：整除会漏读文尾（如 11K 字符只读第一窗的 6K）
+        total_windows = max(1, -(-(text_len - overlap) // step))
 
         system_prompt = (
             "你是一位资深学术审稿人。请仔细阅读论文片段，提取关键信息。\n\n"
@@ -466,7 +472,7 @@ class AIService:
         Args:
             topic_desc: 课题描述
             papers: paper dict 列表（仅含摘要）
-            max_papers: 最多评分篇数（默认 20，上限 100）
+            max_papers: 最多评分篇数（默认 50，超过按 50 钳制）
 
         Returns:
             [{index, ai_score, ai_reason: {relevance, method, novelty, overall}}, ...]
@@ -572,32 +578,41 @@ class AIService:
             return []
 
         results = []
+        malformed = 0
         for item in items:
             if not isinstance(item, dict):
                 continue
-            idx = item.get("index", -1)
-            if idx < 0 or idx >= chunk_size:
+            try:
+                # LLM 可能返回 "index": "0"（字符串）或 "score": "8.5"，
+                # 单条畸形只跳过该条，不能让整批评分报废
+                idx = int(item.get("index", -1))
+                if idx < 0 or idx >= chunk_size:
+                    continue
+                orig_i, paper, has_abstract = chunk[idx]
+                score = int(float(item.get("score", 0)))
+                if not has_abstract:
+                    score = score // 2  # 仅标题评分，减半
+                results.append({
+                    "index": orig_i,
+                    "ai_score": score,
+                    "tier": str(item.get("tier", "") or ""),
+                    "ai_reason": {
+                        "relevance": int(float(item.get("relevance", 0))),
+                        "method": int(float(item.get("method", 0))),
+                        "novelty": int(float(item.get("novelty", 0))),
+                        "recency": int(float(item.get("recency", 0))),
+                        "reason_relevance": str(item.get("reason_relevance", "") or ""),
+                        "reason_method": str(item.get("reason_method", "") or ""),
+                        "reason_novelty": str(item.get("reason_novelty", "") or ""),
+                        "reason_recency": str(item.get("reason_recency", "") or ""),
+                        "overall": str(item.get("reason_overall", "") or ""),
+                    },
+                })
+            except (TypeError, ValueError):
+                malformed += 1
                 continue
-            orig_i, paper, has_abstract = chunk[idx]
-            score = int(item.get("score", 0))
-            if not has_abstract:
-                score = score // 2  # 仅标题评分，减半
-            results.append({
-                "index": orig_i,
-                "ai_score": score,
-                "tier": str(item.get("tier", "") or ""),
-                "ai_reason": {
-                    "relevance": int(item.get("relevance", 0)),
-                    "method": int(item.get("method", 0)),
-                    "novelty": int(item.get("novelty", 0)),
-                    "recency": int(item.get("recency", 0)),
-                    "reason_relevance": str(item.get("reason_relevance", "") or ""),
-                    "reason_method": str(item.get("reason_method", "") or ""),
-                    "reason_novelty": str(item.get("reason_novelty", "") or ""),
-                    "reason_recency": str(item.get("reason_recency", "") or ""),
-                    "overall": str(item.get("reason_overall", "") or ""),
-                },
-            })
+        if malformed:
+            logger.warning(f"score_papers: chunk {chunk_idx} 丢弃 {malformed} 条畸形评分")
 
         logger.info(
             f"score_papers: chunk {chunk_idx} scored "

@@ -524,12 +524,22 @@ def set_agent_project(project_id: int | None, project_name: str = "",
     name_changed = (project_id is not None and _agent_project_id == project_id
                     and _agent_project_name and _agent_project_name != project_name)
     if name_changed:
-        # 课题改名：重命名仓库文件夹，清除旧的 conversation 缓存
+        # 课题改名：重命名仓库文件夹，清除旧的 conversation 缓存。
+        # 失败必须让用户知道——否则 DB 已是新名而目录仍为旧名，
+        # 用户会看到对话历史/论文目录"清空"（数据其实在旧目录）
         try:
             from paperpilot import repo_manager
-            repo_manager.rename_project(_agent_project_name, project_name)
-        except Exception:
-            pass
+            renamed = repo_manager.rename_project(_agent_project_name, project_name)
+        except Exception as ex:
+            renamed = False
+            _rename_err = str(ex)
+        else:
+            _rename_err = "目标目录已存在或不可移动"
+        if not renamed:
+            send_agent_message(
+                f"⚠ 课题目录重命名失败（{_rename_err}）。"
+                f"论文与对话目录仍使用旧名称“{_agent_project_name}”。",
+                role="system")
         if _ai_service:
             _ai_service._conversations.pop(project_id, None)
     _agent_project_id = project_id
@@ -829,6 +839,11 @@ def _dispatch_agent_action(action: dict):
                 sa["refresh_results_table"]()
             except Exception:
                 pass
+            if sa.get("update_search_count"):
+                try:
+                    sa["update_search_count"]()
+                except Exception:
+                    pass
 
         imported = 0
         for paper in sel_papers:

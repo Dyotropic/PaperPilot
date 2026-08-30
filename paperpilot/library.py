@@ -295,8 +295,8 @@ def save_papers_to_project(
                 if ai_reason and not existing.ai_reason:
                     existing.ai_reason = _json.dumps(ai_reason, ensure_ascii=False) if isinstance(ai_reason, dict) else str(ai_reason)
                     updated = True
-                if updated:
-                    pdf_updated += 1  # 复用计数
+                # AI 分数/理由回填不计入 pdf_updated（该计数语义是
+                # "补填 PDF 路径数"，UI 会把它展示为"已更新 N 篇 PDF 路径"）
                 continue
 
             pp = ProjectPaper(

@@ -9,7 +9,7 @@ import time
 
 import requests
 
-from paperpilot.config import config
+from paperpilot.config import load_config
 from paperpilot.sources.base import (
     PaperSource, SourceRateLimited, _build_search_query, cache_ttl_seconds,
     open_cache,
@@ -28,8 +28,11 @@ def _get_api_key() -> str:
 
     OpenAlex 自 2026-02-13 起废除 mailto polite pool 改为 API key 制：
     无 key 每日仅 100 credits，免费 key 100,000 credits/天。
+
+    每次调用现读 config.yaml（不用 import 期冻结的模块单例），
+    设置页保存 Key 后立即生效，无需重启。
     """
-    return str((config.get("data_sources", {}) or {}).get("openalex_api_key", "") or "").strip()
+    return str((load_config().get("data_sources", {}) or {}).get("openalex_api_key", "") or "").strip()
 
 
 def _normalize_doi(doi) -> str:

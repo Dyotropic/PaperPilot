@@ -204,8 +204,14 @@ def extract_all_keywords(topic: str, top_n: int = 10) -> list[tuple[str, float]]
 
     regular_keywords = extract_regular_keywords(topic)
     if not regular_keywords:
-        # Fallback to jieba if DeepSeek API fails
-        regular_keywords = extract_keywords(topic, top_n=top_n)
+        # DeepSeek 不可用时直接走本地提取；不能调 extract_keywords——
+        # 那会把同一课题描述再打一次 LLM（重复等待 15s）后才落到本地
+        try:
+            regular_keywords = (_chinese_extract(topic, top_n)
+                                if _has_chinese(topic)
+                                else _english_extract(topic, top_n))
+        except Exception:
+            regular_keywords = []
 
     # Remove regular keywords that overlap with core keywords
     core_lower = {kw.lower() for kw in core_keywords}

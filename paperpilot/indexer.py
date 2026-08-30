@@ -117,7 +117,9 @@ def rerank_with_cross_encoder(
     - predict() 有 120s 超时保护，超时回退到 API 分数排序
     """
     ce = _get_cross_encoder()
-    if ce is None or not results:
+    if not results:
+        return []
+    if ce is None:
         scores_arr = np.array([s for _, s in results])
         min_s, max_s = scores_arr.min(), scores_arr.max()
         if max_s > min_s:

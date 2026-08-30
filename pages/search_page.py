@@ -20,7 +20,7 @@ from pages.settings_page import (
 )
 from paperpilot.keywords import extract_all_keywords, merge_keywords
 from paperpilot.mt_translator import translate_terms
-from pages.components import is_shift_pressed
+from pages.components import is_shift_pressed, safe_update
 from paperpilot.fetcher import (
     fetch_arxiv, fetch_openalex, fetch_europepmc, fetch_with_cascade,
     fetch_multi_primary, deduplicate, get_article_type_label, SourceRateLimited,
@@ -463,266 +463,268 @@ def show_paper_detail(paper: dict):
     if sb is None or _sidebar_busy:
         return
     _sidebar_busy = True
-    sb._title.value = paper.get("title", "")
-    source = {"arxiv": "arXiv", "openalex": "OpenAlex", "europepmc": "EPMC", "local_pdf": "本地"}.get(
-        paper.get("source", ""), paper.get("source", "")
-    )
-    type_label = get_article_type_label(paper)
-    meta_parts = [
-        f"作者: {paper.get('authors', '未知')}",
-        f"年份: {paper.get('year', '—')}",
-        f"来源: {source}",
-        f"类型: {type_label}",
-    ]
-    journal = paper.get("journal")
-    if journal:
-        meta_parts.append(f"期刊: {journal}")
-    cit = paper.get("cited_by_count")
-    if cit is not None:
-        meta_parts.append(f"引用次数: {cit}")
-    sb._meta.value = "  |  ".join(meta_parts)
-    sb._abstract.value = paper.get("abstract", "") or "（无摘要）"
-    # ── 可点击链接 ──
-    links = []
-    read_btn = ft.TextButton("阅读原文", icon=ft.Icons.OPEN_IN_BROWSER)
-    import_btn = ft.TextButton("导入PDF", icon=ft.Icons.UPLOAD,
-                               visible=True)
-    # 保存当前 paper 引用，供回调闭包使用
-    _current_paper = paper
+    try:
+        sb._title.value = paper.get("title", "")
+        source = {"arxiv": "arXiv", "openalex": "OpenAlex", "europepmc": "EPMC", "local_pdf": "本地"}.get(
+            paper.get("source", ""), paper.get("source", "")
+        )
+        type_label = get_article_type_label(paper)
+        meta_parts = [
+            f"作者: {paper.get('authors', '未知')}",
+            f"年份: {paper.get('year', '—')}",
+            f"来源: {source}",
+            f"类型: {type_label}",
+        ]
+        journal = paper.get("journal")
+        if journal:
+            meta_parts.append(f"期刊: {journal}")
+        cit = paper.get("cited_by_count")
+        if cit is not None:
+            meta_parts.append(f"引用次数: {cit}")
+        sb._meta.value = "  |  ".join(meta_parts)
+        sb._abstract.value = paper.get("abstract", "") or "（无摘要）"
+        # ── 可点击链接 ──
+        links = []
+        read_btn = ft.TextButton("阅读原文", icon=ft.Icons.OPEN_IN_BROWSER)
+        import_btn = ft.TextButton("导入PDF", icon=ft.Icons.UPLOAD,
+                                   visible=True)
+        # 保存当前 paper 引用，供回调闭包使用
+        _current_paper = paper
 
-    def _on_read(e, p=_current_paper):
-        read_btn.disabled = True
-        read_btn.text = "正在检查..."
-        read_btn.icon = ft.Icons.HOURGLASS_EMPTY
-        read_btn.update()
-
-        import_result = {"path": None}
-
-        def _bg_try():
-            """后台线程：优先查 repo 缓存，未命中则下载并缓存到 repo。"""
-            try:
-                from pathlib import Path as _P
-
-                # 1. 先查 repo_manager 缓存
-                cached = None
-                try:
-                    cached = repo_manager.get_cached_pdf(p)
-                except Exception as ex:
-                    print(f"[_on_read] step=cache_lookup error={type(ex).__name__}: {ex}", flush=True)
-                if cached and _P(cached).is_file():
-                    import_result["ok"] = True
-                    import_result["action"] = ("pdf", cached)
-                    import_result["done"] = True
-                    return
-
-                # 2. 下载 PDF
-                print(f"[_on_read] step=download title={p.get('title', '')[:80]}", flush=True)
-                pdf_path = None
-                try:
-                    from paperpilot.downloader import cache_pdf as _dl_cache_pdf
-                    pdf_path = _dl_cache_pdf(p)
-                except Exception as ex:
-                    print(f"[_on_read] step=download error={type(ex).__name__}: {ex}", flush=True)
-                if pdf_path and _P(pdf_path).is_file():
-                    # 3. 存入 repo_manager 缓存（LRU 管理）
-                    repo_path = None
-                    try:
-                        repo_path = repo_manager.cache_pdf(p, pdf_path)
-                    except Exception as ex:
-                        print(f"[_on_read] step=repo_cache error={type(ex).__name__}: {ex}", flush=True)
-                    final_path = repo_path if repo_path else pdf_path
-                    import_result["ok"] = True
-                    import_result["action"] = ("pdf", final_path)
-                    import_result["done"] = True
-                    return
-            except Exception as ex:
-                import_result["error"] = str(ex)
-                print(f"[_on_read] bg_try error={type(ex).__name__}: {ex}", flush=True)
-                import traceback
-                traceback.print_exc()
-
-            import_result["ok"] = False
-            import_result["done"] = True
-
-        import threading as _th
-        _th.Thread(target=_bg_try, daemon=True).start()
-
-        async def _poll_read():
-            import asyncio as _a
-            while not import_result.get("done"):
-                await _a.sleep(0.5)
-
-            read_btn.text = "阅读原文"
-            read_btn.icon = ft.Icons.OPEN_IN_BROWSER
-            read_btn.disabled = False
+        def _on_read(e, p=_current_paper):
+            read_btn.disabled = True
+            read_btn.text = "正在检查..."
+            read_btn.icon = ft.Icons.HOURGLASS_EMPTY
             read_btn.update()
 
-            if import_result.get("ok"):
-                # 自动获取成功 → 打开阅读器
-                action = import_result.get("action")
-                if action:
-                    atype, apath = action
-                    if atype == "pdf":
-                        p["pdf_path"] = apath
-                    theme = THEMES[state.theme_name]["seed"]
-                    dm = state.dark_mode
-                    threading.Thread(
-                        target=open_full_reader, args=(p,),
-                        kwargs={"theme_seed": theme, "dark_mode": dm},
-                        daemon=True,
-                    ).start()
+            import_result = {"path": None}
+
+            def _bg_try():
+                """后台线程：优先查 repo 缓存，未命中则下载并缓存到 repo。"""
+                try:
+                    from pathlib import Path as _P
+
+                    # 1. 先查 repo_manager 缓存
+                    cached = None
+                    try:
+                        cached = repo_manager.get_cached_pdf(p)
+                    except Exception as ex:
+                        print(f"[_on_read] step=cache_lookup error={type(ex).__name__}: {ex}", flush=True)
+                    if cached and _P(cached).is_file():
+                        import_result["ok"] = True
+                        import_result["action"] = ("pdf", cached)
+                        import_result["done"] = True
+                        return
+
+                    # 2. 下载 PDF
+                    print(f"[_on_read] step=download title={p.get('title', '')[:80]}", flush=True)
+                    pdf_path = None
+                    try:
+                        from paperpilot.downloader import cache_pdf as _dl_cache_pdf
+                        pdf_path = _dl_cache_pdf(p)
+                    except Exception as ex:
+                        print(f"[_on_read] step=download error={type(ex).__name__}: {ex}", flush=True)
+                    if pdf_path and _P(pdf_path).is_file():
+                        # 3. 存入 repo_manager 缓存（LRU 管理）
+                        repo_path = None
+                        try:
+                            repo_path = repo_manager.cache_pdf(p, pdf_path)
+                        except Exception as ex:
+                            print(f"[_on_read] step=repo_cache error={type(ex).__name__}: {ex}", flush=True)
+                        final_path = repo_path if repo_path else pdf_path
+                        import_result["ok"] = True
+                        import_result["action"] = ("pdf", final_path)
+                        import_result["done"] = True
+                        return
+                except Exception as ex:
+                    import_result["error"] = str(ex)
+                    print(f"[_on_read] bg_try error={type(ex).__name__}: {ex}", flush=True)
+                    import traceback
+                    traceback.print_exc()
+
+                import_result["ok"] = False
+                import_result["done"] = True
+
+            import threading as _th
+            _th.Thread(target=_bg_try, daemon=True).start()
+
+            async def _poll_read():
+                import asyncio as _a
+                while not import_result.get("done"):
+                    await _a.sleep(0.5)
+
+                read_btn.text = "阅读原文"
+                read_btn.icon = ft.Icons.OPEN_IN_BROWSER
+                read_btn.disabled = False
+                read_btn.update()
+
+                if import_result.get("ok"):
+                    # 自动获取成功 → 打开阅读器
+                    action = import_result.get("action")
+                    if action:
+                        atype, apath = action
+                        if atype == "pdf":
+                            p["pdf_path"] = apath
+                        theme = THEMES[state.theme_name]["seed"]
+                        dm = state.dark_mode
+                        threading.Thread(
+                            target=open_full_reader, args=(p,),
+                            kwargs={"theme_seed": theme, "dark_mode": dm},
+                            daemon=True,
+                        ).start()
+                    return
+
+                # 自动获取失败 → 弹出对话框
+                _show_manual_download_dialog(p)
+
+            ctx.page.run_task(_poll_read)
+
+        read_btn.on_click = _on_read
+
+        async def _on_import(e, p=_current_paper):
+            try:
+                import ctypes
+                ctypes.windll.user32.AllowSetForegroundWindow(-1)
+                print("[_on_import] AllowSetForegroundWindow(-1) OK", flush=True)
+            except Exception as ex:
+                print(f"[_on_import] AllowSetForegroundWindow failed: {ex}", flush=True)
+
+            import_result = {"selected": None, "done": False}
+
+            def _bg_pick():
+                print("[_bg_pick] started", flush=True)
+                try:
+                    import subprocess, tempfile, os as _os
+                    script = (
+                        'Add-Type -AssemblyName System.Windows.Forms\n'
+                        'Add-Type -TypeDefinition @"\n'
+                        'using System; using System.Runtime.InteropServices;\n'
+                        'public class FH{\n'
+                        '  [DllImport("user32.dll")]public static extern void keybd_event(byte a,byte b,uint c,UIntPtr d);\n'
+                        '  [DllImport("user32.dll")]public static extern bool SetForegroundWindow(IntPtr h);\n'
+                        '}\n'
+                        '"@ -ErrorAction SilentlyContinue\n'
+                        '[FH]::keybd_event(0x12,0,0,[UIntPtr]::Zero)\n'
+                        '[FH]::keybd_event(0x12,0,2,[UIntPtr]::Zero)\n'
+                        '$owner=New-Object System.Windows.Forms.Form\n'
+                        '$owner.Size=New-Object System.Drawing.Size(0,0)\n'
+                        "$owner.StartPosition='Manual'\n"
+                        '$owner.Location=New-Object System.Drawing.Point(-32000,-32000)\n'
+                        "$owner.FormBorderStyle='None'\n"
+                        '$owner.ShowInTaskbar=$false\n'
+                        '$owner.TopMost=$true\n'
+                        '$owner.Show()\n'
+                        '[void][FH]::SetForegroundWindow($owner.Handle)\n'
+                        '[System.Windows.Forms.Application]::DoEvents()\n'
+                        '$f=New-Object System.Windows.Forms.OpenFileDialog\n'
+                        "$f.Filter='PDF Files (*.pdf)|*.pdf'\n"
+                        "$f.Title='选择下载好的 PDF 文件'\n"
+                        "if($f.ShowDialog($owner) -eq 'OK'){Write-Output $f.FileName}\n"
+                        '$owner.Close();$owner.Dispose()\n'
+                        ''
+                    )
+                    tmp = tempfile.NamedTemporaryFile(
+                        mode="w", suffix=".ps1", delete=False, encoding="utf-8-sig"
+                    )
+                    tmp.write(script)
+                    tmp.close()
+                    try:
+                        r = subprocess.run(
+                            ["powershell", "-ExecutionPolicy", "Bypass", "-File", tmp.name],
+                            capture_output=True, text=True, timeout=120,
+                        )
+                        print(f"[_bg_pick] rc={r.returncode} stdout='{r.stdout.strip()[:100]}' stderr='{(r.stderr or '')[:200]}'", flush=True)
+                        selected = r.stdout.strip()
+                        if selected and _os.path.isfile(selected):
+                            import_result["selected"] = selected
+                    finally:
+                        try:
+                            _os.unlink(tmp.name)
+                        except OSError:
+                            pass
+                except Exception as ex:
+                    print(f"[_bg_pick] error: {ex}", flush=True)
+                import_result["done"] = True
+
+            import threading as _th
+            _th.Thread(target=_bg_pick, daemon=True).start()
+
+            import asyncio as _a
+            while not import_result["done"]:
+                await _a.sleep(0.3)
+
+            selected = import_result["selected"]
+            if not selected:
                 return
 
-            # 自动获取失败 → 弹出对话框
-            _show_manual_download_dialog(p)
+            dest = repo_manager.cache_pdf(p, selected)
+            if not dest:
+                dest = selected  # 缓存失败，保留原始路径
 
-        ctx.page.run_task(_poll_read)
+            from paperpilot import library as _lib
+            doi_for_update = p.get("doi")
+            if doi_for_update:
+                _lib.set_paper_pdf_path(doi=doi_for_update, pdf_path=str(dest))
+                p["pdf_path"] = str(dest)
 
-    read_btn.on_click = _on_read
+            theme = THEMES[state.theme_name]["seed"]
+            dm = state.dark_mode
+            _th.Thread(
+                target=open_full_reader, args=(p,),
+                kwargs={"theme_seed": theme, "dark_mode": dm},
+                daemon=True,
+            ).start()
 
-    async def _on_import(e, p=_current_paper):
-        try:
-            import ctypes
-            ctypes.windll.user32.AllowSetForegroundWindow(-1)
-            print("[_on_import] AllowSetForegroundWindow(-1) OK", flush=True)
-        except Exception as ex:
-            print(f"[_on_import] AllowSetForegroundWindow failed: {ex}", flush=True)
+        import_btn.on_click = _on_import
 
-        import_result = {"selected": None, "done": False}
+        def _show_manual_download_dialog(p):
+            import webbrowser as _wb
+            from paperpilot.downloader import pdf_direct_url
+            doi = p.get("doi", "")
+            # 优先用猜测 PDF 直链：浏览器可通过反爬挑战，通常直接触发下载
+            browser_url = pdf_direct_url(p) or (f"https://doi.org/{doi}" if doi else p.get("url", ""))
 
-        def _bg_pick():
-            print("[_bg_pick] started", flush=True)
-            try:
-                import subprocess, tempfile, os as _os
-                script = (
-                    'Add-Type -AssemblyName System.Windows.Forms\n'
-                    'Add-Type -TypeDefinition @"\n'
-                    'using System; using System.Runtime.InteropServices;\n'
-                    'public class FH{\n'
-                    '  [DllImport("user32.dll")]public static extern void keybd_event(byte a,byte b,uint c,UIntPtr d);\n'
-                    '  [DllImport("user32.dll")]public static extern bool SetForegroundWindow(IntPtr h);\n'
-                    '}\n'
-                    '"@ -ErrorAction SilentlyContinue\n'
-                    '[FH]::keybd_event(0x12,0,0,[UIntPtr]::Zero)\n'
-                    '[FH]::keybd_event(0x12,0,2,[UIntPtr]::Zero)\n'
-                    '$owner=New-Object System.Windows.Forms.Form\n'
-                    '$owner.Size=New-Object System.Drawing.Size(0,0)\n'
-                    "$owner.StartPosition='Manual'\n"
-                    '$owner.Location=New-Object System.Drawing.Point(-32000,-32000)\n'
-                    "$owner.FormBorderStyle='None'\n"
-                    '$owner.ShowInTaskbar=$false\n'
-                    '$owner.TopMost=$true\n'
-                    '$owner.Show()\n'
-                    '[void][FH]::SetForegroundWindow($owner.Handle)\n'
-                    '[System.Windows.Forms.Application]::DoEvents()\n'
-                    '$f=New-Object System.Windows.Forms.OpenFileDialog\n'
-                    "$f.Filter='PDF Files (*.pdf)|*.pdf'\n"
-                    "$f.Title='选择下载好的 PDF 文件'\n"
-                    "if($f.ShowDialog($owner) -eq 'OK'){Write-Output $f.FileName}\n"
-                    '$owner.Close();$owner.Dispose()\n'
-                    ''
-                )
-                tmp = tempfile.NamedTemporaryFile(
-                    mode="w", suffix=".ps1", delete=False, encoding="utf-8-sig"
-                )
-                tmp.write(script)
-                tmp.close()
-                try:
-                    r = subprocess.run(
-                        ["powershell", "-ExecutionPolicy", "Bypass", "-File", tmp.name],
-                        capture_output=True, text=True, timeout=120,
-                    )
-                    print(f"[_bg_pick] rc={r.returncode} stdout='{r.stdout.strip()[:100]}' stderr='{(r.stderr or '')[:200]}'", flush=True)
-                    selected = r.stdout.strip()
-                    if selected and _os.path.isfile(selected):
-                        import_result["selected"] = selected
-                finally:
-                    try:
-                        _os.unlink(tmp.name)
-                    except OSError:
-                        pass
-            except Exception as ex:
-                print(f"[_bg_pick] error: {ex}", flush=True)
-            import_result["done"] = True
+            def _go_download(e):
+                if browser_url:
+                    _wb.open(browser_url)
+                dlg.open = False
+                dlg.update()
 
-        import threading as _th
-        _th.Thread(target=_bg_pick, daemon=True).start()
+            def _cancel(e):
+                dlg.open = False
+                dlg.update()
 
-        import asyncio as _a
-        while not import_result["done"]:
-            await _a.sleep(0.3)
+            dlg = ft.AlertDialog(
+                title=ft.Text("无法自动获取全文"),
+                content=ft.Text(
+                    "该论文的出版商拦截了程序化下载（反爬挑战），但浏览器通常可以。\n\n"
+                    "点击「用浏览器下载」，在浏览器中完成下载后，\n"
+                    "回到此处点击「导入PDF」选择文件即可。\n\n"
+                    f"论文 DOI: {doi or '无'}"
+                ),
+                actions=[
+                    ft.TextButton("取消", on_click=_cancel),
+                    ft.FilledButton("用浏览器下载", on_click=_go_download),
+                ],
+            )
+            ctx.page.overlay.append(dlg)
+            dlg.open = True
+            ctx.page.update()
 
-        selected = import_result["selected"]
-        if not selected:
-            return
+        links.append(read_btn)
+        links.append(import_btn)
 
-        dest = repo_manager.cache_pdf(p, selected)
-        if not dest:
-            dest = selected  # 缓存失败，保留原始路径
-
-        from paperpilot import library as _lib
-        doi_for_update = p.get("doi")
-        if doi_for_update:
-            _lib.set_paper_pdf_path(doi=doi_for_update, pdf_path=str(dest))
-            p["pdf_path"] = str(dest)
-
-        theme = THEMES[state.theme_name]["seed"]
-        dm = state.dark_mode
-        _th.Thread(
-            target=open_full_reader, args=(p,),
-            kwargs={"theme_seed": theme, "dark_mode": dm},
-            daemon=True,
-        ).start()
-
-    import_btn.on_click = _on_import
-
-    def _show_manual_download_dialog(p):
-        import webbrowser as _wb
-        from paperpilot.downloader import pdf_direct_url
-        doi = p.get("doi", "")
-        # 优先用猜测 PDF 直链：浏览器可通过反爬挑战，通常直接触发下载
-        browser_url = pdf_direct_url(p) or (f"https://doi.org/{doi}" if doi else p.get("url", ""))
-
-        def _go_download(e):
-            if browser_url:
-                _wb.open(browser_url)
-            dlg.open = False
-            dlg.update()
-
-        def _cancel(e):
-            dlg.open = False
-            dlg.update()
-
-        dlg = ft.AlertDialog(
-            title=ft.Text("无法自动获取全文"),
-            content=ft.Text(
-                "该论文的出版商拦截了程序化下载（反爬挑战），但浏览器通常可以。\n\n"
-                "点击「用浏览器下载」，在浏览器中完成下载后，\n"
-                "回到此处点击「导入PDF」选择文件即可。\n\n"
-                f"论文 DOI: {doi or '无'}"
-            ),
-            actions=[
-                ft.TextButton("取消", on_click=_cancel),
-                ft.FilledButton("用浏览器下载", on_click=_go_download),
-            ],
-        )
-        ctx.page.overlay.append(dlg)
-        dlg.open = True
-        ctx.page.update()
-
-    links.append(read_btn)
-    links.append(import_btn)
-
-    doi = paper.get("doi")
-    if doi:
-        import webbrowser
-        doi_url = f"https://doi.org/{doi}"
-        links.append(ft.TextButton("DOI", icon=ft.Icons.LINK,
-                                    on_click=lambda e, u=doi_url: webbrowser.open(u)))
-    sb._links.controls = links
-    sb.visible = True
-    sb.update()
-    _sidebar_busy = False
+        doi = paper.get("doi")
+        if doi:
+            import webbrowser
+            doi_url = f"https://doi.org/{doi}"
+            links.append(ft.TextButton("DOI", icon=ft.Icons.LINK,
+                                        on_click=lambda e, u=doi_url: webbrowser.open(u)))
+        sb._links.controls = links
+        sb.visible = True
+        sb.update()
+    finally:
+        _sidebar_busy = False
 
 
 # ── 检索页 ──
@@ -949,6 +951,7 @@ def build_search_page(ctx):
             ctx.search_select_count_ref.update()
         if ctx.search_compare_btn:
             ctx.search_compare_btn.visible = (n >= 2)
+            ctx.search_compare_btn.disabled = (n < 2)  # 修复：按钮创建时恒 disabled，从不解禁
             try:
                 ctx.search_compare_btn.update()
             except RuntimeError:
@@ -1108,7 +1111,7 @@ def build_search_page(ctx):
             try:
                 _results = ctx.ai_service.score_papers(
                     state.topic_desc or state.topic_name, candidates,
-                    max_papers=int(ai_limit_dd.value))
+                    max_papers=limit)
             except Exception as ex:
                 _results = []
                 _log.getLogger(__name__).warning(f"AI score_papers error: {ex}")
@@ -1316,6 +1319,7 @@ def build_search_page(ctx):
 
             # 刷新检索结果表格（绿标）和文献库论文列表
             refresh_results_table()
+            _update_search_count()  # 选中集已清空，同步计数/对比按钮/保存按钮文案
             if ctx.refresh_paper_list is not None:
                 try:
                     ctx.refresh_paper_list(pid)
@@ -1425,6 +1429,9 @@ def build_search_page(ctx):
 
     def on_start_search(e):
         import logging as _logging
+        if state.is_searching:  # 防重入：双击/连点不触发第二条检索流水线
+            _logging.getLogger(__name__).warning("[on_start_search] BLOCKED: already searching")
+            return
         _logging.getLogger(__name__).info("[on_start_search] called, topic_desc=%r, keywords=%s",
                     topic_desc_field.value.strip()[:60], state.keywords[:5] if state.keywords else "EMPTY")
         if not topic_desc_field.value.strip():
