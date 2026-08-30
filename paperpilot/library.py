@@ -439,6 +439,9 @@ def set_paper_pdf_path_smart(paper: dict, pdf_path: str) -> bool:
     if title:
         return set_paper_pdf_path_by_title(title, pdf_path, paper.get("year"))
     return False
+
+
+def update_paper_status(project_paper_id: int, status: str) -> bool:
     """更新论文阅读状态。
 
     Args:
