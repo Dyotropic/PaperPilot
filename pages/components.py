@@ -2,12 +2,82 @@
 
 提供 VSCode 式拖拽调宽分隔手柄：按住手柄水平拖动即可调整相邻面板宽度，
 拖拽结束触发 on_end 回调（用于持久化到 config）。
+另含 Windows PowerShell 原生文件对话框统一入口（D6 收敛）。
 """
+import os
 import sys
 
 import flet as ft
 
 from pages.context import border_color
+
+# ── Windows 原生对话框（PowerShell 焦点修复样板，全仓库唯一份）──
+_PS_FOCUS_HELPER = (
+    'Add-Type -TypeDefinition @"\n'
+    'using System; using System.Runtime.InteropServices;\n'
+    'public class FH{\n'
+    '  [DllImport("user32.dll")]public static extern void keybd_event(byte a,byte b,uint c,UIntPtr d);\n'
+    '  [DllImport("user32.dll")]public static extern bool SetForegroundWindow(IntPtr h);\n'
+    '}\n'
+    '"@ -ErrorAction SilentlyContinue\n'
+    '[FH]::keybd_event(0x12,0,0,[UIntPtr]::Zero)\n'
+    '[FH]::keybd_event(0x12,0,2,[UIntPtr]::Zero)\n'
+    '$owner=New-Object System.Windows.Forms.Form\n'
+    '$owner.Size=New-Object System.Drawing.Size(0,0)\n'
+    "$owner.StartPosition='Manual'\n"
+    '$owner.Location=New-Object System.Drawing.Point(-32000,-32000)\n'
+    "$owner.FormBorderStyle='None'\n"
+    '$owner.ShowInTaskbar=$false\n'
+    '$owner.TopMost=$true\n'
+    '$owner.Show()\n'
+    '[void][FH]::SetForegroundWindow($owner.Handle)\n'
+    '[System.Windows.Forms.Application]::DoEvents()\n'
+)
+
+
+def run_ps_script(script: str, inject_focus: bool = True,
+                  timeout: int = 120) -> str:
+    """以 PowerShell 运行一段 UI 脚本，返回其 stdout（Windows 原生对话框）。
+
+    统一处理：前台窗口授权 + 焦点修复样板注入 + 临时脚本文件 + 清理。
+    script 用 `$owner=New-Object System.Windows.Forms.Form -Property @{TopMost=$true}`
+    占位 owner 创建，注入时替换为完整焦点修复；调用方仅需提供对话框本身逻辑。
+    """
+    import tempfile
+    import subprocess
+    try:
+        import ctypes
+        ctypes.windll.user32.AllowSetForegroundWindow(-1)
+    except Exception:
+        pass
+
+    if inject_focus:
+        script = script.replace(
+            '$owner=New-Object System.Windows.Forms.Form -Property @{TopMost=$true}\n',
+            _PS_FOCUS_HELPER,
+        )
+        script = script.replace('$owner.Dispose()\n', '$owner.Close()\n$owner.Dispose()\n')
+
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".ps1", delete=False, encoding="utf-8-sig")
+    tmp.write(script)
+    tmp.close()
+    try:
+        r = subprocess.run(
+            ["powershell", "-ExecutionPolicy", "Bypass", "-File", tmp.name],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        if r.stderr:
+            print(f"[run_ps_script] ps stderr: {r.stderr[:200]}", flush=True)
+        return r.stdout.strip()
+    except Exception as ex:
+        print(f"[run_ps_script] error: {ex}", flush=True)
+        return ""
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
 
 
 def is_shift_pressed() -> bool:

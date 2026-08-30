@@ -20,7 +20,7 @@ from pages.settings_page import (
 )
 from paperpilot.keywords import extract_all_keywords, merge_keywords
 from paperpilot.mt_translator import translate_terms
-from pages.components import is_shift_pressed, safe_update, open_dialog, close_dialog
+from pages.components import is_shift_pressed, safe_update, open_dialog, close_dialog, run_ps_script
 from paperpilot.fetcher import (
     fetch_arxiv, fetch_openalex, fetch_europepmc, fetch_with_cascade,
     fetch_multi_primary, deduplicate, get_article_type_label, SourceRateLimited,
@@ -594,54 +594,20 @@ def show_paper_detail(paper: dict):
             def _bg_pick():
                 print("[_bg_pick] started", flush=True)
                 try:
-                    import subprocess, tempfile, os as _os
+                    import os as _os
                     script = (
                         'Add-Type -AssemblyName System.Windows.Forms\n'
-                        'Add-Type -TypeDefinition @"\n'
-                        'using System; using System.Runtime.InteropServices;\n'
-                        'public class FH{\n'
-                        '  [DllImport("user32.dll")]public static extern void keybd_event(byte a,byte b,uint c,UIntPtr d);\n'
-                        '  [DllImport("user32.dll")]public static extern bool SetForegroundWindow(IntPtr h);\n'
-                        '}\n'
-                        '"@ -ErrorAction SilentlyContinue\n'
-                        '[FH]::keybd_event(0x12,0,0,[UIntPtr]::Zero)\n'
-                        '[FH]::keybd_event(0x12,0,2,[UIntPtr]::Zero)\n'
-                        '$owner=New-Object System.Windows.Forms.Form\n'
-                        '$owner.Size=New-Object System.Drawing.Size(0,0)\n'
-                        "$owner.StartPosition='Manual'\n"
-                        '$owner.Location=New-Object System.Drawing.Point(-32000,-32000)\n'
-                        "$owner.FormBorderStyle='None'\n"
-                        '$owner.ShowInTaskbar=$false\n'
-                        '$owner.TopMost=$true\n'
-                        '$owner.Show()\n'
-                        '[void][FH]::SetForegroundWindow($owner.Handle)\n'
-                        '[System.Windows.Forms.Application]::DoEvents()\n'
+                        '$owner=New-Object System.Windows.Forms.Form -Property @{TopMost=$true}\n'
                         '$f=New-Object System.Windows.Forms.OpenFileDialog\n'
                         "$f.Filter='PDF Files (*.pdf)|*.pdf'\n"
                         "$f.Title='选择下载好的 PDF 文件'\n"
                         "if($f.ShowDialog($owner) -eq 'OK'){Write-Output $f.FileName}\n"
-                        '$owner.Close();$owner.Dispose()\n'
-                        ''
+                        '$owner.Dispose()\n'
                     )
-                    tmp = tempfile.NamedTemporaryFile(
-                        mode="w", suffix=".ps1", delete=False, encoding="utf-8-sig"
-                    )
-                    tmp.write(script)
-                    tmp.close()
-                    try:
-                        r = subprocess.run(
-                            ["powershell", "-ExecutionPolicy", "Bypass", "-File", tmp.name],
-                            capture_output=True, text=True, timeout=120,
-                        )
-                        print(f"[_bg_pick] rc={r.returncode} stdout='{r.stdout.strip()[:100]}' stderr='{(r.stderr or '')[:200]}'", flush=True)
-                        selected = r.stdout.strip()
-                        if selected and _os.path.isfile(selected):
-                            import_result["selected"] = selected
-                    finally:
-                        try:
-                            _os.unlink(tmp.name)
-                        except OSError:
-                            pass
+                    selected = run_ps_script(script)
+                    print(f"[_bg_pick] selected='{selected[:100]}'", flush=True)
+                    if selected and _os.path.isfile(selected):
+                        import_result["selected"] = selected
                 except Exception as ex:
                     print(f"[_bg_pick] error: {ex}", flush=True)
                 import_result["done"] = True

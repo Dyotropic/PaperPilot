@@ -16,7 +16,7 @@ from pages.context import (
     seed_color, app_bg, surface, surface_hi, accent_container,
     subtle_shadow, card,
 )
-from pages.components import is_shift_pressed, safe_update, open_dialog, close_dialog
+from pages.components import is_shift_pressed, safe_update, open_dialog, close_dialog, run_ps_script
 from paperpilot import library
 from paperpilot import repo_manager
 from paperpilot.local_import import scan_folder, extract_pdfs
@@ -716,62 +716,9 @@ def build_library_page(ctx):
 
         ctx.page.run_task(_poll_upload)
 
-    # 文件选择 → PowerShell 调用 Windows 原生对话框
+    # 文件选择 → PowerShell 调用 Windows 原生对话框（D6：委托统一实现）
     def _run_ps_dialog(script: str) -> str:
-        import subprocess, tempfile, os
-        try:
-            import ctypes
-            ctypes.windll.user32.AllowSetForegroundWindow(-1)
-        except Exception:
-            pass
-        _FOCUS_HELPER = (
-            'Add-Type -TypeDefinition @"\n'
-            'using System; using System.Runtime.InteropServices;\n'
-            'public class FH{\n'
-            '  [DllImport("user32.dll")]public static extern void keybd_event(byte a,byte b,uint c,UIntPtr d);\n'
-            '  [DllImport("user32.dll")]public static extern bool SetForegroundWindow(IntPtr h);\n'
-            '}\n'
-            '"@ -ErrorAction SilentlyContinue\n'
-            '[FH]::keybd_event(0x12,0,0,[UIntPtr]::Zero)\n'
-            '[FH]::keybd_event(0x12,0,2,[UIntPtr]::Zero)\n'
-            '$owner=New-Object System.Windows.Forms.Form\n'
-            '$owner.Size=New-Object System.Drawing.Size(0,0)\n'
-            "$owner.StartPosition='Manual'\n"
-            '$owner.Location=New-Object System.Drawing.Point(-32000,-32000)\n'
-            "$owner.FormBorderStyle='None'\n"
-            '$owner.ShowInTaskbar=$false\n'
-            '$owner.TopMost=$true\n'
-            '$owner.Show()\n'
-            '[void][FH]::SetForegroundWindow($owner.Handle)\n'
-            '[System.Windows.Forms.Application]::DoEvents()\n'
-        )
-        script = script.replace(
-            '$owner=New-Object System.Windows.Forms.Form -Property @{TopMost=$true}\n',
-            _FOCUS_HELPER,
-        )
-        script = script.replace('$owner.Dispose()\n', '$owner.Close()\n$owner.Dispose()\n')
-        tmp = tempfile.NamedTemporaryFile(
-            mode="w", suffix=".ps1", delete=False, encoding="utf-8-sig"
-        )
-        tmp.write(script)
-        tmp.close()
-        try:
-            r = subprocess.run(
-                ["powershell", "-ExecutionPolicy", "Bypass", "-File", tmp.name],
-                capture_output=True, text=True, timeout=120,
-            )
-            if r.stderr:
-                print(f"[_run_ps_dialog] stderr: {r.stderr[:200]}", flush=True)
-            print(f"[_run_ps_dialog] rc={r.returncode} stdout='{r.stdout.strip()[:100]}'", flush=True)
-            return r.stdout.strip()
-        except Exception as ex:
-            print(f"[_run_ps_dialog] error: {ex}", flush=True)
-            return ""
-        finally:
-            try:
-                os.unlink(tmp.name)
-            except OSError:
-                pass
+        return run_ps_script(script)
 
     def _pick_single_file():
         script = (
@@ -783,9 +730,7 @@ def build_library_page(ctx):
             "if($f.ShowDialog($owner) -eq 'OK'){Write-Output $f.FileName}\n"
             '$owner.Dispose()\n'
         )
-        out = _run_ps_dialog(script)
-        if out:
-            _start_upload([out])
+        _run_pick_async(script, lambda out: out and _start_upload([out]))
 
     def _pick_multiple_files():
         script = (
@@ -798,9 +743,10 @@ def build_library_page(ctx):
             "if($f.ShowDialog($owner) -eq 'OK'){$f.FileNames|%{Write-Output $_}}\n"
             '$owner.Dispose()\n'
         )
-        out = _run_ps_dialog(script)
-        if out:
-            _start_upload([p for p in out.split("\n") if p.strip()])
+        _run_pick_async(
+            script,
+            lambda out: out and _start_upload([p for p in out.split("\n") if p.strip()]),
+        )
 
     def _pick_folder():
         script = (
@@ -811,8 +757,9 @@ def build_library_page(ctx):
             "if($f.ShowDialog($owner) -eq 'OK'){Write-Output $f.SelectedPath}\n"
             '$owner.Dispose()\n'
         )
-        out = _run_ps_dialog(script)
-        if out:
+        def _after(out):
+            if not out:
+                return
             pdfs = scan_folder(out, recursive=True)
             if pdfs:
                 _start_upload(pdfs)
@@ -820,6 +767,26 @@ def build_library_page(ctx):
                 upload_progress.value = "所选文件夹中无 PDF 文件"
                 upload_progress.color = ft.Colors.ERROR
                 upload_progress.update()
+        _run_pick_async(script, _after)
+
+    def _run_pick_async(script: str, on_result) -> None:
+        """后台线程运行文件对话框，避免对话框打开期间冻结整个应用（D5）。"""
+        result = {"out": "", "done": False}
+
+        def _bg():
+            result["out"] = _run_ps_dialog(script)
+            result["done"] = True
+
+        import threading as _th
+        _th.Thread(target=_bg, daemon=True).start()
+
+        async def _poll():
+            import asyncio
+            while not result["done"]:
+                await asyncio.sleep(0.2)
+            on_result(result["out"])
+
+        ctx.page.run_task(_poll)
 
     # upload 按钮 → PopupMenu 选择模式
     upload_menu_btn = ft.PopupMenuButton(
@@ -1488,64 +1455,22 @@ def build_library_page(ctx):
 
         def _bg_dialog():
             try:
-                import subprocess, tempfile, os as _os
-                try:
-                    import ctypes
-                    ctypes.windll.user32.AllowSetForegroundWindow(-1)
-                except Exception:
-                    pass
                 _label = label.replace("'", "''")
                 _defname = default_name.replace("'", "''")
                 script = (
                     'Add-Type -AssemblyName System.Windows.Forms\n'
-                    'Add-Type -TypeDefinition @"\n'
-                    'using System; using System.Runtime.InteropServices;\n'
-                    'public class FH{\n'
-                    '  [DllImport("user32.dll")]public static extern void keybd_event(byte a,byte b,uint c,UIntPtr d);\n'
-                    '  [DllImport("user32.dll")]public static extern bool SetForegroundWindow(IntPtr h);\n'
-                    '}\n'
-                    '"@ -ErrorAction SilentlyContinue\n'
-                    '[FH]::keybd_event(0x12,0,0,[UIntPtr]::Zero)\n'
-                    '[FH]::keybd_event(0x12,0,2,[UIntPtr]::Zero)\n'
-                    '$owner=New-Object System.Windows.Forms.Form\n'
-                    '$owner.Size=New-Object System.Drawing.Size(0,0)\n'
-                    "$owner.StartPosition='Manual'\n"
-                    '$owner.Location=New-Object System.Drawing.Point(-32000,-32000)\n'
-                    "$owner.FormBorderStyle='None'\n"
-                    '$owner.ShowInTaskbar=$false\n'
-                    '$owner.TopMost=$true\n'
-                    '$owner.Show()\n'
-                    '[void][FH]::SetForegroundWindow($owner.Handle)\n'
-                    '[System.Windows.Forms.Application]::DoEvents()\n'
+                    '$owner=New-Object System.Windows.Forms.Form -Property @{TopMost=$true}\n'
                     '$f=New-Object System.Windows.Forms.SaveFileDialog\n'
                     f"$f.Title='导出为 {_label}'\n"
                     f"$f.DefaultExt='.{ext}'\n"
                     f"$f.FileName='{_defname}'\n"
                     f"$f.Filter='{_label} 文件 (*.{ext})|*.{ext}'\n"
                     "if($f.ShowDialog($owner) -eq 'OK'){Write-Output $f.FileName}\n"
-                    '$owner.Close();$owner.Dispose()\n'
-                    ''
+                    '$owner.Dispose()\n'
                 )
-                tmp = tempfile.NamedTemporaryFile(
-                    mode="w", suffix=".ps1", delete=False, encoding="utf-8-sig"
-                )
-                tmp.write(script)
-                tmp.close()
-                try:
-                    r = subprocess.run(
-                        ["powershell", "-ExecutionPolicy", "Bypass", "-File", tmp.name],
-                        capture_output=True, text=True, timeout=120,
-                    )
-                    if r.stderr:
-                        print(f"[_bg_dialog] ps stderr: {r.stderr[:200]}", flush=True)
-                    selected = r.stdout.strip()
-                    if selected:
-                        result["path"] = selected
-                finally:
-                    try:
-                        _os.unlink(tmp.name)
-                    except OSError:
-                        pass
+                selected = run_ps_script(script)
+                if selected:
+                    result["path"] = selected
             except Exception as ex:
                 print(f"[_bg_dialog] error: {ex}", flush=True)
             result["done"] = True
