@@ -19,7 +19,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from paperpilot.repo_manager import _get_app_dir
+from paperpilot.repo_manager import _get_app_dir, atomic_write_text
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +110,7 @@ class ConversationManager:
             "messages": self._messages,
             "compressed": self._compressed,
         }
-        self._path.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_write_text(self._path, json.dumps(out, ensure_ascii=False, indent=2))
 
     # ── 读写消息 ──
 

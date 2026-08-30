@@ -31,11 +31,26 @@ def _get_app_dir() -> Path:
     return Path(__file__).parent.parent
 
 
+def atomic_write_text(path: Path, text: str) -> None:
+    """原子写文本文件：先写 .tmp 再 os.replace（同目录原子）。
+
+    进程退出/断电导致的截断文件不会出现——磁盘上永远是完整旧版或完整新版。
+    残留 .tmp 在下次写入时自然覆盖，无需清理。
+    """
+    tmp = Path(str(path) + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(str(tmp), str(path))
+
+
 _REPO_ROOT = _get_app_dir() / "repository"
 _CACHE_DIR = _get_app_dir() / "cache"
 _CACHE_PDFS = _CACHE_DIR / "pdfs"
 _CACHE_INDEX = _CACHE_DIR / "cache_index.json"
 _CACHE_MAX = 500 * 1024 * 1024  # 500MB
+
+# 缓存索引读-改-写并发锁（D4：后台下载与主线程导入并发时保一致性）
+import threading as _threading
+_cache_lock = _threading.RLock()
 
 
 # ── 文件命名 ──
@@ -116,7 +131,7 @@ def save_catalog(project_name: str, catalog: dict) -> None:
     """写入课题目录。"""
     path = _catalog_path(project_name)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(catalog, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_text(path, json.dumps(catalog, ensure_ascii=False, indent=2))
 
 
 def _make_key(paper: dict) -> str | None:
@@ -289,7 +304,7 @@ def _load_cache_index() -> dict:
 
 def _save_cache_index(idx: dict) -> None:
     _CACHE_INDEX.parent.mkdir(parents=True, exist_ok=True)
-    _CACHE_INDEX.write_text(json.dumps(idx, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_text(_CACHE_INDEX, json.dumps(idx, ensure_ascii=False, indent=2))
 
 
 def cache_pdf(paper: dict, src_path: str) -> str | None:
@@ -305,45 +320,46 @@ def cache_pdf(paper: dict, src_path: str) -> str | None:
 
     file_size = os.path.getsize(src_path)
 
-    # 已有缓存且文件存在 → 只更新访问时间
-    idx = _load_cache_index()
-    if key in idx["files"]:
-        existing_path = _CACHE_PDFS / idx["files"][key]["file"]
-        if existing_path.is_file():
-            idx["files"][key]["last_access"] = datetime.now().isoformat()
-            _save_cache_index(idx)
-            return str(existing_path)
-        # 文件丢了，清理索引
-        del idx["files"][key]
-        idx["total_size"] = sum(f["size"] for f in idx["files"].values())
+    with _cache_lock:
+        # 已有缓存且文件存在 → 只更新访问时间
+        idx = _load_cache_index()
+        if key in idx["files"]:
+            existing_path = _CACHE_PDFS / idx["files"][key]["file"]
+            if existing_path.is_file():
+                idx["files"][key]["last_access"] = datetime.now().isoformat()
+                _save_cache_index(idx)
+                return str(existing_path)
+            # 文件丢了，清理索引
+            del idx["files"][key]
+            idx["total_size"] = sum(f["size"] for f in idx["files"].values())
 
-    # 新缓存：用规范文件名
-    cache_name = make_pdf_name(paper)
-    dst = str(_CACHE_PDFS / cache_name)
+        # 新缓存：用规范文件名
+        cache_name = make_pdf_name(paper)
+        dst = str(_CACHE_PDFS / cache_name)
 
-    # 重名去重
-    if os.path.isfile(dst):
-        existing_size = os.path.getsize(dst)
-        if existing_size != file_size:
-            base = os.path.splitext(cache_name)[0][:190]
-            suffix = key.replace("/", "_").replace(":", "_")[:12]
-            cache_name = f"{base}_{suffix}.pdf"
-            dst = str(_CACHE_PDFS / cache_name)
+        # 重名去重
+        if os.path.isfile(dst):
+            existing_size = os.path.getsize(dst)
+            if existing_size != file_size:
+                base = os.path.splitext(cache_name)[0][:190]
+                suffix = key.replace("/", "_").replace(":", "_")[:12]
+                cache_name = f"{base}_{suffix}.pdf"
+                dst = str(_CACHE_PDFS / cache_name)
 
-    # LRU 清理
-    while idx["total_size"] + file_size > _CACHE_MAX and idx["files"]:
-        _evict_one(idx)
-    try:
-        shutil.copy2(src_path, dst)
-    except OSError:
-        return None
-    idx["files"][key] = {
-        "file": cache_name,
-        "size": file_size,
-        "last_access": datetime.now().isoformat(),
-    }
-    idx["total_size"] += file_size
-    _save_cache_index(idx)
+        # LRU 清理
+        while idx["total_size"] + file_size > _CACHE_MAX and idx["files"]:
+            _evict_one(idx)
+        try:
+            shutil.copy2(src_path, dst)
+        except OSError:
+            return None
+        idx["files"][key] = {
+            "file": cache_name,
+            "size": file_size,
+            "last_access": datetime.now().isoformat(),
+        }
+        idx["total_size"] += file_size
+        _save_cache_index(idx)
 
     return dst
 
@@ -353,19 +369,20 @@ def get_cached_pdf(paper: dict) -> str | None:
     key = _make_key(paper)
     if not key:
         return None
-    idx = _load_cache_index()
-    if key not in idx["files"]:
-        return None
-    cache_name = idx["files"][key]["file"]
-    path = str(_CACHE_PDFS / cache_name)
-    if os.path.isfile(path):
-        idx["files"][key]["last_access"] = datetime.now().isoformat()
+    with _cache_lock:
+        idx = _load_cache_index()
+        if key not in idx["files"]:
+            return None
+        cache_name = idx["files"][key]["file"]
+        path = str(_CACHE_PDFS / cache_name)
+        if os.path.isfile(path):
+            idx["files"][key]["last_access"] = datetime.now().isoformat()
+            _save_cache_index(idx)
+            return path
+        # 文件丢了，清理索引
+        del idx["files"][key]
+        idx["total_size"] = sum(f["size"] for f in idx["files"].values())
         _save_cache_index(idx)
-        return path
-    # 文件丢了，清理索引
-    del idx["files"][key]
-    idx["total_size"] = sum(f["size"] for f in idx["files"].values())
-    _save_cache_index(idx)
     return None
 
 
