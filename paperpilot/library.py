@@ -420,7 +420,25 @@ def set_paper_pdf_path_by_title(title: str, pdf_path: str,
         session.close()
 
 
-def update_paper_status(project_paper_id: int, status: str) -> bool:
+def set_paper_pdf_path_smart(paper: dict, pdf_path: str) -> bool:
+    """DOI 优先、标题+年份回退地写入论文 pdf_path。
+
+    收敛各处重复的"DOI 优先 → 标题回退"规则（D2）。
+
+    Args:
+        paper: paper dict，需含 doi / title / year
+        pdf_path: PDF 文件绝对路径
+
+    Returns:
+        是否成功写入（任一匹配路径成功即 True）
+    """
+    doi = paper.get("doi") or ""
+    if doi and set_paper_pdf_path(doi=doi, pdf_path=pdf_path):
+        return True
+    title = paper.get("title") or ""
+    if title:
+        return set_paper_pdf_path_by_title(title, pdf_path, paper.get("year"))
+    return False
     """更新论文阅读状态。
 
     Args:

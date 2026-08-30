@@ -1259,15 +1259,8 @@ def build_search_page(ctx):
 
             # ── PDF 导入 + DB 更新（DOI 优先，标题回退）──
             def _update_db_pdf(paper: dict, pdf_path: str) -> bool:
-                """将 pdf_path 写入数据库。DOI 匹配失败时回退到标题匹配。"""
-                doi = paper.get("doi") or ""
-                if doi and library.set_paper_pdf_path(doi, pdf_path):
-                    return True
-                title = paper.get("title") or ""
-                if title:
-                    year = paper.get("year")
-                    return library.set_paper_pdf_path_by_title(title, pdf_path, year)
-                return False
+                """将 pdf_path 写入数据库（DOI 优先，标题回退，收敛于统一实现）。"""
+                return library.set_paper_pdf_path_smart(paper, pdf_path)
 
             # 同步导入已有缓存
             imported = 0

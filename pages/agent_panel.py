@@ -848,13 +848,7 @@ def _dispatch_agent_action(action: dict):
                 paper["pdf_path"] = pdf
                 repo_path = repo_manager.import_pdf(paper, target_name)
                 if repo_path:
-                    doi = paper.get("doi") or ""
-                    if doi:
-                        library.set_paper_pdf_path(doi, repo_path)
-                    else:
-                        title = paper.get("title") or ""
-                        if title:
-                            library.set_paper_pdf_path_by_title(title, repo_path, paper.get("year"))
+                    library.set_paper_pdf_path_smart(paper, repo_path)
                 imported += 1
 
         if ctx.refresh_paper_list is not None:
@@ -874,13 +868,7 @@ def _dispatch_agent_action(action: dict):
                             paper["pdf_path"] = cache_path
                             repo_path = repo_manager.import_pdf(paper, target_name)
                             if repo_path:
-                                doi = paper.get("doi") or ""
-                                if doi:
-                                    library.set_paper_pdf_path(doi, repo_path)
-                                else:
-                                    title = paper.get("title") or ""
-                                    if title:
-                                        library.set_paper_pdf_path_by_title(title, repo_path, paper.get("year"))
+                                library.set_paper_pdf_path_smart(paper, repo_path)
                             ok += 1
                     except Exception:
                         pass
