@@ -273,13 +273,13 @@ europepmc_switch = ft.Switch(label="Europe PMC", value=False)
 europepmc_switch.on_change = lambda e: _save_setting("data_sources.europepmc", e.control.value)
 max_results_slider = ft.Slider(min=100, max=500, value=250, divisions=40,
                                 label="{value} 篇")
-max_results_slider.on_change = lambda e: _on_slider_saved(e, "search.max_results")
+max_results_slider.on_change_end = lambda e: _on_slider_saved(e, "search.max_results")
 top_k_slider = ft.Slider(min=10, max=200, value=50, divisions=19,
                           label="显示 {value} 篇")
-top_k_slider.on_change = lambda e: _on_slider_saved(e, "search.top_k")
+top_k_slider.on_change_end = lambda e: _on_slider_saved(e, "search.top_k")
 ce_candidates_slider = ft.Slider(min=10, max=200, value=100, divisions=19,
                                   label="精排候选 {value} 篇")
-ce_candidates_slider.on_change = lambda e: _on_slider_saved(e, "search.ce_candidates")
+ce_candidates_slider.on_change_end = lambda e: _on_slider_saved(e, "search.ce_candidates")
 
 
 def build_settings_page(ctx):
