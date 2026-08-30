@@ -485,25 +485,34 @@ def update_paper_scores(project_id: int, scored: list[tuple[dict, float]]) -> in
     session = _get_session()
     updated = 0
     try:
+        # 预取本课题全部 ProjectPaper+Paper 一次，循环内查字典（替代每次 join 查询）
+        # 匹配语义与原逐条查询完全一致：DOI 精确 / 标题精确（区分大小写），
+        # dict.setdefault 保留首次命中（等价原 q.first()）
+        rows = (
+            session.query(ProjectPaper, Paper)
+            .join(Paper, ProjectPaper.paper_id == Paper.id)
+            .filter(ProjectPaper.project_id == project_id)
+            .all()
+        )
+        by_doi = {}
+        by_title = {}
+        for pp, paper in rows:
+            if paper.doi:
+                by_doi.setdefault(paper.doi, pp)
+            t = paper.title or ""
+            if t:
+                by_title.setdefault(t, pp)
+
         for paper_dict, score in scored:
             doi = paper_dict.get("doi")
             title = (paper_dict.get("title") or "").strip()
-
             if not doi and not title:
                 continue
 
-            # 匹配 ProjectPaper
-            q = (
-                session.query(ProjectPaper)
-                .join(Paper, ProjectPaper.paper_id == Paper.id)
-                .filter(ProjectPaper.project_id == project_id)
-            )
             if doi:
-                q = q.filter(Paper.doi == doi)
-            elif title:
-                q = q.filter(Paper.title == title)
-
-            pp = q.first()
+                pp = by_doi.get(doi)
+            else:
+                pp = by_title.get(title)
             if pp:
                 pp.total_score = float(score)
                 pp.score_similarity = float(score)
@@ -536,6 +545,16 @@ def update_paper_ai_scores(project_id: int, ai_results: list[dict],
     session = _get_session()
     updated = 0
     try:
+        # 预取本课题 ProjectPaper 一次：保持数据库顺序索引（回退用）+
+        # id→pp 字典（主路径用），循环内不再发查询
+        pps = (
+            session.query(ProjectPaper)
+            .filter(ProjectPaper.project_id == project_id)
+            .order_by(ProjectPaper.id)
+            .all()
+        )
+        by_id = {pp.id: pp for pp in pps}
+
         for item in ai_results:
             idx = item.get("index", -1)
             pp_id = None
@@ -543,15 +562,9 @@ def update_paper_ai_scores(project_id: int, ai_results: list[dict],
                 pp_id = paper_dicts[idx].get("project_paper_id")
 
             if pp_id is not None:
-                pp = session.query(ProjectPaper).filter(ProjectPaper.id == pp_id).first()
+                pp = by_id.get(pp_id)
             else:
                 # 回退：按数据库顺序匹配
-                pps = (
-                    session.query(ProjectPaper)
-                    .filter(ProjectPaper.project_id == project_id)
-                    .order_by(ProjectPaper.id)
-                    .all()
-                )
                 pp = pps[idx] if 0 <= idx < len(pps) else None
 
             if pp:
@@ -594,16 +607,30 @@ def remove_paper_from_project(project_paper_id: int) -> bool:
 
 
 def remove_papers_from_project(project_paper_ids: list[int]) -> int:
-    """批量从课题中删除论文。
+    """批量从课题中删除论文（单 Session、单 commit）。
 
     Args:
         project_paper_ids: ProjectPaper ID 列表
 
     Returns:
-        成功删除的条数
+        成功删除的条数（rowcount，与单篇版语义一致）
     """
-    count = 0
-    for pp_id in project_paper_ids:
-        if remove_paper_from_project(pp_id):
-            count += 1
-    return count
+    ids = [i for i in (project_paper_ids or []) if i is not None]
+    if not ids:
+        return 0
+    session = _get_session()
+    try:
+        # 先删关联的 Feedback（与 remove_paper_from_project 单篇语义一致）
+        session.query(Feedback).filter(
+            Feedback.project_paper_id.in_(ids)
+        ).delete(synchronize_session=False)
+        n = session.query(ProjectPaper).filter(
+            ProjectPaper.id.in_(ids)
+        ).delete(synchronize_session=False)
+        session.commit()
+        return n
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
