@@ -232,9 +232,11 @@ def build_graph_data(project_id: int, papers: list[dict],
     node_by_id = {n["id"]: n for n in nodes}
 
     # 4. 引用边：A 引用 B ⇔ B 的 W id ∈ A.referenced_works
+    #    反转映射（W id → paper id）把 O(n²) 扫描变成对 refs 集合的查表
     _progress("构建引用关系边")
     edges: list[dict] = []
     edge_keys: set[tuple] = set()
+    paper_by_wid = {wid: pid for pid, wid in wid_of.items()}
     for p in papers:
         payload = payloads.get(doi_of.get(p["id"], ""))
         if not payload:
@@ -242,22 +244,22 @@ def build_graph_data(project_id: int, papers: list[dict],
         refs = set(payload.get("referenced_works") or [])
         if not refs:
             continue
-        for q in papers:
-            if q["id"] == p["id"]:
+        for q_wid in refs:
+            q_id = paper_by_wid.get(q_wid)
+            if q_id is None or q_id == p["id"]:
                 continue
-            q_wid = wid_of.get(q["id"])
-            if q_wid and q_wid in refs:
-                key = (p["id"], q["id"], "cites")
-                if key not in edge_keys:
-                    edge_keys.add(key)
-                    edges.append({"source": p["id"], "target": q["id"],
-                                  "kind": "cites", "weight": 1, "shared": []})
+            key = (p["id"], q_id, "cites")
+            if key not in edge_keys:
+                edge_keys.add(key)
+                edges.append({"source": p["id"], "target": q_id,
+                              "kind": "cites", "weight": 1, "shared": []})
     stats["n_cite_edges"] = len(edges)
 
     # 5. 共现边：共同关键词 ≥ 2，边宽 ∝ 共同词数
     _progress("计算关键词共现")
     kw_sets = {n["id"]: {k.lower() for k in n["keywords"]} for n in nodes}
-    kw_disp = {n["id"]: n["keywords"] for n in nodes}
+    # 小写→原形映射每篇只建一次（原先在内层循环里 O(n²) 次重建）
+    lower2disp_of = {n["id"]: {k.lower(): k for k in n["keywords"]} for n in nodes}
     ids = [n["id"] for n in nodes]
     for i in range(len(ids)):
         si = kw_sets[ids[i]]
@@ -271,7 +273,7 @@ def build_graph_data(project_id: int, papers: list[dict],
                     continue
                 edge_keys.add(key)
                 # 共同词按节点关键词原形优先展示
-                lower2disp = {k.lower(): k for k in kw_disp[ids[j]]}
+                lower2disp = lower2disp_of[ids[j]]
                 disp = sorted(shared, key=lambda s: (-(len(s)), s))[:3]
                 edges.append({
                     "source": ids[i], "target": ids[j], "kind": "cooccur",
