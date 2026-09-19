@@ -11,8 +11,8 @@
 
     path = cache_pdf(paper)       # 下载 + 缓存, 返回本地路径
 
-依赖:
-    pip install curl_cffi PyMuPDF beautifulsoup4 lxml
+依赖：PyMuPDF、beautifulsoup4、lxml、requests。
+可选 curl_cffi 用于浏览器指纹兼容；未安装时回退 requests。
 """
 
 from __future__ import annotations
@@ -158,6 +158,16 @@ def _direct_download_with(paper: dict, session, impersonate: str) -> bytes | Non
                 return resp.content
         except Exception:
             pass
+        if session is not None:
+            # Public arXiv PDFs do not need browser impersonation. A curl
+            # transport failure must not prevent the standard HTTP fallback.
+            try:
+                import requests
+                resp = requests.get(_ARXIV_PDF.format(arxiv_id), headers=headers, timeout=15)
+                if resp.status_code == 200 and resp.content[:5] == b"%PDF-":
+                    return resp.content
+            except Exception:
+                pass
 
     # ② 落地页预热：建立 cookie 会话，供后续出版商直链使用
     referer = _warm_landing(_get, doi)

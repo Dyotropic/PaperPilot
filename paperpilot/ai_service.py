@@ -401,9 +401,23 @@ class AIService:
 
         content = self._call_api(messages, temperature=0.3, max_tokens=1500,
                                  timeout=120, thinking=True)
+        if not content.strip():
+            # Some reasoning responses consume their budget without producing
+            # final content. Retry synthesis once without optional reasoning.
+            content = self._call_api(messages, temperature=0.3, max_tokens=1500,
+                                     timeout=120, thinking=False)
         result = self._parse_json_response(content)
 
-        if not result:
+        fields = ("core_contribution", "method", "key_evidence", "highlights", "limitations")
+        valid = isinstance(result, dict) and all(
+            isinstance(result.get(key), str) and result[key].strip() for key in fields
+        )
+        scores = result.get("scores") if isinstance(result, dict) else None
+        valid = valid and isinstance(scores, dict) and all(
+            type(scores.get(key)) is int and 1 <= scores[key] <= 10
+            for key in ("novelty", "rigor", "significance")
+        )
+        if not valid:
             # 解析失败，返回原始回复作为 fallback
             result = {
                 "core_contribution": "",
@@ -414,6 +428,7 @@ class AIService:
                 "scores": {"novelty": 0, "rigor": 0, "significance": 0},
                 "_raw": content[:500],
                 "_parse_error": True,
+                "_error": "精读回复格式不完整或评分无效，请重试。",
             }
 
         # 附上元信息

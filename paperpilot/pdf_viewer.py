@@ -6,7 +6,7 @@
 依赖：
 - pywebview>=4.0（独立阅读窗口）
 - fitz / PyMuPDF（轻量预览，已有）
-- PDF.js（CDN 加载，无需本地文件）
+- PDF.js（本地缓存优先，首次从 CDN 下载；下载失败回退 CDN URL）
 
 open_full_reader 自动获得 PDF 下载 + HTML 全文提取能力，
 无需改动本文件。
@@ -19,7 +19,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# PDF.js 本地缓存（一次下载，终身受用，断网也能渲染）
+# PDF.js 本地缓存（引擎完整缓存且 PDF 在本地时可离线渲染）
 _PDFJS_DIR = Path.home() / ".paperpilot_pdfjs"
 _PDFJS_VERSION = "3.11.174"
 _PDFJS_CDN = f"https://cdnjs.cloudflare.com/ajax/libs/pdf.js/{_PDFJS_VERSION}"
@@ -148,9 +148,10 @@ body {
 /* 页面容器 */
 .page-container {
     position: relative; box-shadow: 0 2px 16px rgba(0,0,0,0.3);
-    border-radius: 2px; line-height: 0; flex-shrink: 0;
+    border-radius: 2px; line-height: 0; flex-shrink: 0; overflow: hidden;
 }
 .page-container canvas { display: block; border-radius: 2px; }
+.page-content { position: relative; transform-origin: top left; }
 /* 文字层 — scale-factor 由 JS 动态设置，提升标题等大字的对齐精度 */
 .textLayer {
     position: absolute; left: 0; top: 0; right: 0; bottom: 0;
@@ -195,6 +196,27 @@ var pdfDoc = null;
 var renderedPages = {};  // {pageNum: container element}
 var currentVisible = 1;
 
+// Render at the configured resolution, but fit the canvas AND text layer to
+// the viewport together. Display size must not depend on raster quality.
+function fitPage(container) {
+    var width = Number(container.dataset.width);
+    var height = Number(container.dataset.height);
+    var available = document.getElementById('viewer').clientWidth - 32;
+    if (available <= 0) return;  // minimized/hidden: keep the last valid layout
+    var ratio = Math.min(1, available / width);
+    container.style.width = (width * ratio) + 'px';
+    container.style.height = (height * ratio) + 'px';
+    container.firstElementChild.style.transform = 'scale(' + ratio + ')';
+}
+window.addEventListener('resize', function() {
+    Object.values(renderedPages).forEach(fitPage);
+});
+function showRenderError(error) {
+    var status = document.getElementById('status');
+    status.style.display = 'block';
+    status.textContent = 'PDF 渲染失败，请关闭后重新打开：' + error.message;
+}
+
 // ── 渲染单页（含文字层）──
 function buildPage(num) {
     if (renderedPages[num]) return Promise.resolve(renderedPages[num]);
@@ -215,14 +237,21 @@ function buildPage(num) {
                 container.style.width = vp.width + 'px';
                 container.style.height = vp.height + 'px';
                 container.dataset.page = num;
-                container.appendChild(canvas);
+                container.dataset.width = vp.width;
+                container.dataset.height = vp.height;
+                var surface = document.createElement('div');
+                surface.className = 'page-content';
+                surface.style.width = vp.width + 'px';
+                surface.style.height = vp.height + 'px';
+                container.appendChild(surface);
+                surface.appendChild(canvas);
 
                 var textLayer = document.createElement('div');
                 textLayer.className = 'textLayer';
                 textLayer.style.setProperty('--scale-factor', vp.scale);
                 textLayer.style.width = vp.width + 'px';
                 textLayer.style.height = vp.height + 'px';
-                container.appendChild(textLayer);
+                surface.appendChild(textLayer);
 
                 pdfjsLib.renderTextLayer({
                     textContentSource: textContent,
@@ -232,6 +261,7 @@ function buildPage(num) {
                 });
 
                 renderedPages[num] = container;
+                fitPage(container);
                 return container;
             });
         });
@@ -245,20 +275,18 @@ function loadPdf(src) {
         totalPages = pdf.numPages;
         document.getElementById('title-text').textContent += '  (' + totalPages + ' pp)';
         document.getElementById('goto-input').max = totalPages;
-        document.getElementById('status').style.display = 'none';
 
         // 渲染首页，让用户立刻看到内容
-        buildPage(1).then(function(container) {
+        return buildPage(1).then(function(container) {
             document.getElementById('viewer').appendChild(container);
+            document.getElementById('status').style.display = 'none';
             document.getElementById('page-info').textContent = '1 / ' + totalPages;
             document.getElementById('btn-prev').disabled = true;
             document.getElementById('btn-next').disabled = (totalPages <= 1);
             // 继续渲染其余页面
             for (var i = 2; i <= totalPages; i++) renderInOrder(i);
         });
-    }).catch(function(e) {
-        document.getElementById('status').textContent = 'PDF load error: ' + e.message;
-    });
+    }).catch(showRenderError);
 }
 
 // ── 按顺序渲染（保持页码顺序，避免异步打乱）──
@@ -268,7 +296,7 @@ function renderInOrder(num) {
         return buildPage(num).then(function(container) {
             document.getElementById('viewer').appendChild(container);
         });
-    });
+    }).catch(showRenderError);
 }
 
 // ── IntersectionObserver: 滚到哪页就更新页码 ──
