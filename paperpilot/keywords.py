@@ -4,6 +4,7 @@
 英文：KeyBERT 内置 CountVectorizer n-gram（原生支持空格分词）
 """
 
+import logging
 import os
 import re
 from pathlib import Path
@@ -16,6 +17,8 @@ import jieba.analyse
 import numpy as np
 from keybert import KeyBERT
 from sentence_transformers import SentenceTransformer
+
+logger = logging.getLogger(__name__)
 
 # ── jieba 专业术语自定义词典 ──
 # 防止 TF-IDF 阶段将复合术语错误切分（如"硅基高动态"被拆成无意义词元）
@@ -116,9 +119,15 @@ def _chinese_extract(text: str, top_n: int) -> list[str]:
     candidates = [c.strip() for c in raw if len(c.strip()) >= _MIN_LEN and c.strip() not in _CHINESE_STOP]
     if not candidates:
         return []
-    model = _get_embed_model()
-    doc_vec = model.encode([text], normalize_embeddings=True)
-    cand_vecs = model.encode(candidates, normalize_embeddings=True)
+    try:
+        model = _get_embed_model()
+        doc_vec = model.encode([text], normalize_embeddings=True)
+        cand_vecs = model.encode(candidates, normalize_embeddings=True)
+    except Exception as exc:
+        # Preserve the existing TF-IDF candidates when local semantic scoring
+        # is unavailable (e.g. a clean/offline installation without model files).
+        logger.warning("中文语义模型不可用，使用 jieba TF-IDF 候选：%s", type(exc).__name__)
+        return candidates[:top_n]
     scores = (cand_vecs @ doc_vec.T).flatten()
     scored = sorted(zip(candidates, scores), key=lambda x: -x[1])
     threshold = scored[0][1] * _SCORE_THRESHOLD_RATIO
@@ -183,7 +192,7 @@ def extract_keywords_local(text: str, top_n: int = 10) -> list[str]:
 def extract_all_keywords(topic: str, top_n: int = 10) -> list[tuple[str, float]]:
     """提取带权重的关键词列表：核心关键词（权重高）+ 普通关键词（权重低）。
 
-    核心关键词和普通关键词均通过 DeepSeek API 提取。
+    核心关键词和普通关键词均通过配置的 LLM 提取。
     核心关键词置于列表前部，权重 1.0；普通关键词权重 0.75。
 
     Args:
@@ -204,7 +213,7 @@ def extract_all_keywords(topic: str, top_n: int = 10) -> list[tuple[str, float]]
 
     regular_keywords = extract_regular_keywords(topic)
     if not regular_keywords:
-        # DeepSeek 不可用时直接走本地提取；不能调 extract_keywords——
+        # LLM 不可用时直接走本地提取；不能调 extract_keywords——
         # 那会把同一课题描述再打一次 LLM（重复等待 15s）后才落到本地
         try:
             regular_keywords = (_chinese_extract(topic, top_n)

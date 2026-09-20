@@ -998,8 +998,8 @@ def build_library_page(ctx):
 
         for i, p in enumerate(page_papers):
             global_i = start + i + 1  # 1-based across all pages
-            title = (p.get("title") or "")[:60]
-            authors = (p.get("authors") or "")[:30]
+            title = p.get("title") or ""
+            authors = p.get("authors") or ""
             year = str(p.get("year") or "—")
             ce_score = p.get("total_score", 0)
             ai_score_val = p.get("ai_score")
@@ -1111,14 +1111,14 @@ def build_library_page(ctx):
                 ft.Text(str(global_i), size=13, width=30, color=title_color,
                         weight=ft.FontWeight.W_600 if has_pdf else ft.FontWeight.W_400),
                 ft.Container(
-                    content=ft.Text(title, size=13, max_lines=1,
+                    content=ft.Text(title, size=13, max_lines=2,
                                     overflow=ft.TextOverflow.ELLIPSIS,
-                                    color=title_color),
+                                    color=title_color, tooltip=title),
                     expand=3, padding=ft.padding.Padding(right=4),
                     on_click=lambda e, p=p: _show_detail_dialog(p),
                 ),
-                ft.Text(authors[:28], size=13, max_lines=1,
-                        overflow=ft.TextOverflow.ELLIPSIS, expand=2),
+                ft.Text(authors, size=13, max_lines=2,
+                        overflow=ft.TextOverflow.ELLIPSIS, expand=2, tooltip=authors),
                 ft.Text(year, size=13, width=44),
                 ft.Text(
                     str(int(ai_score_val)) if ai_score_val is not None else "—",
@@ -1338,6 +1338,14 @@ def build_library_page(ctx):
                 if not result:
                     _error = f"精读《{title}》失败，请检查 API Key 和网络连接。"
                     _done.set()
+                    return
+
+                if result.get("_parse_error"):
+                    _error = result.get("_error") or "精读回复格式异常，请重试。"
+                    return
+
+                if result.get("_truncated"):
+                    _result.update(result)
                     return
 
                 _result.update(result)

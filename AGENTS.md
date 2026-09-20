@@ -1,9 +1,8 @@
-# CLAUDE.md — PaperPilot 项目协作铁律
+# AGENTS.md — PaperPilot 项目协作铁律
 
 ## 项目概要
 PaperPilot：面向课题攻关的可解释智能文献工作流系统。
 技术栈：Python + Flet + Cross-Encoder + SQLAlchemy/SQLite + 多供应商 LLM（含 Ollama）
-
 
 ## 分支策略
 ```
@@ -45,12 +44,12 @@ Closes #Issue编号
 P0/P1 修复流程：`checkout -b hotfix/xxx` → 最小化修复 → 本地验证 → 搭档 review 后通过 PR 合并回 develop → 群里通知搭档 pull
 修复后自检：复现通过 / 未引入新报错 / 搭档已同步 / P0 时更新 CHANGELOG
 
-## Claude Code 守则
-1. **独立会话**：两人各自的 Claude Code 会话不共享上下文，所以每次开工前先把当前任务和目标文件交代清楚
+## Codex 守则
+1. **独立会话**：两人各自的 Codex 会话不共享上下文，所以每次开工前先把当前任务和目标文件交代清楚
 2. **修改前确认**：改代码之前先用 `git status` 确认当前分支和改动范围，不在错误分支上写代码
-3. **关键算法人工设计**：打分公式、权重更新、排序策略等核心逻辑，由人先写伪代码，Claude 仅负责实现
+3. **关键算法人工设计**：打分公式、权重更新、排序策略等核心逻辑，由人先写伪代码，Codex 仅负责实现
 4. **大改动前快照**：大规模重构或批量改名之前，先 `git commit` 保存当前状态
-5. **生成代码需 review**：Claude 生成的代码必须由搭档快速过一眼再合并，不允许直接推到 main/develop
+5. **生成代码需 review**：Codex 生成的代码必须由搭档快速过一眼再合并，不允许直接推到 main/develop
 6. **接口变更必须通知**：如果改了 models.py 或函数签名，先在群里说，不要偷偷改
 7. **硬编码零容忍**：API Key / 路径 / 配置项抽到 `config.yaml` 或环境变量，不写入业务代码
 

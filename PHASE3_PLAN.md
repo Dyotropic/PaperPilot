@@ -1,8 +1,8 @@
 # PaperPilot Phase 3 开发方案
 
-> 文档版本：v1.0 | 日期：2026-07-04 | 状态：规划中
+> 文档版本：v1.1 | 核对日期：2026-09-19 | 状态：部分已实现，待办未重新排期
 >
-> 本文档面向两位开发者，覆盖 Phase 3 全部方向的功能设计、架构、可行性分析、技术选型及协作规范。
+> 本文档区分当前代码与未来设计。已实现不等于已验收；本轮测试摘要记录在本文 7.4 节。旧报告和 Word/PPT 保留为历史材料，不作为当前功能说明。
 
 ---
 
@@ -17,13 +17,15 @@
 
 ### 1.2 技术栈现状
 
+已实现：页面拆分、多供应商 LLM、数据源抽象、Europe PMC、ECharts 知识图谱。未实现：定时推送、Zotero 导入、独立 AI 写作、本地多用户与网络协作。
+
 ```
 UI 层       : Flet 0.85 (Flutter/Python 跨平台桌面)
-AI 服务     : DeepSeek API (deepseek-v4-flash), 本地 Cross-Encoder (mxbai-rerank-base-v2)
+AI 服务     : 统一 LLMClient（OpenAI 兼容 / Anthropic，含本地 Ollama）, 本地 Cross-Encoder (mxbai-rerank-base-v2)
 数据存储    : SQLite + SQLAlchemy ORM, 本地文件系统 (repository/)
-文献源      : arXiv API + OpenAlex API
+文献源      : arXiv API + OpenAlex API + Europe PMC API
 PDF 处理    : PyMuPDF + pywebview + PDF.js (独立窗口)
-关键词      : KeyBERT + jieba + DeepSeek fallback
+关键词      : LLM 提取优先；中文回退为 jieba 候选 + 可选 MiniLM 筛选，英文回退依赖 KeyBERT 模型
 对话管理    : 本地 JSON 持久化 + 滑动窗口压缩
 ```
 
@@ -32,7 +34,7 @@ PDF 处理    : PyMuPDF + pywebview + PDF.js (独立窗口)
 根据答辩 PPT 第 9 页（ROADMAP），下一阶段重点：
 
 1. **智能推送通知** — 定时检索 + 邮件/微信推送
-2. **扩展数据源** — CNKI/知网、Semantic Scholar、Zotero 导入
+2. **扩展数据源** — Europe PMC（已接入）、Zotero 导入（待实现）、CNKI（备选）
 3. **多模型 / 自定义 API Key 支持** — OpenAI/Claude/GLM 等可切换
 4. **可视化知识图谱 + AI 辅助写作** — 引用关系可视化 + 综述草稿生成
 5. **协作模式** — 多用户共享文献库 + 批注协同
@@ -41,7 +43,7 @@ PDF 处理    : PyMuPDF + pywebview + PDF.js (独立窗口)
 
 ## 二、功能详细规划
 
-### 2.1 功能一：智能推送通知
+### 2.1 功能一：智能推送通知（未实现，以下为设计）
 
 #### 目标
 系统后台常驻，按用户设定周期自动检索新论文，将高相关性论文通过通知渠道推送给用户。
@@ -94,29 +96,22 @@ class PushRecord(Base):
 
 | 数据源 | 接入方式 | 说明 |
 |--------|----------|------|
-| **Semantic Scholar** | 免费 REST API，无需 Key | 补充 arXiv 未收录论文，含引用图 |
+| **Europe PMC** | REST API | 已实现第三源适配器；Semantic Scholar 已弃用 |
 | **CNKI/知网** | 网页爬虫（无官方 API） | 需模拟浏览器，受反爬限制，优先级低 |
 | **Zotero 本地库** | 读取 Zotero SQLite DB | 免安装，直接解析 `zotero.sqlite` |
 | **CrossRef** | 免费 REST API | 补充 DOI → 元数据解析，增强现有管道 |
 
-> **优先级**：Semantic Scholar > Zotero 导入 > CrossRef 增强 > CNKI（技术难度高，放入备选）
+> **优先级**：Europe PMC 已完成；待办为 Zotero 导入 > CrossRef 增强 > CNKI（技术难度高，放入备选）
 
-#### 数据源统一抽象层
+#### 数据源统一抽象层（已实现）
 
-```python
-# paperpilot/sources/base.py
-class PaperSource(Protocol):
-    name: str
-    def fetch(self, keywords: list[str], max_results: int, ...) -> list[dict]: ...
-    def is_available(self) -> bool: ...
+PaperSource 是基类，提供 fetch(keywords, max_results, logic, year_min, year_max)、fetch_raw(query, max_results, year_min, year_max) 和 is_available()。后者检查配置开关，不是连通性测试。
 
-# 已有：ArxivSource, OpenAlexSource
-# 新增：SemanticScholarSource, ZoteroSource, CrossRefSource
-```
+内置 ArxivSource、OpenAlexSource、EuropePMCSource 已注册；fetcher 保留级联和多主关键词编排及兼容导出。当前 UI 三源按顺序执行。
 
 ---
 
-### 2.3 功能三：多模型 / 自定义 API Key 支持
+### 2.3 功能三：多模型 / 自定义 API Key 支持（客户端与 UI 已实现）
 
 #### 目标
 支持用户在设置页切换 AI 后端（OpenAI / Claude / GLM / 本地 Ollama），不再绑定单一 DeepSeek API。
@@ -129,38 +124,22 @@ class PaperSource(Protocol):
 | Provider 支持列表 | DeepSeek（现有）、OpenAI/ChatGPT、Claude（Anthropic）、智谱 GLM、Ollama（本地） |
 | 设置页 UI | 下拉选择 Provider → 输入 API Key → 测试连通性 → 保存 |
 | OpenAI 格式兼容 | 大量第三方模型（如 Qwen、Moonshot）提供 OpenAI 兼容接口，一套代码复用 |
-| Key 安全存储 | config.yaml 本地加密（或系统 keyring），不明文写日志 |
+| Key 安全存储 | 当前为本地明文 YAML，可引用环境变量；keyring/加密尚未实现，禁止明文日志 |
 
-#### LLM 抽象层设计
+#### 当前 LLM 接口
 
-```python
-# paperpilot/llm_client.py
-class LLMClient:
-    def chat(self, messages: list[dict], thinking: bool = False) -> str: ...
-    def is_available(self) -> bool: ...
+get_client(task=None) 根据配置创建 OpenAICompatClient 或 AnthropicClient；Ollama 复用 OpenAI 兼容客户端，不存在独立 OllamaClient。
 
-class OpenAICompatClient(LLMClient):
-    """兼容 OpenAI 格式: DeepSeek / ChatGPT / Qwen / Moonshot / GLM"""
-    def __init__(self, base_url: str, api_key: str, model: str): ...
-
-class AnthropicClient(LLMClient):
-    """Claude API (Anthropic SDK)"""
-    def __init__(self, api_key: str, model: str): ...
-
-class OllamaClient(LLMClient):
-    """本地 Ollama，无需 API Key"""
-    def __init__(self, base_url: str = "http://localhost:11434", model: str = "qwen2"): ...
-```
+LLMClient.chat(messages, temperature=0.3, max_tokens=2000, timeout=120, model=None, thinking=None, retries=1) 返回 ChatResult(content, reasoning)，不是字符串。chat_stream 返回文本迭代器；test_connection 返回 (bool, message)。is_available 是属性，配置可用不等于服务连通。
 
 #### config.yaml 新增字段
 
 ```yaml
 llm:
-  provider: deepseek          # deepseek / openai / claude / glm / ollama
+  provider: deepseek          # deepseek / openai / anthropic / glm / kimi / qwen / ollama
   api_key: sk-xxx
   model: deepseek-v4-flash
   base_url: https://api.deepseek.com/v1  # 可覆盖，兼容第三方
-  timeout: 30
 ```
 
 ---
@@ -189,10 +168,10 @@ llm:
 | 引用关系图 | 以 DOI/标题为节点，引用关系为边，展示论文间的引用网络 |
 | 关键词共现图 | 论文之间共有关键词越多，边越粗 |
 | 时间线视图 | 按年份排列论文，直观展示研究演进脉络 |
-| 交互操作 | 点击节点展示论文详情，双击打开精读；拖拽布局 |
-| 渲染方案 | 内嵌 pywebview + D3.js / Vis.js，或 ECharts Graph |
+| 交互操作 | 点击节点展示详情、通过操作打开 PDF；支持拖拽/缩放 |
+| 渲染方案 | pywebview 独立窗口 + ECharts Graph（已实现） |
 
-**AI 辅助写作**
+**AI 辅助写作（未实现，以下为设计）**
 
 | 子功能 | 说明 |
 |--------|------|
@@ -204,7 +183,7 @@ llm:
 
 ---
 
-### 2.5 功能五：协作模式
+### 2.5 功能五：协作模式（未实现，以下为设计）
 
 #### 目标
 支持师生/团队在同一台或不同机器上共享文献库、协同批注。
@@ -223,90 +202,25 @@ llm:
 
 ---
 
-## 三、系统架构图
+## 三、当前系统架构与文件结构
 
-### 3.1 Phase 3 整体架构
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                          PaperPilot 桌面应用                          │
-│                                                                       │
-│  ┌──────────────────────────────────────────────────────────────┐    │
-│  │                         Flet UI 层                            │    │
-│  │  检索页  │  文献库  │  知识图谱(NEW)  │  写作助手(NEW)  │  设置  │    │
-│  └────────────────────────┬─────────────────────────────────────┘    │
-│                           │ 调用                                       │
-│  ┌────────────────────────▼─────────────────────────────────────┐    │
-│  │                       业务服务层                               │    │
-│  │                                                                │    │
-│  │  ┌─────────────┐  ┌──────────────┐  ┌──────────────────────┐ │    │
-│  │  │ 检索管道     │  │  AI 服务层   │  │    知识图谱服务(NEW)  │ │    │
-│  │  │ (现有)      │  │  (现有+扩展) │  │    graph_service.py  │ │    │
-│  │  └─────────────┘  └──────┬───────┘  └──────────────────────┘ │    │
-│  │                          │                                     │    │
-│  │  ┌───────────────────────▼──────────────────────────────────┐ │    │
-│  │  │                  LLM 抽象客户端(NEW)                      │ │    │
-│  │  │   OpenAICompat  │  Anthropic  │  Ollama  │  DeepSeek     │ │    │
-│  │  └───────────────────────────────────────────────────────────┘ │    │
-│  │                                                                │    │
-│  │  ┌─────────────┐  ┌──────────────┐  ┌──────────────────────┐ │    │
-│  │  │ 数据源层     │  │  推送服务    │  │  写作服务(NEW)        │ │    │
-│  │  │(现有+扩展)  │  │  (NEW)      │  │  writing_service.py  │ │    │
-│  │  │ arXiv       │  │  定时器      │  └──────────────────────┘ │    │
-│  │  │ OpenAlex    │  │  SMTP邮件   │                             │    │
-│  │  │ SemanticSch │  │  桌面通知   │  ┌──────────────────────┐ │    │
-│  │  │ Zotero(NEW) │  │  Webhook    │  │  协作服务(NEW)        │ │    │
-│  │  │ CrossRef    │  └──────────────┘  │  collab_service.py  │ │    │
-│  │  └─────────────┘                   └──────────────────────┘ │    │
-│  └────────────────────────────────────────────────────────────────┘   │
-│                                                                       │
-│  ┌──────────────────────────────────────────────────────────────┐    │
-│  │                         数据持久层                             │    │
-│  │   SQLite (paperpilot.db)  │  本地文件 (repository/)           │    │
-│  │   JSON 对话记录            │  PDF 缓存 (cache/)               │    │
-│  └──────────────────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────────────┘
-
-外部依赖:
-  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────────┐
-  │  LLM APIs    │  │  学术数据源  │  │  通知渠道                  │
-  │  DeepSeek    │  │  arXiv       │  │  Windows Toast            │
-  │  OpenAI      │  │  OpenAlex    │  │  SMTP 邮件               │
-  │  Claude      │  │  SemanticSch │  │  WxPusher/Server酱        │
-  │  GLM/Qwen    │  │  CNKI (可选) │  └──────────────────────────┘
-  │  Ollama(本地)│  │  Zotero      │
-  └──────────────┘  └──────────────┘
+```text
+app.py → pages/{context,sidebar,search_page,library_page,agent_panel,settings_page,components}.py
+            ↓ UI 回调、后台任务、AppContext
+检索：keywords/core_extractor/mt_translator → fetcher → sources/{arxiv,openalex,europepmc}_source
+排序：indexer.rank_papers（API 粗筛 → Cross-Encoder → 关键词加分 → 短摘要降权）
+存储：library/models（SQLite） + repo_manager（repository、目录 JSON、缓存、回收站）
+AI：ai_service → llm_client；conversation 保存会话和压缩摘要
+阅读：downloader/local_import → pdf_viewer（PDF.js + pywebview 子进程）
+图谱：graph_service → graph_window（ECharts + pywebview），OpenAlex 引用缓存/补查
+导出：export（BibTeX/CSV）
 ```
 
-### 3.2 文件结构变化（新增/修改）
+app.py 已拆分为入口与页面组装；ui/ 不是当前图谱前端所在位置，HTML 模板位于 graph_window.py。Ollama 复用 OpenAICompatClient，没有单独的 OllamaClient 类。
 
-```
-PaperPilot/
-├── app.py                         # 新增知识图谱页、写作助手页、多模型设置 UI
-├── paperpilot/
-│   ├── llm_client.py              # [NEW] LLM 统一抽象层
-│   ├── writing_service.py         # [NEW] AI 辅助写作服务
-│   ├── graph_service.py           # [NEW] 知识图谱构建与数据接口
-│   ├── push_service.py            # [NEW] 定时推送服务
-│   ├── collab_service.py          # [NEW] 协作服务（局域网共享）
-│   ├── sources/
-│   │   ├── __init__.py            # [NEW] 数据源注册
-│   │   ├── base.py                # [NEW] PaperSource Protocol
-│   │   ├── arxiv_source.py        # [MOVE] 从 fetcher.py 迁移
-│   │   ├── openalex_source.py     # [MOVE]
-│   │   ├── semantic_scholar.py    # [NEW]
-│   │   ├── zotero_import.py       # [NEW]
-│   │   └── crossref_source.py     # [NEW]
-│   ├── models.py                  # [MODIFY] 新增 PushRecord 表及相关字段
-│   ├── ai_service.py              # [MODIFY] 引用 LLMClient 替换直接调用
-│   └── config.py                  # [MODIFY] 支持 llm.provider 多字段
-├── ui/
-│   ├── graph_view.html            # [NEW] 知识图谱 D3.js/Vis.js 前端
-│   └── writing_view.html          # [NEW] 写作助手前端（可选 webview 方案）
-└── requirements.txt               # [MODIFY] 新增依赖
-```
+模型仍保留 embedding_id、五维打分与 push_interval_days 等历史字段，不表示 FAISS、自适应权重或定时推送已启用。当前只有 Project、Paper、ProjectPaper、Feedback、Keyword 五张业务表。
 
----
+未来可能新增 writing_service、push_service、协作及 Zotero 导入模块；这些是候选设计文件名，不是现有文件。
 
 ## 四、可行性研究
 
@@ -315,104 +229,65 @@ PaperPilot/
 | 方向 | 可行性 | 说明 |
 |------|--------|------|
 | 智能推送通知 | **高** | Windows 系统托盘 + Toast 通知已有成熟库（pystray + win10toast）；SMTP 邮件为标准协议 |
-| Semantic Scholar | **高** | 免费开放 API，无需 Key，文档完整，响应稳定 |
+| Europe PMC | 已接入 | 使用现有适配器；服务连通性须实际验证 |
 | Zotero 导入 | **高** | Zotero 使用 SQLite，直接读取即可，无需反爬 |
 | 多模型支持 | **高** | DeepSeek/OpenAI/Claude 均提供 REST API；OpenAI 兼容格式统一了大多数第三方模型 |
-| 知识图谱可视化 | **中** | 需 pywebview 内嵌 HTML/JS 方案，或迁移到 Flet 的 WebView 控件；引用关系数据依赖 Semantic Scholar API |
+| 知识图谱可视化 | **中** | 已采用 pywebview + ECharts，引用关系来自 OpenAlex；网络失败可能导致图谱不完整 |
 | AI 辅助写作 | **高** | 复用现有 LLM 调用能力，主要是 Prompt 工程和 UI 设计 |
 | 协作（本地多用户） | **高** | SQLite WAL 模式支持多进程并发读写，用户切换只需隔离 config 路径 |
 | 协作（局域网共享） | **中** | 需引入轻量 HTTP 服务器（FastAPI/Flask），对 Flet 桌面应用是新增复杂度 |
 | CNKI 爬虫 | **低** | 有严格反爬措施，法律风险，**建议暂不实现** |
 
-### 4.2 四周开发排期（两人并行）
+### 4.2 进度与后续排期
 
-> 项目剩余开发时间共 **4 周**。原 15.5 周工作量估算不再适用，Phase 3 调整为“核心底座优先、亮点功能形成可演示 MVP、协作能力控制范围”的集中开发方案。两位开发者按后端/数据能力与前端/UI 接入并行推进，每周完成一次集成验收。
+旧“四周开发排期”是 2026-07 的计划，不代表当前剩余期限，亦不是完成证据。
 
-| 周次 | 后端/数据侧重点 | 前端/UI 侧重点 | 周交付目标 |
-|------|----------------|----------------|------------|
-| **第 1 周** | 拆分 `app.py` 的关键页面；完成 `LLMClient` 抽象及 DeepSeek/OpenAI 兼容接入；准备配置与数据库迁移 | 完成多模型设置页、API Key/模型配置及连通性测试界面 | 工程结构可继续扩展，多模型底座跑通，现有 Phase 1/2 主流程回归通过 |
-| **第 2 周** | 接入 Semantic Scholar；实现 Zotero 只读导入；完成推送记录与桌面通知最小闭环 | 完成数据源开关、Zotero 导入入口及推送周期/阈值配置 | 扩展数据源可用，桌面智能推送可演示；邮件/微信推送作为有余力时的增强项 |
-| **第 3 周** | 完成知识图谱数据构建与 AI 写作服务 MVP | 完成知识图谱交互视图、综述/大纲生成与导出界面 | 可演示引用/关键词关系图，并能基于课题文献生成可编辑的综述或大纲 |
-| **第 4 周** | 实现本地多用户与数据隔离；集中修复缺陷、补齐测试和发布准备 | 完成用户切换与阅读进度展示；开展全流程验收和演示优化 | 本地协作 MVP、回归测试、用户文档和最终演示版本完成 |
+| 工作 | 当前状态 | 后续范围 |
+|------|----------|----------|
+| 页面拆分、多模型与设置页 | 已实现 | 回归验证与兼容性完善 |
+| 数据源抽象、第三源 | 已实现 Europe PMC | Semantic Scholar 已弃用 |
+| 知识图谱 | 已实现 | 交互、离线降级与性能验证 |
+| Zotero 只读导入 | 未实现 | 待确定版本兼容与导入边界 |
+| 定时推送 | 未实现 | 待设计调度、记录、去重与通知 |
+| AI 写作 | 未实现 | 待设计引用可追溯、编辑和导出 |
+| 本地多用户 | 未实现 | 待设计身份、数据/配置隔离 |
+| CNKI/局域网/云同步 | 备选 | 不纳入现有功能承诺 |
 
-**范围控制原则：**
-- 必须完成：多模型底座、Semantic Scholar、Zotero 导入、桌面智能推送、知识图谱 MVP、AI 写作 MVP、本地多用户。
-- 视进度增强：邮件/微信推送、CrossRef 数据增强、知识图谱高级筛选与复杂交互。
-- 暂不纳入四周硬性交付：CNKI 爬虫、局域网共享、云端同步和双向实时协同；其中局域网只读共享仅在前三周任务提前完成且安全测试充分时作为拓展成果。
-
-> 四周阶段划分：
-> - **Phase 3a（第 1—2 周）**：工程治理 + 多模型支持 + Semantic Scholar + Zotero + 桌面推送
-> - **Phase 3b（第 3—4 周）**：知识图谱 MVP + AI 辅助写作 MVP + 本地多用户 + 集成验收
+开发者重新确认范围与验收标准后排期，不沿用过期日程。
 
 ### 4.3 风险评估
 
 | 风险 | 概率 | 影响 | 应对策略 |
 |------|------|------|----------|
-| Semantic Scholar API 限速（100 req/5min 免费额度） | 中 | 中 | 本地缓存 + 指数退避重试，超额时降级到已有源 |
-| D3.js/Vis.js 与 pywebview 通信延迟高 | 中 | 中 | 先验证原型；备选方案改用 Flet Canvas 或 ECharts |
+| 学术数据源限流（实际额度以服务端为准） | 中 | 中 | 本地缓存 + 指数退避重试，超额时降级到已有源 |
+| 图谱节点/共现边过多 | 中 | 中 | 已采用 ECharts，仍需检查大数据量与交互性能 |
 | OpenAI/Claude API 格式与 DeepSeek 有细微差异 | 中 | 低 | 抽象层做参数适配，单独编写集成测试 |
 | Zotero 数据库结构随版本变化 | 低 | 中 | 只依赖 Zotero 稳定表（items / itemAttachments），做版本检测 |
 | 协作局域网方案引入安全漏洞 | 低 | 高 | 仅局域网，不暴露公网；接入时做基本 Token 鉴权 |
-| app.py 持续膨胀（当前 4600+ 行） | 高 | 中 | Phase 3 启动前先按页面拆分 app.py（见规范第七章） |
+| 页面模块继续膨胀 | 中 | 中 | app.py 已拆分；后续保持 AppContext 与业务接口边界 |
 
 ---
 
 ## 五、技术选型与实现方法
 
-### 5.1 多模型 LLM 抽象层
+### 5.1 多模型 LLM 抽象层（已实现）
 
-**选型：openai Python SDK（>=1.0）+ anthropic SDK**
+使用 openai 与 anthropic SDK。供应商映射、默认模型和候选列表以 llm_client.py 为准，文档不再复制易过期的型号表作为事实承诺。ai_service 的 _call_api/_call_api_full 调用 get_client().chat() 并读取 ChatResult。任务模型通过 get_task_model 解析；score/chat/reasoning 配置分别用于相应业务路径。
 
-DeepSeek、Qwen、Moonshot、GLM 均兼容 OpenAI Chat Completions 格式，通过 `base_url` 复用同一客户端。Ollama 也提供 OpenAI 兼容接口。Claude 需单独使用 `anthropic` SDK。
+### 5.2 Europe PMC 数据源（已实现）
 
-```python
-# paperpilot/llm_client.py
-PROVIDERS = {
-    "deepseek": {"base_url": "https://api.deepseek.com/v1",   "default_model": "deepseek-v4-flash"},
-    "openai":   {"base_url": "https://api.openai.com/v1",    "default_model": "gpt-4o-mini"},
-    "qwen":     {"base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "default_model": "qwen-turbo"},
-    "glm":      {"base_url": "https://open.bigmodel.cn/api/paas/v4", "default_model": "glm-4-flash"},
-    "ollama":   {"base_url": "http://localhost:11434/v1",     "default_model": "qwen2.5:7b"},
-}
+实现位于 sources/europepmc_source.py，通过 PaperSource 注册，fetcher 统一编排。Semantic Scholar 在 2026-08-28 修订中弃用，不再作为待实现项。
 
-class LLMClient:
-    def chat(self, messages: list[dict], thinking: bool = False, timeout: int = 30) -> str: ...
-```
+### 5.3 Zotero 本地导入（未实现，候选设计）
 
-**迁移方案**：`ai_service.py` 中所有 `_call_api()` 替换为 `self._llm.chat()`，DeepSeek 特有的 `"thinking": {"type": "disabled"}` 放入子类覆盖。
-
----
-
-### 5.2 Semantic Scholar 数据源
-
-免费 REST API，无需 Key，有限速（100 req/5min）。
-
-```python
-# paperpilot/sources/semantic_scholar.py
-class SemanticScholarSource:
-    BASE = "https://api.semanticscholar.org/graph/v1"
-    FIELDS = "paperId,title,authors,year,abstract,citationCount,externalIds"
-
-    def fetch(self, keywords: list[str], max_results: int = 50) -> list[dict]:
-        # 指数退避：429 时等待后重试（最多 3 次）
-        # 返回格式统一为项目内部 paper dict
-        ...
-```
-
-节点标准化输出字段：`title / authors / year / abstract / cited_by_count / doi / url / source="semantic_scholar"`
-
----
-
-### 5.3 Zotero 本地导入
-
-Zotero 使用 SQLite，默认路径：`%APPDATA%\Zotero\Zotero\profiles\*\zotero.sqlite`。
+Zotero 导入拟以用户选择的数据库路径为入口，实际数据目录和 schema 必须按目标版本验证，不硬编码 profile 路径或条目类型编号。
 
 ```python
 # paperpilot/sources/zotero_import.py
 def import_from_zotero(db_path: str) -> list[dict]:
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)  # 只读，不锁定 Zotero
     # 查询 items + itemData（title/abstractNote/date/DOI）
-    # 排除 attachment(1) 和 note(14) 类型
+    # 按目标版本 schema 识别并排除附件和笔记类型
     ...
 ```
 
@@ -420,27 +295,13 @@ def import_from_zotero(db_path: str) -> list[dict]:
 
 ---
 
-### 5.4 知识图谱可视化
+### 5.4 知识图谱可视化（已实现）
 
-**方案：pywebview 独立窗口 + Vis.js Network**
+数据在 graph_service.build_graph_data 构建，包括节点、引用/共现边、警告、统计和时间线坐标。OpenAlex 缓存优先，缺失时补查；局部网络失败返回警告。引用边使用反向索引查表，关键词共现仍为两两比较，不能声称整个构图为 O(n)。
 
-```
-graph_service.py（Python 侧）
-  ├── 构建节点：每篇论文一个节点，size ∝ cited_by_count，color 按来源区分
-  ├── 构建边：引用关系（Semantic Scholar API）+ 关键词共现（≥2 个共同词时连边）
-  └── 输出 JSON → pywebview js_api.inject_data(json)
+graph_window.py 内嵌 ECharts HTML 模板，在独立 pywebview 窗口展示引用、共现和时间线视图。节点详情在前端渲染，“打开 PDF”经 JS 桥调用阅读器；不存在 ui/graph_view.html 或 Vis.js 当前实现。
 
-ui/graph_view.html（前端）
-  ├── Vis.js Network：物理布局，支持拖拽/缩放
-  ├── 点击节点：右侧面板展示论文详情
-  └── 筛选控件：年份 / 来源 / 关键词
-```
-
-备选方案（若 pywebview 通信延迟不可接受）：改用 Flet `WebView` 控件嵌入主窗口，或使用 ECharts Graph。
-
----
-
-### 5.5 智能推送通知
+### 5.5 智能推送通知（未实现，候选设计）
 
 ```
 apscheduler BackgroundScheduler（进程内，无独立进程）
@@ -456,7 +317,7 @@ apscheduler BackgroundScheduler（进程内，无独立进程）
 
 ---
 
-### 5.6 AI 辅助写作
+### 5.6 AI 辅助写作（未实现，候选设计）
 
 ```python
 # paperpilot/writing_service.py
@@ -505,7 +366,7 @@ python-docx>=1.1.0   # 写作功能导出 Word
 
 ---
 
-### 6.2 Semantic Scholar API 限速
+### 6.2 学术数据源限流
 
 **问题**：免费额度 100 req/5min，批量检索多个课题时容易触发 429。
 
@@ -529,26 +390,9 @@ python-docx>=1.1.0   # 写作功能导出 Word
 
 ---
 
-### 6.4 app.py 代码膨胀
+### 6.4 页面拆分（已完成）
 
-**问题**：当前 `app.py` 已 4600+ 行，Phase 3 再加三个新页面将突破 7000 行，维护和协作成本极高。
-
-**解决方案**（Phase 3 启动前必须完成）：
-
-按页面拆分 app.py：
-```
-app.py                  # 入口：page 初始化 + 全局状态 + page_switcher（保留 ~300 行）
-pages/
-  search_page.py        # 检索页（build_project_page 及其内部函数）
-  library_page.py       # 文献库页
-  settings_page.py      # 设置页
-  graph_page.py         # [NEW] 知识图谱页
-  writing_page.py       # [NEW] 写作助手页
-```
-
-全局状态（`AppState`）和 Agent 面板（常驻右侧）保留在 `app.py`，页面函数通过参数注入所需回调，**禁止**跨文件直接访问全局变量。
-
----
+app.py 已降为约 230 行，页面在 pages/，通过 AppContext 共享状态与回调；后续新增页面继续遵守这一边界。原先“4600+ 行、启动 Phase 3 前拆分”描述已失效。
 
 ### 6.5 Zotero 数据库版本兼容
 
@@ -599,7 +443,7 @@ pages/
 |------|------|------|
 | `library.py` | `get_all_projects()` → `list[Project]` | 文献库所有课题 |
 | `library.py` | `get_project_papers(project_id)` → `list[dict]` | 课题下论文列表 |
-| `library.py` | `save_papers_to_project(pid, papers, scores)` → `(int, list)` | 保存检索结果 |
+| `library.py` | `save_papers_to_project(pid, papers, scores)` → `(int, int)`（新增关联数、补填 PDF 路径数） | 保存检索结果 |
 | `library.py` | `create_project(name, desc)` → `Project` | 新建课题 |
 | `library.py` | `update_project(pid, **kwargs)` | 更新课题信息 |
 | `ai_service.py` | `AIService.chat(project_id, project_name, message, ...)` → `dict` | Agent 对话 |
@@ -641,11 +485,11 @@ pages/
 
 #### 7.2.1 网络请求边界
 
-所有外部 API 调用（LLM / arXiv / OpenAlex / Semantic Scholar）必须满足：
+所有外部 API 调用（LLM / arXiv / OpenAlex / Europe PMC）必须满足：
 
 | 要求 | 说明 |
 |------|------|
-| 超时保护 | 每个请求必须设置 `timeout`，参考现有链路超时表（见 Phase1 报告第九章） |
+| 超时保护 | 每个请求必须设置 `timeout`，以当前函数实现为准；CE 缓存加载 180 秒、预测 300 秒，在线下载路径需另测 |
 | 失败降级 | 单个数据源失败不影响其他数据源；LLM 调用失败返回明确错误信息而非抛异常到 UI |
 | 重试策略 | 仅对网络错误（连接超时 / 5xx）重试，最多 2 次；4xx 错误（认证失败 / 参数错误）不重试，立即返回错误 |
 | 后台线程 | 所有网络 I/O 在 `threading.Thread(daemon=True)` 中执行，UI 通过 `threading.Event` 轮询，禁止在主线程阻塞 |
@@ -655,7 +499,7 @@ pages/
 - PDF 路径在写入数据库前须用 `os.path.isfile()` 验证存在
 - 所有文件写入使用 `try/except`，失败时日志记录并向上返回 `None`，不崩溃
 - 缓存目录（`cache/`）和输出目录（`outputs/`）写入前须确保目录存在（`os.makedirs(exist_ok=True)`）
-- 用户数据路径（`repository/`）使用相对路径，不假设绝对路径
+- 用户数据目录锚定应用根目录，不依赖启动工作目录；库内 PDF 路径可为绝对路径
 
 #### 7.2.3 AI 输出边界
 
@@ -681,7 +525,7 @@ pages/
 main          ← 稳定版本，仅接受来自 develop 的 PR
 develop       ← 日常开发集成分支
 feature/xxx   ← 功能分支，从 develop 拉出，完成后 PR 回 develop
-fix/xxx       ← Bug 修复分支
+hotfix/xxx    ← P0/P1 修复分支
 ```
 
 **禁止**直接向 `main` 或 `develop` push，所有变更通过 PR 合并。
@@ -716,7 +560,7 @@ Replaces direct DeepSeek HTTP calls with LLMClient.
 Supports DeepSeek / OpenAI / Qwen / GLM / Ollama via openai SDK.
 Claude uses anthropic SDK with same interface.
 
-fix(sources): handle Semantic Scholar 429 with exponential backoff
+fix(sources): handle Europe PMC 429 with exponential backoff
 
 chore(deps): bump openai to 1.30.0, add anthropic 0.30.0
 ```
@@ -736,73 +580,43 @@ PR 大小：单个 PR 尽量不超过 400 行新增，大功能拆分为多个�
 
 - 涉及**稳定接口**变更的 PR：搭档必须 Review 且 Approve 后方可合并
 - 涉及 `models.py` / `config.py` 变更的 PR：同上强制 Review
-- 其他 PR：搭档 Review 为推荐项，48h 内无异议可自行合并
+- 其他生成代码 PR：遵循 AGENTS.md，由搭档 review 后合并
 - Review 时重点关注：接口兼容性、边界处理、线程安全、配置安全
 
 ---
 
-### 7.4 测试规范
+### 7.4 测试规范与现有入口
 
-| 测试类型 | 要求 | 工具 |
-|---------|------|------|
-| 单元测试 | 新增公共函数必须有单元测试 | `pytest` |
-| 集成测试 | LLM Provider / 数据源接入必须有 mock 集成测试 | `pytest + unittest.mock` |
-| 手动验证 | UI 新功能上线前，两人分别在本地完整走一遍主流程 | — |
-| 回归验证 | 涉及检索管道 / AI 服务的修改，跑 `test_app_integration.py` | `pytest` |
+本轮验证采用本地独立 Python 脚本和 check/assert，并补充 unittest 与 UI 检查；这些测试脚本、报告和证据目录不随本次项目提交。单元/mock 集成测试不得依赖真实 API；真实服务与端到端验收使用隔离数据库、文件和小规模调用。
 
-**禁止**：测试文件提交包含真实 API Key；测试依赖真实网络请求（须 mock）。
+2026-09-19 本机结果：六组离线测试 256/256、数据库路径 4/4、端到端 64/64、扩展真实服务 10/10、边界场景 14/14，共 348 项通过；另有 5 项 unittest 与 8 项 UI 检查通过。PDF/图谱窗口最小化恢复连续执行 24 次，未复现此前的一次整窗空白，但该偶发问题的根因尚未确认。
 
----
+上述数字只代表该次本机快照，拉取仓库后不能据此推定当前环境仍通过。测试缺失、跳过、服务受限、降级与功能失败必须分别报告；没有完整执行的链路不得判为通过。测试不得写入用户数据库/仓库或泄露真实 Key。
 
-### 7.5 开发启动检查清单（Phase 3 开始前）
+### 7.5 当前开发检查清单
 
-- [ ] `app.py` 按页面拆分完成（见 6.4 节方案），不超过 500 行
-- [ ] `requirements.txt` 锁定新依赖版本（`pip freeze > requirements.txt` 后人工审查）
-- [ ] `config.example.yaml` 更新，包含 `llm.provider` 等新字段及注释
-- [ ] `models.py` PR 合并，新增 `PushRecord` 表，存量数据库迁移脚本就绪
-- [ ] 本地验证现有功能（Phase 1+2）在 `develop` 分支上正常运行
-- [ ] 两人确认 Phase 3a / 3b 功能分工，记录在本文档附录
+- [x] 页面拆分，app.py 小于 500 行。
+- [x] LLM 抽象和 config.example.yaml 已包含多供应商字段。
+- [x] 三个数据源及知识图谱已接入 UI。
+- [ ] 依赖版本锁定与可重复安装验证。
+- [x] 2026-09-19 本机离线、真实服务与 UI 回归完成，结果见 7.4 节。
+- [ ] PDF/图谱窗口此前一次整窗空白的根因确认与针对性回归。
+- [ ] Zotero、推送、写作、多用户：设计与开发尚未完成。
+- [ ] 搭档 review 与独立机器复核。
 
----
+## 八、后续协作边界
 
-## 八、Phase 3 功能分工建议
-
-> 以下为建议分工，两人可协商调整。核心原则：**后端接口先行，UI 后接入**。
-
-### Phase 3a（优先）
-
-| 功能 | 建议负责人 | 说明 |
-|------|-----------|------|
-| LLM 抽象层（`llm_client.py`） | 后端开发者 | 影响所有 AI 功能，优先完成 |
-| 设置页多模型 UI | 前端开发者 | 接入 LLMClient，配置 Provider/Key/Model |
-| Semantic Scholar 数据源 | 后端开发者 | 复用现有 fetcher 模式 |
-| Zotero 导入 | 后端开发者 | 独立模块，低耦合 |
-| 数据源 UI（设置页开关） | 前端开发者 | 复用现有 arXiv/OpenAlex 开关模式 |
-| 推送通知后端（`push_service.py`） | 后端开发者 | apscheduler + 推送渠道 |
-| 推送配置 UI（设置页） | 前端开发者 | 周期/阈值/渠道配置 |
-
-### Phase 3b（后续）
-
-| 功能 | 建议负责人 | 说明 |
-|------|-----------|------|
-| 知识图谱数据层（`graph_service.py`） | 后端开发者 | 节点/边构建，输出 JSON |
-| 知识图谱前端（`ui/graph_view.html`） | 前端开发者 | Vis.js + pywebview 交互 |
-| AI 辅助写作后端（`writing_service.py`） | 后端开发者 | Prompt 工程 + python-docx 导出 |
-| 写作助手 UI | 前端开发者 | 输入框 + 生成结果展示 + 导出按钮 |
-| 协作模式（本地多用户） | 后端开发者 | 用户切换 + config 隔离 |
-| 协作模式 UI | 前端开发者 | 用户选择界面 + 阅读进度汇总 |
-
----
+后端先确定接口和数据契约，再接 UI；核心打分和排序策略由人设计。已完成底座不重复安排“从零开发”。推送/写作/协作的新表与字段仍须先经 models.py PR 和迁移方案审核。未落实的新功能须重新确定两人分工与时间，不将旧建议视为已接受任务。
 
 ## 附录：关键技术参考
 
 | 资源 | 地址 |
 |------|------|
-| Semantic Scholar API 文档 | https://api.semanticscholar.org/api-docs/ |
+| Europe PMC 文档 | https://europepmc.org/RestfulWebService |
 | OpenAI Python SDK | https://github.com/openai/openai-python |
 | Anthropic Python SDK | https://github.com/anthropics/anthropic-sdk-python |
 | Ollama API 文档 | https://github.com/ollama/ollama/blob/main/docs/api.md |
-| Vis.js Network 文档 | https://visjs.github.io/vis-network/docs/network/ |
+| ECharts | https://github.com/apache/echarts |
 | apscheduler 文档 | https://apscheduler.readthedocs.io/ |
 | Zotero DB Schema | https://github.com/zotero/zotero/blob/main/chrome/content/zotero/xpcom/db.js |
 | Conventional Commits | https://www.conventionalcommits.org/zh-hans/ |

@@ -14,7 +14,7 @@ _SYSTEM_PROMPT = (
 
 
 def translate_terms(chinese_terms: list[str]) -> list[str]:
-    """将中文关键词列表翻译为英文术语列表（批量调用 DeepSeek API）。
+    """将中文关键词列表翻译为英文术语列表（批量调用配置的 LLM）。
 
     Args:
         chinese_terms: 中文关键词列表（如 ["钙钛矿太阳能电池", "基因治疗"]）

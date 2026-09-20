@@ -29,16 +29,10 @@ git commit -m "fix: 修复API超时导致程序卡死
 
 Fixes #7"
 
-### 4. 合并（无需PR，双人直接合并）
-git checkout develop
-git merge --no-ff hotfix/简述
-git push origin develop
+### 4. 提交 PR 并由搭档 review
+将 hotfix 分支推送后创建到 develop 的 PR，附复现步骤与验证结果。搭档 review 后合并，不直接推送 main/develop。
 
-# P0级需同步到main打紧急版本
-git checkout main
-git merge develop
-git tag v0.x.1
-git push origin main --tags
+P0 修复还须经审核同步到 main 并打紧急版本 tag；发布与合并由负责人执行。
 
 ### 5. 通知搭档
 git branch -d hotfix/简述

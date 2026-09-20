@@ -1,14 +1,11 @@
-"""向量索引与检索接口。
+"""论文排序：API 分数粗筛 → Cross-Encoder 精排 → 关键词加分 → 短摘要降权。
 
-Phase 1 核心流水线：
-    论文摘要 → 本地多语言 Embedding → FAISS IndexFlatIP → 相似度检索
-    → Cross-Encoder 精排 → API 分数融合 → 最终排序
-
-使用 paraphrase-multilingual-MiniLM-L12-v2（384维），
-本地运行，中英文跨语言匹配，无需网络。
+FAISS 已于 2026-05-25 从主流程移除。模型缓存优先，缺失时尝试下载；
+加载或预测失败时回退到 API 分数。
 """
 
 import logging
+import math
 import os
 import threading
 from pathlib import Path
@@ -107,6 +104,15 @@ def _get_cross_encoder():
         return _cross_encoder
 
 
+def _api_score(value) -> float:
+    """Missing or non-finite source scores use the existing neutral default."""
+    try:
+        score = float(value)
+        return score if math.isfinite(score) else 0.5
+    except (TypeError, ValueError, OverflowError):
+        return 0.5
+
+
 def rerank_with_cross_encoder(
     query: str,
     results: list[tuple[dict, float]],
@@ -117,11 +123,12 @@ def rerank_with_cross_encoder(
     安全措施：
     - max_length=512 已在模型加载时设置，防止长序列 OOM
     - 文本在拼接前截断到 3000 字符，双重保险
-    - predict() 有 120s 超时保护，超时回退到 API 分数排序
+    - predict() 有 300s 超时保护，超时回退到 API 分数排序
     """
-    ce = _get_cross_encoder()
     if not results:
         return []
+    results = [(paper, _api_score(score)) for paper, score in results]
+    ce = _get_cross_encoder()
     if ce is None:
         scores_arr = np.array([s for _, s in results])
         min_s, max_s = scores_arr.min(), scores_arr.max()
@@ -249,9 +256,9 @@ def rank_papers(
     # Stage 1: API 分粗筛
     papers_with_api = [p for p in papers if p.get("api_score") is not None]
     papers_without_api = [p for p in papers if p.get("api_score") is None]
-    papers_with_api.sort(key=lambda p: p.get("api_score", 0), reverse=True)
+    papers_with_api.sort(key=lambda p: _api_score(p.get("api_score")), reverse=True)
     candidates = [
-        (p, p.get("api_score", 0.5))
+        (p, _api_score(p.get("api_score")))
         for p in papers_with_api[:actual_candidates] + papers_without_api[:actual_candidates]
     ]
     print(f"[Rank] Stage 1 done: {len(candidates)} candidates", flush=True)
