@@ -18,18 +18,18 @@ git pull origin develop
 git checkout -b feature/xxx
 
 ### 2. 开发（Claude Code 分工建议）
-- A：数据层+算法层（FAISS/SQLAlchemy/KeyBERT/Cross-Encoder/打分逻辑）
+- A：数据层+算法层（SQLAlchemy/KeyBERT/Cross-Encoder/打分逻辑）
 - B：应用层+展示层（Flet UI/雷达图/托盘/打包）
 - 复杂算法（打分公式/权重更新）必须人工设计，Claude 仅辅助编码
 - Claude 修改前先用 `git status` 确认，关键文件手动备份
 
 ### 3. 提交
 git add .
-git commit -m "feat: FAISS向量索引构建
+git commit -m "feat: 检索排序管线更新
 
-- IndexFlatIP索引
-- DeepSeek/MiniLM双源Embedding
-- diskcache缓存
+- API 分数粗筛与 Cross-Encoder 精排
+- 关键词匹配加分
+- 数据源 diskcache 缓存
 
 Closes #3"
 
@@ -39,12 +39,12 @@ git pull origin develop
 git checkout feature/xxx
 git rebase develop        # 冲突少时用rebase；冲突频繁改用merge
 # 解决冲突后
-git push -f origin feature/xxx
+git push --force-with-lease origin feature/xxx
 
 ### 5. 合并到 develop
 GitHub 发起 PR：`feature/xxx → develop`
 搭档 Code Review 后合并，选 "Create a merge commit"
-（信任度高时可本地 `git merge --no-ff`）
+生成代码须由搭档 review 后合并；不绕过 review 直接推送 main/develop。
 
 ### 6. 清理
 git branch -d feature/xxx

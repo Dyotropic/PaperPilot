@@ -1,5 +1,6 @@
 flet>=0.22.0
 sqlalchemy>=2.0.50
+# Legacy dependency: current ranking uses API scores + Cross-Encoder, not FAISS.
 faiss-cpu>=1.7.4
 sentence-transformers>=2.2.0
 keybert>=0.8.0
