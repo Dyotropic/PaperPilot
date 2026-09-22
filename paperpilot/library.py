@@ -4,10 +4,11 @@
 """
 
 import os
+import re
 import sys
 from pathlib import Path
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, func
 from sqlalchemy.orm import sessionmaker, Session
 
 from paperpilot.models import Base, Project, Paper, ProjectPaper, Feedback
@@ -156,16 +157,103 @@ def _patch_existing_paper(existing: Paper, paper_dict: dict) -> None:
     old_abstract = (existing.abstract or "").strip()
     if new_abstract and len(new_abstract) > len(old_abstract):
         existing.abstract = new_abstract
-    new_authors = (paper_dict.get("authors") or "").strip()
+    new_authors = (paper_dict.get("authors") or "").strip()[:500]
     old_authors = (existing.authors or "").strip()
     if new_authors and len(new_authors) > len(old_authors):
         existing.authors = new_authors
     new_source = paper_dict.get("source") or ""
     if new_source and not (existing.source or "").strip():
         existing.source = new_source
-    new_url = paper_dict.get("url") or ""
+    new_url = paper_dict.get("url") or paper_dict.get("openalex_id") or ""
     if new_url and not (existing.url or "").strip():
         existing.url = new_url
+    new_doi = paper_dict.get("doi") or ""
+    if new_doi and not (existing.doi or "").strip():
+        existing.doi = new_doi
+
+
+def _canonical_doi(value: object) -> str:
+    """Normalize stored/user DOI variants without changing legacy callers."""
+    if not value:
+        return ""
+    try:
+        from paperpilot.exact_search import normalize_doi
+        return normalize_doi(value)
+    except (ImportError, ValueError):
+        return ""
+
+
+def _exact_existing_paper(session: Session, paper_dict: dict) -> Paper | None:
+    """Conservatively match an exact-search result by a stable identifier."""
+    identity = str(paper_dict.get("_exact_identity") or "").casefold()
+    doi = _canonical_doi(paper_dict.get("doi"))
+    if doi:
+        # Existing databases may contain upper-case DOI or a doi.org URL.
+        stored = func.lower(func.trim(Paper.doi))
+        for prefix in ("https://dx.doi.org/", "http://dx.doi.org/",
+                       "https://doi.org/", "http://doi.org/", "doi:"):
+            stored = func.replace(stored, prefix, "")
+        for candidate in session.query(Paper).filter(stored == doi).all():
+            if _canonical_doi(candidate.doi) == doi:
+                return candidate
+        # A DOI is authoritative, but an older exact OpenAlex record may have
+        # been saved before its DOI became available. It can be enriched only
+        # when the same OpenAlex identity is present and the stored DOI is empty.
+        openalex_id = str(paper_dict.get("openalex_id") or "").strip()
+        if openalex_id:
+            stable_url = openalex_id.casefold().rstrip("/")
+            candidates = session.query(Paper).filter(
+                func.lower(func.rtrim(Paper.url, "/")) == stable_url,
+                (Paper.doi.is_(None)) | (func.trim(Paper.doi) == ""),
+                Paper.source != "local_pdf",
+            ).all()
+            for candidate in candidates:
+                if str(candidate.url or "").strip().casefold().rstrip("/") == stable_url:
+                    return candidate
+        # Never merge different supplied DOIs through a shared URL/title.
+        return None
+
+    from paperpilot.exact_search import _arxiv_id_from_paper
+    if identity.startswith("arxiv:"):
+        wanted = identity.removeprefix("arxiv:")
+        candidates = session.query(Paper).filter(
+            func.lower(Paper.url).contains("arxiv.org/"),
+            func.lower(Paper.url).contains(wanted),
+        ).all()
+        for candidate in candidates:
+            found = _arxiv_id_from_paper({"url": candidate.url})
+            found = found.casefold()
+            if found and found == wanted:
+                return candidate
+
+    url = str(paper_dict.get("url") or paper_dict.get("openalex_id") or "").strip()
+    stable_url = url.casefold().rstrip("/")
+    if stable_url and (identity.startswith("arxiv:")
+                       or identity.startswith("openalex:") or identity.startswith("url:")):
+        candidates = session.query(Paper).filter(
+            func.lower(func.rtrim(Paper.url, "/")) == stable_url,
+            Paper.source != "local_pdf",
+        ).all()
+        for candidate in candidates:
+            candidate_doi = _canonical_doi(candidate.doi)
+            if not candidate_doi and \
+                    str(candidate.url or "").strip().casefold().rstrip("/") == stable_url:
+                return candidate
+    if identity.startswith("meta:"):
+        from paperpilot.exact_search import normalize_title
+        title = str(paper_dict.get("title") or "").strip()
+        year = paper_dict.get("year")
+        if title and year is not None:
+            candidates = session.query(Paper).filter(
+                Paper.year == year,
+                Paper.source != "local_pdf",
+                (Paper.doi.is_(None)) | (func.trim(Paper.doi) == ""),
+                (Paper.url.is_(None)) | (func.trim(Paper.url) == ""),
+            ).all()
+            for candidate in candidates:
+                if normalize_title(candidate.title) == normalize_title(title):
+                    return candidate
+    return None
 
 
 def _find_or_create_paper(session: Session, paper_dict: dict) -> tuple[Paper, bool]:
@@ -178,6 +266,36 @@ def _find_or_create_paper(session: Session, paper_dict: dict) -> tuple[Paper, bo
         (Paper, pdf_updated) — pdf_updated 表示是否对已有记录补填了 pdf_path
     """
     pdf_path = paper_dict.get("pdf_path")
+
+    # 精确查找不得退回“同标题即同论文”：同题不同 DOI/标识符必须独立保存。
+    if paper_dict.get("_exact_match"):
+        canonical = _canonical_doi(paper_dict.get("doi"))
+        if canonical:
+            paper_dict = {**paper_dict, "doi": canonical}
+        existing = _exact_existing_paper(session, paper_dict)
+        if existing:
+            _patch_existing_paper(existing, paper_dict)
+            if pdf_path and os.path.isfile(pdf_path):
+                old_valid = existing.pdf_path and os.path.isfile(existing.pdf_path)
+                if not old_valid:
+                    existing.pdf_path = pdf_path
+                    return existing, True
+            return existing, False
+        title = (paper_dict.get("title") or "").strip()
+        stable_url = paper_dict.get("url") or paper_dict.get("openalex_id")
+        paper = Paper(
+            title=title,
+            authors=(paper_dict.get("authors") or "")[:500],
+            abstract=(paper_dict.get("abstract") or ""),
+            year=paper_dict.get("year"),
+            source=paper_dict.get("source", "unknown"),
+            url=stable_url,
+            doi=paper_dict.get("doi"),
+            pdf_path=paper_dict.get("pdf_path"),
+        )
+        session.add(paper)
+        session.flush()
+        return paper, False
 
     # 1. DOI 匹配
     doi = paper_dict.get("doi")

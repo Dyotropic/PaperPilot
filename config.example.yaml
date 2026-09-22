@@ -27,6 +27,12 @@ search:
   max_results: 100
   top_k: 20
   ce_candidates: 20
+  # 带年份/作者/期刊筛选时，每个数据源最多翻页数（1-20）
+  max_pages: 5
+  # 筛选与精确查找的单次网络请求超时秒数（1-120）
+  request_timeout: 15
+  # DOI/arXiv ID/完整标题精确查找的最多显示条数（0-100）
+  exact_max_results: 25
 cache:
   dir: ./cache/api
   ttl_hours: 24

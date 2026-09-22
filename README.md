@@ -8,7 +8,8 @@
 
 ## 核心功能
 
-- **智能检索**：AI 自动提取课题核心技术术语，支持 arXiv + OpenAlex + Europe PMC 多源检索（当前按源顺序执行；OpenAlex 支持配置 API Key），Cross-Encoder 语义模型精排
+- **智能检索**：AI 自动提取课题核心技术术语，支持年份区间、作者和完整期刊名筛选；筛选条件在 arXiv / OpenAlex / Europe PMC 查询阶段下推，并在页数上限内补足结果，再由 Cross-Encoder 语义精排
+- **精确查找**：按论文 DOI、arXiv ID（可指定版本）或完整标题严格查找；不接受 ISBN，匹配结果以“精确”标识显示，不把占位分数当作 CE 得分
 - **多模型 AI 服务**：统一 LLM 抽象层，支持 DeepSeek / OpenAI / Anthropic(Claude) / GLM / Kimi / 通义千问 / Ollama(本地) 等多服务商，设置页一键切换 Provider、Key 与模型；内置模型名是配置候选，实际可用性以服务商账户和连接测试为准
 - **AI 精读**：基于 RLM 三层阅读策略，对论文全文进行结构化分析（核心贡献 / 研究方法 / 关键证据 / 创新亮点 / 局限不足 / 三维评分）
 - **AI 对话助手（StudyCopilot）**：课题上下文感知的学术对话助手，支持 Markdown 富文本渲染、自动检测论文引用、多篇对比分析、Agent 主动执行操作，对话历史自动持久化
@@ -29,6 +30,8 @@ pip install -r requirements.txt
 copy config.example.yaml config.yaml   # 编辑所选 LLM 的 Provider、模型与 Key（Ollama 可免 Key）
 python app.py
 ```
+
+检索页可在“课题检索”和“精确查找”之间切换。课题检索的多个筛选字段按 AND 组合；若严格筛选后不足目标数量，界面显示实际数量和数据源警告，不会放宽条件凑数。网络控制默认值为 `search.max_pages: 5`、`search.request_timeout: 15` 秒，精确查找默认最多显示 `search.exact_max_results: 25` 条，可在 `config.yaml` 调整。
 
 **主要依赖**：Flet、SQLAlchemy、sentence-transformers、KeyBERT、arxiv、PyMuPDF、pywebview、jieba、PyYAML、openai、anthropic
 

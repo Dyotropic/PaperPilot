@@ -25,6 +25,8 @@ from paperpilot.fetcher import (
     fetch_arxiv, fetch_openalex, fetch_europepmc, fetch_with_cascade,
     fetch_multi_primary, deduplicate, get_article_type_label, SourceRateLimited,
 )
+from paperpilot.search_filters import SearchFilters
+from paperpilot.exact_search import exact_search
 from paperpilot.indexer import rank_papers, unload_cross_encoder
 from paperpilot import library
 from paperpilot import repo_manager, downloader
@@ -63,7 +65,7 @@ def _openalex_key_hint() -> str:
     """OpenAlex 被限流时的补充引导（未配置 key 时提示免费注册）。"""
     from paperpilot.sources.openalex_source import _get_api_key
     if not _get_api_key():
-        return "（2026-02 起 OpenAlex 无 key 每日仅 100 次，可在设置页免费配置 API Key 提升至 10 万次/天）"
+        return "（可在设置页配置 OpenAlex API Key，或稍后重试）"
     return ""
 
 
@@ -73,9 +75,37 @@ def _add_src_error(src_errors: list, e: "SourceRateLimited") -> None:
         src_errors.append((e.source, "rate_limited", e.message))
 
 
+def _partial_warning_messages(errors: list) -> list[str]:
+    """Return actionable non-rate-limit warnings for a successful partial result."""
+    visible_kinds = {"network", "truncated", "invalid_response", "incomplete",
+                     "invalid", "error", "no_match", "disabled"}
+    return list(dict.fromkeys(
+        message for _, kind, message in errors or []
+        if kind in visible_kinds and message
+    ))
+
+
+def _build_filter_fields_layout(year_from_field, year_to_field,
+                                author_filter_field, journal_filter_field):
+    """Two semantic rows; each row stacks to one field per row on narrow widths."""
+    for field in (year_from_field, year_to_field, author_filter_field,
+                  journal_filter_field):
+        field.width = None
+        field.expand = False
+        field.col = {"xs": 12, "sm": 6}
+    return ft.Column([
+        ft.ResponsiveRow([year_from_field, year_to_field], columns=12,
+                         spacing=SP_SM, run_spacing=SP_SM),
+        ft.ResponsiveRow([author_filter_field, journal_filter_field], columns=12,
+                         spacing=SP_SM, run_spacing=SP_SM),
+    ], spacing=SP_SM, width=float("inf"))
+
+
 def _run_pipeline(max_per: int, year_min: str, year_max: str,
                   use_arxiv: bool, use_openalex: bool, use_europepmc: bool,
-                  top_k: int, ce_candidates: int):
+                  top_k: int, ce_candidates: int,
+                  filters: SearchFilters | None = None,
+                  search_context: dict | None = None):
     """在后台线程中运行完整的搜索流水线。
 
     所有 Flet 控件值由主线程读取后传入，避免跨线程访问控件。
@@ -88,6 +118,13 @@ def _run_pipeline(max_per: int, year_min: str, year_max: str,
 
     papers = []
     src_errors: list = []
+    if filters is not None:
+        max_per = max(max_per, top_k)
+
+    def _source_stopped(source: str) -> bool:
+        return any(s == source and kind in {
+            "rate_limited", "network", "no_match", "invalid_response"
+        } for s, kind, _ in src_errors)
 
     # 0. 年份筛选
     if year_min or year_max:
@@ -96,7 +133,8 @@ def _run_pipeline(max_per: int, year_min: str, year_max: str,
     # 1. 翻译课题描述
     state.status_text = "翻译课题描述..."
     desc_en_query = None
-    desc = state.topic_desc.strip()
+    context = search_context or {}
+    desc = str(context.get("topic_desc", state.topic_desc)).strip()
     desc_en_terms = translate_terms([desc])
     desc_en = [t for t in desc_en_terms if t and not _has_cjk(t)]
     if desc_en:
@@ -108,11 +146,14 @@ def _run_pipeline(max_per: int, year_min: str, year_max: str,
 
     # 2. 翻译三层关键词
     state.status_text = "翻译关键词..."
-    primary_en_list = [t for t in translate_terms(state.primary_keywords)
+    primary_input = list(context.get("primary_keywords", state.primary_keywords))
+    secondary_input = list(context.get("secondary_keywords", state.secondary_keywords))
+    regular_input = list(context.get("regular_keywords", state.regular_keywords))
+    primary_en_list = [t for t in translate_terms(primary_input)
                        if t and not _has_cjk(t)]
-    secondary_en = [t for t in translate_terms(state.secondary_keywords)
+    secondary_en = [t for t in translate_terms(secondary_input)
                     if t and not _has_cjk(t)]
-    regular_en = [t for t in translate_terms(state.regular_keywords)
+    regular_en = [t for t in translate_terms(regular_input)
                   if t and not _has_cjk(t)]
 
     primary_kw_list = primary_en_list  # 所有主关键词作为 AND 核心
@@ -125,6 +166,7 @@ def _run_pipeline(max_per: int, year_min: str, year_max: str,
     # 3. arXiv 检索（单次级联，避免多路并发触发限流）
     if use_arxiv:
         state.status_text = "arXiv 抓取中..."
+        arxiv_papers = []
         try:
             arxiv_papers, arxiv_level = fetch_with_cascade(
                 primary_kw=primary_kw_list,
@@ -136,25 +178,31 @@ def _run_pipeline(max_per: int, year_min: str, year_max: str,
                 year_min=year_min,
                 year_max=year_max,
                 errors=src_errors,
+                filters=filters,
             )
             print(f"[PaperPilot] arXiv 返回: {len(arxiv_papers)} 篇 (level={arxiv_level})")
             papers += arxiv_papers
         except Exception as e:
             print(f"[PaperPilot] arXiv 失败: {e}")
+            src_errors.append(("arxiv", "error", "arXiv 检索失败"))
 
-        if desc_en_query:
+        if (desc_en_query and not _source_stopped("arxiv")
+                and (filters is None or len(arxiv_papers) < max_per)):
             try:
                 desc_papers = fetch_arxiv([desc_en_query], max_results=max_per, logic="OR",
-                                          year_min=year_min, year_max=year_max)
+                                          year_min=year_min, year_max=year_max,
+                                          filters=filters, errors=src_errors)
                 print(f"[PaperPilot] arXiv（描述）返回: {len(desc_papers)} 篇")
                 papers += desc_papers
             except SourceRateLimited as e:
                 _add_src_error(src_errors, e)
             except Exception as e:
                 print(f"[PaperPilot] arXiv（描述）失败: {e}")
+                src_errors.append(("arxiv", "error", "arXiv 描述检索失败"))
 
     if use_openalex:
         state.status_text = "OpenAlex 抓取中..."
+        oa_papers = []
         try:
             oa_papers = fetch_multi_primary(
                 primary_kw=primary_kw_list,
@@ -166,25 +214,31 @@ def _run_pipeline(max_per: int, year_min: str, year_max: str,
                 year_min=year_min,
                 year_max=year_max,
                 errors=src_errors,
+                filters=filters,
             )
             print(f"[PaperPilot] OpenAlex 返回: {len(oa_papers)} 篇 ({len(primary_kw_list)}路主关键词)")
             papers += oa_papers
         except Exception as e:
             print(f"[PaperPilot] OpenAlex 失败: {e}")
+            src_errors.append(("openalex", "error", "OpenAlex 检索失败"))
 
-        if desc_en_query:
+        if (desc_en_query and not _source_stopped("openalex")
+                and (filters is None or len(oa_papers) < max_per)):
             try:
                 desc_papers = fetch_openalex([desc_en_query], max_results=max_per, logic="OR",
-                                             year_min=year_min, year_max=year_max)
+                                             year_min=year_min, year_max=year_max,
+                                             filters=filters, errors=src_errors)
                 print(f"[PaperPilot] OpenAlex（描述）返回: {len(desc_papers)} 篇")
                 papers += desc_papers
             except SourceRateLimited as e:
                 _add_src_error(src_errors, e)
             except Exception as e:
                 print(f"[PaperPilot] OpenAlex（描述）失败: {e}")
+                src_errors.append(("openalex", "error", "OpenAlex 描述检索失败"))
 
     if use_europepmc:
         state.status_text = "Europe PMC 抓取中..."
+        epmc_papers = []
         try:
             epmc_papers = fetch_multi_primary(
                 primary_kw=primary_kw_list,
@@ -196,22 +250,27 @@ def _run_pipeline(max_per: int, year_min: str, year_max: str,
                 year_min=year_min,
                 year_max=year_max,
                 errors=src_errors,
+                filters=filters,
             )
             print(f"[PaperPilot] Europe PMC 返回: {len(epmc_papers)} 篇 ({len(primary_kw_list)}路主关键词)")
             papers += epmc_papers
         except Exception as e:
             print(f"[PaperPilot] Europe PMC 失败: {e}")
+            src_errors.append(("europepmc", "error", "Europe PMC 检索失败"))
 
-        if desc_en_query:
+        if (desc_en_query and not _source_stopped("europepmc")
+                and (filters is None or len(epmc_papers) < max_per)):
             try:
                 desc_papers = fetch_europepmc([desc_en_query], max_results=max_per, logic="OR",
-                                              year_min=year_min, year_max=year_max)
+                                              year_min=year_min, year_max=year_max,
+                                              filters=filters, errors=src_errors)
                 print(f"[PaperPilot] Europe PMC（描述）返回: {len(desc_papers)} 篇")
                 papers += desc_papers
             except SourceRateLimited as e:
                 _add_src_error(src_errors, e)
             except Exception as e:
                 print(f"[PaperPilot] Europe PMC（描述）失败: {e}")
+                src_errors.append(("europepmc", "error", "Europe PMC 描述检索失败"))
 
     # 4. 去重
     state.status_text = "去重中..."
@@ -224,12 +283,12 @@ def _run_pipeline(max_per: int, year_min: str, year_max: str,
 
     # 5. 排序打分（首次会加载 942MB 语义模型，约需 10-30 秒）
     state.status_text = f"语义精排中（{len(papers)} 篇）..."
-    query_for_scoring = desc_en_query if desc_en_query else state.topic_desc
+    query_for_scoring = desc_en_query if desc_en_query else desc
     scores = rank_papers(
         query=query_for_scoring,
         papers=papers,
         top_k=top_k,
-        ce_candidates=ce_candidates,
+        ce_candidates=max(ce_candidates, top_k) if filters is not None else ce_candidates,
         primary_kw=primary_en_list,
         secondary_kw=secondary_en,
         regular_kw=regular_en,
@@ -258,6 +317,8 @@ def _build_search_header():
             border=ft.border.Border(bottom=ft.BorderSide(1, border_color())),
         )
 
+    exact_rows = bool(state.scores and all(p.get("_exact_match") for p, _ in state.scores))
+    score_label = "精确匹配" if exact_rows else ("CE得分" if _ai_scored else "得分")
     if _ai_scored:
         cols = [_hdr("", None, width=38),   # 复选框占位
                 _hdr("#", None, width=34),
@@ -266,7 +327,7 @@ def _build_search_header():
                 _hdr("年份", "year", width=52),
                 _hdr("来源", None, width=60),
                 _hdr("引用", "citations", width=46),
-                _hdr("CE得分", "score", width=58),
+                _hdr(score_label, "score", width=68 if exact_rows else 58),
                 _hdr("AI得分", None, width=52),
                 _hdr("类型", None, width=54)]
     else:
@@ -277,7 +338,7 @@ def _build_search_header():
                 _hdr("年份", "year", width=52),
                 _hdr("来源", None, width=66),
                 _hdr("引用", "citations", width=50),
-                _hdr("得分", "score", width=62),
+                _hdr(score_label, "score", width=68 if exact_rows else 62),
                 _hdr("类型", None, width=56)]
     return ft.Row(cols, spacing=0)
 
@@ -372,7 +433,8 @@ def refresh_results_table():
 
         def _ce_cell(value, width):
             return ft.Container(
-                content=ft.Text(f"{value:.3f}", size=13, color=score_color,
+                content=ft.Text("精确" if paper.get("_exact_match") else f"{value:.3f}",
+                                size=13, color=score_color,
                                 weight=ft.FontWeight.W_600),
                 width=width,
                 padding=ft.padding.Padding(left=4, top=6, right=4, bottom=6),
@@ -416,7 +478,7 @@ def refresh_results_table():
                 _cell(year_str, width=52),
                 _cell(src, width=60),
                 _cell(cit_str, width=46),
-                _ce_cell(score, 58),
+                _ce_cell(score, 68 if paper.get("_exact_match") else 58),
                 _ai_cell(paper),
                 _badge_cell(paper, width=54),
             ]
@@ -428,7 +490,7 @@ def refresh_results_table():
                 _cell(year_str, width=52),
                 _cell(src, width=66),
                 _cell(cit_str, width=50),
-                _ce_cell(score, 62),
+                _ce_cell(score, 68 if paper.get("_exact_match") else 62),
                 _badge_cell(paper),
             ]
 
@@ -694,6 +756,12 @@ def show_paper_detail(paper: dict):
 def build_search_page(ctx):
     global detail_sidebar, _search_check_handler
 
+    mode_dd = ft.Dropdown(
+        label="检索模式", value="topic", width=220,
+        options=[ft.dropdown.Option("topic", "课题检索"),
+                 ft.dropdown.Option("exact", "精确查找")],
+    )
+
     topic_name_field = ft.TextField(
         label="课题名称", hint_text="例如：钙钛矿太阳能电池稳定性",
         prefix_icon=ft.Icons.TITLE, expand=True,
@@ -703,6 +771,25 @@ def build_search_page(ctx):
         prefix_icon=ft.Icons.DESCRIPTION, multiline=True, min_lines=3, max_lines=5,
         expand=True,
     )
+    year_from_field = ft.TextField(label="起始年份", hint_text="如 2020", width=140)
+    year_to_field = ft.TextField(label="结束年份", hint_text="如 2025", width=140)
+    author_filter_field = ft.TextField(
+        label="作者", hint_text="单个姓名短语，如 Sophia Lunt", expand=True)
+    journal_filter_field = ft.TextField(
+        label="期刊", hint_text="完整期刊名，如 Nature", expand=True)
+    exact_type_dd = ft.Dropdown(
+        label="类型", value="auto", width=180,
+        options=[ft.dropdown.Option("auto", "自动识别"),
+                 ft.dropdown.Option("doi", "DOI"),
+                 ft.dropdown.Option("arxiv", "arXiv ID"),
+                 ft.dropdown.Option("title", "完整标题")],
+    )
+    exact_input_field = ft.TextField(
+        label="DOI、arXiv ID 或完整标题",
+        hint_text="例如 10.1038/nature14539 或 1706.03762v1", expand=True)
+    exact_hint = ft.Text(
+        "只返回标识符严格相符或规范化标题完全相等的论文；结果数量受已启用数据源和分页上限限制。",
+        size=FS_XS, color=text_secondary())
 
     # ── 三个拖拽区 ──
     primary_zone_row = ft.Row(wrap=True, spacing=6)
@@ -884,7 +971,11 @@ def build_search_page(ctx):
     detail_sidebar = sidebar
 
     # ── 检索结果区域 ──
+    _last_mode = {"value": "topic"}
+
     def _summary_text():
+        if _last_mode["value"] == "exact":
+            return f"精确查找  |  找到 {len(state.scores)} 篇论文  |  得分表示精确匹配，不是 CE 分数"
         return (
             f"{state.topic_name}  |  检索到 {len(state.scores)} 篇论文  |  "
             f"关键词：{', '.join(state.keywords[:5])}"
@@ -1327,13 +1418,19 @@ def build_search_page(ctx):
         _search_list,
     ], spacing=SP_MD, visible=False)
 
+    _is_extracting = {"value": False}
+
     def on_extract(e):
+        if state.is_searching or _is_extracting["value"]:
+            return
         desc = topic_desc_field.value.strip()
         if not desc:
             status_text.value = "请先输入检索描述"
             status_text.update()
             return
         status_text.value = "正在提取关键词..."
+        _is_extracting["value"] = True
+        search_btn.disabled = True
         status_text.update()
 
         _done = threading.Event()
@@ -1366,6 +1463,9 @@ def build_search_page(ctx):
                 state.keywords = [kw for kw, _ in _weighted]
                 refresh_all_zones()
                 status_text.value = f"已提取 {len(state.keywords)} 个关键词"
+            _is_extracting["value"] = False
+            search_btn.disabled = False
+            search_btn.update()
             status_text.update()
 
         ctx.page.run_task(_poll)
@@ -1383,46 +1483,76 @@ def build_search_page(ctx):
 
     def on_start_search(e):
         import logging as _logging
-        if state.is_searching:  # 防重入：双击/连点不触发第二条检索流水线
+        if state.is_searching or _is_extracting["value"]:
             _logging.getLogger(__name__).warning("[on_start_search] BLOCKED: already searching")
             return
-        _logging.getLogger(__name__).info("[on_start_search] called, topic_desc=%r, keywords=%s",
-                    topic_desc_field.value.strip()[:60], state.keywords[:5] if state.keywords else "EMPTY")
-        if not topic_desc_field.value.strip():
-            _logging.getLogger(__name__).warning("[on_start_search] BLOCKED: empty topic_desc")
-            status_text.value = "请先输入检索描述"
-            status_text.update()
-            return
-        if not state.keywords:
-            _logging.getLogger(__name__).warning("[on_start_search] BLOCKED: empty keywords")
-            status_text.value = "请先提取关键词"
-            status_text.update()
-            return
+        mode = mode_dd.value or "topic"
+        if mode == "topic":
+            if not topic_desc_field.value.strip():
+                status_text.value = "请先输入检索描述"
+                status_text.update()
+                return
+            if not state.keywords:
+                status_text.value = "请先提取关键词"
+                status_text.update()
+                return
+            try:
+                search_filters = SearchFilters.from_raw(
+                    year_from_field.value, year_to_field.value,
+                    author_filter_field.value, journal_filter_field.value)
+            except ValueError as ex:
+                status_text.value = f"筛选条件无效：{ex}"
+                status_text.update()
+                return
+            filters = search_filters if search_filters.active else None
+        else:
+            if not (exact_input_field.value or "").strip():
+                status_text.value = "请输入 DOI、arXiv ID 或完整标题"
+                status_text.update()
+                return
+            filters = None
 
-        import threading
-
-        state.topic_name = topic_name_field.value.strip() or "未命名检索"
-        state.topic_desc = topic_desc_field.value.strip()
+        state.topic_name = (topic_name_field.value.strip() or "未命名检索") if mode == "topic" else "精确查找"
+        state.topic_desc = topic_desc_field.value.strip() if mode == "topic" else exact_input_field.value.strip()
+        _last_mode["value"] = mode
         state.is_searching = True
+        state.status_text = "正在精确查找..." if mode == "exact" else "正在抓取论文..."
         state.papers = []
         state.scores = []
+        ctx.search_selected_ids.clear()
+        ctx.agent_paper_selection.clear()
+        global _ai_scored
+        _ai_scored = False
+        results_section.visible = False
+        save_to_library_btn.visible = False
+        ai_score_btn.visible = False
+        ai_limit_dd.visible = False
+        _search_list.controls.clear()
 
         progress_bar.visible = True
-        search_btn.disabled = True
-        status_text.value = "正在抓取论文..."
-        progress_bar.update()
-        search_btn.update()
-        status_text.update()
+        for control in busy_controls:
+            control.disabled = True
+        status_text.value = state.status_text
+        if ctx.page:
+            ctx.page.update()
 
         # 在主线程读取所有 Flet 控件值，避免后台线程跨线程访问控件
         _max_per = int(max_results_slider.value)
-        _year_min = ""
-        _year_max = ""
+        _year_min = str(filters.year_from) if filters and filters.year_from else ""
+        _year_max = str(filters.year_to) if filters and filters.year_to else ""
         _use_arxiv = arxiv_switch.value
         _use_openalex = openalex_switch.value
         _use_europepmc = europepmc_switch.value
         _top_k = int(top_k_slider.value)
         _ce_candidates = int(ce_candidates_slider.value)
+        _search_context = {
+            "topic_desc": topic_desc_field.value.strip(),
+            "primary_keywords": list(state.primary_keywords),
+            "secondary_keywords": list(state.secondary_keywords),
+            "regular_keywords": list(state.regular_keywords),
+        }
+        _exact_value = exact_input_field.value.strip()
+        _exact_type = exact_type_dd.value or "auto"
 
         # 线程间共享结果
         _result: dict = {}       # {"papers": ..., "scores": ...} or {"error": ...}
@@ -1431,12 +1561,19 @@ def build_search_page(ctx):
         def _run_in_thread():
             """在独立线程中执行流水线，避免 run_in_executor 嵌套回调丢失。"""
             try:
-                papers, scores, src_errors = _run_pipeline(
-                    max_per=_max_per, year_min=_year_min, year_max=_year_max,
-                    use_arxiv=_use_arxiv, use_openalex=_use_openalex,
-                    use_europepmc=_use_europepmc,
-                    top_k=_top_k, ce_candidates=_ce_candidates,
-                )
+                if mode == "exact":
+                    papers, src_errors = exact_search(
+                        _exact_value, _exact_type, use_arxiv=_use_arxiv,
+                        use_openalex=_use_openalex, use_europepmc=_use_europepmc)
+                    scores = [(paper, 0.0) for paper in papers]
+                else:
+                    papers, scores, src_errors = _run_pipeline(
+                        max_per=_max_per, year_min=_year_min, year_max=_year_max,
+                        use_arxiv=_use_arxiv, use_openalex=_use_openalex,
+                        use_europepmc=_use_europepmc,
+                        top_k=_top_k, ce_candidates=_ce_candidates,
+                        filters=filters, search_context=_search_context,
+                    )
                 _result["papers"] = papers
                 _result["scores"] = scores
                 _result["errors"] = src_errors
@@ -1462,6 +1599,8 @@ def build_search_page(ctx):
             try:
                 src_errors = _result.get("errors") or []
                 limited = _rate_limited_names(src_errors)
+                error_messages = list(dict.fromkeys(msg for _, _, msg in src_errors))
+                partial_warnings = _partial_warning_messages(src_errors)
                 if "error" in _result:
                     state.status_text = f"检索失败: {_result['error']}"
                     traceback.print_exception(
@@ -1473,7 +1612,9 @@ def build_search_page(ctx):
                         state.status_text = (f"未找到论文：{'、'.join(limited)} "
                                              f"被限流(429)，请稍后重试{key_hint}")
                     else:
-                        state.status_text = "未找到相关论文"
+                        state.status_text = "未找到匹配论文"
+                    if error_messages:
+                        state.status_text += "；" + "；".join(error_messages[:3])
                     state.papers = []
                     state.scores = []
                     results_section.visible = True
@@ -1485,29 +1626,30 @@ def build_search_page(ctx):
                     state.papers = _result["papers"]
                     state.scores = _result["scores"]
                     state.status_text = f"完成！共 {len(_result['scores'])} 篇"
+                    if mode == "topic" and filters is not None and len(_result["scores"]) < _top_k:
+                        state.status_text += f"（目标 {_top_k} 篇，筛选后实际不足）"
                     if limited:
                         key_hint = _openalex_key_hint() if "OpenAlex" in limited else ""
                         state.status_text += (f"  ⚠ {'、'.join(limited)} 限流(429)，"
                                               f"本次结果可能不完整{key_hint}")
+                    if partial_warnings:
+                        state.status_text += "  ⚠ " + "；".join(partial_warnings[:3])
                     results_section.visible = True
                     save_to_library_btn.visible = True
                     ai_score_btn.visible = ctx.ai_service.is_available
                     ai_limit_dd.visible = ctx.ai_service.is_available
-                    global _ai_scored
                     _ai_scored = False
                     refresh_results_table()
                     summary.value = _summary_text()
                     summary.update()
-                unload_cross_encoder()
+                if mode == "topic":
+                    unload_cross_encoder()
             finally:
                 state.is_searching = False
                 progress_bar.visible = False
-                search_btn.disabled = False
+                for control in busy_controls:
+                    control.disabled = False
                 status_text.value = state.status_text
-                # 表单区控件只需一次批量更新
-                progress_bar.update()
-                search_btn.update()
-                status_text.update()
                 if ctx.page:
                     ctx.page.update()
 
@@ -1517,6 +1659,43 @@ def build_search_page(ctx):
         content=ft.Text("开始检索"), icon=ft.Icons.SEARCH, on_click=on_start_search,
         style=ft.ButtonStyle(padding=ft.padding.Padding(left=32, top=16, right=32, bottom=16)),
     )
+
+    extract_btn = ft.FilledTonalButton(
+        content=ft.Text("提取关键词"), icon=ft.Icons.AUTO_AWESOME,
+        on_click=on_extract,
+    )
+    topic_mode_section = ft.Column([
+        topic_name_field,
+        topic_desc_field,
+        ft.Row([extract_btn, manual_kw_field], spacing=SP_SM),
+        _make_zone("主关键词", "拖拽关键词至此设为「主关键词」",
+                   primary_zone_row, "primary", ft.Icons.STAR, ft.Colors.AMBER),
+        _make_zone("副关键词", "拖拽关键词至此设为「副关键词」",
+                   secondary_zone_row, "secondary", ft.Icons.ARROW_FORWARD, seed_color()),
+        _make_zone("普通关键词", "拖拽关键词至此设为「普通关键词」",
+                   regular_zone_row, "regular", None, None),
+        ft.Text("筛选条件（多个字段按 AND 组合；缺失受限元数据的论文不会通过筛选）",
+                size=FS_XS, color=text_secondary()),
+        _build_filter_fields_layout(
+            year_from_field, year_to_field, author_filter_field,
+            journal_filter_field),
+    ], spacing=SP_MD, visible=True)
+    exact_mode_section = ft.Column([
+        ft.Row([exact_type_dd, exact_input_field], spacing=SP_SM),
+        exact_hint,
+    ], spacing=SP_SM, visible=False)
+
+    def on_mode_change(e):
+        is_exact = e.control.value == "exact"
+        topic_mode_section.visible = not is_exact
+        exact_mode_section.visible = is_exact
+        if ctx.page:
+            ctx.page.update()
+
+    # Flet 0.85 Dropdown emits on_select; assigning a dynamic on_change
+    # attribute does not register an event with the Flutter client.
+    mode_dd.on_select = on_mode_change
+    busy_controls = [mode_dd, topic_mode_section, exact_mode_section, search_btn]
 
     # 初始化分区（恢复已有状态）
     refresh_all_zones()
@@ -1528,24 +1707,9 @@ def build_search_page(ctx):
             ft.Text("智能文献检索与筛选", size=FS_MD, color=text_secondary()),
             ft.Divider(height=1, color=border_color()),
             ft.Text("检索信息", size=FS_XL, weight=FW_SEMIBOLD, color=text_primary()),
-            topic_name_field,
-            topic_desc_field,
-            ft.Row([
-                ft.FilledTonalButton(
-                    content=ft.Text("提取关键词"), icon=ft.Icons.AUTO_AWESOME,
-                    on_click=on_extract,
-                ),
-                manual_kw_field,
-            ], spacing=SP_SM),
-            _make_zone("主关键词", "拖拽关键词至此设为「主关键词」",
-                       primary_zone_row, "primary",
-                       ft.Icons.STAR, ft.Colors.AMBER),
-            _make_zone("副关键词", "拖拽关键词至此设为「副关键词」",
-                       secondary_zone_row, "secondary",
-                       ft.Icons.ARROW_FORWARD, seed_color()),
-            _make_zone("普通关键词", "拖拽关键词至此设为「普通关键词」",
-                       regular_zone_row, "regular",
-                       None, None),
+            mode_dd,
+            topic_mode_section,
+            exact_mode_section,
             ft.Divider(height=1, color=border_color()),
             ft.Row([search_btn, progress_bar], spacing=SP_MD),
             status_text,
@@ -1560,8 +1724,18 @@ def build_search_page(ctx):
     ], spacing=0, expand=True)
 
     # ── 注册检索页回调，供 Agent [ACTION:xxx] 标记使用 ──
+    def on_topic_search(e=None):
+        if state.is_searching:
+            return
+        mode_dd.value = "topic"
+        topic_mode_section.visible = True
+        exact_mode_section.visible = False
+        on_start_search(e)
+
     ctx.search_actions = {
-        "on_start_search": on_start_search,
+        "on_start_search": on_topic_search,
+        "on_topic_search": on_topic_search,
+        "on_search": on_start_search,
         "on_ai_score": on_ai_score,
         "on_save_to_library": on_save_to_library,
         "on_extract": on_extract,
@@ -1571,6 +1745,13 @@ def build_search_page(ctx):
         "refresh_all_zones": refresh_all_zones,
         "refresh_results_table": refresh_results_table,
         "update_search_count": _update_search_count,
+        "mode": mode_dd,
+        "exact_type": exact_type_dd,
+        "exact_input": exact_input_field,
+        "year_from": year_from_field,
+        "year_to": year_to_field,
+        "author_filter": author_filter_field,
+        "journal_filter": journal_filter_field,
     }
 
     return ft.Stack([

@@ -64,6 +64,7 @@ from paperpilot.sources.base import (  # noqa: F401
     all_sources,
     get_source,
 )
+from paperpilot.search_filters import SearchFilters, coerce_filters
 
 # source → raw 抓取函数映射（fetch_with_cascade 分发用）。
 # 由数据源注册表自动构建，新源注册后无需改动本文件。
@@ -142,6 +143,13 @@ def _record_source_error(errors: list | None, source: str, kind: str, msg: str) 
         errors.append((source, kind, msg))
 
 
+def _clear_source_incomplete(errors: list | None, source: str) -> None:
+    """Drop stale per-query shortage warnings once the source target is fulfilled."""
+    if errors is not None:
+        errors[:] = [entry for entry in errors
+                     if not (entry[0] == source and entry[1] == "incomplete")]
+
+
 def fetch_with_cascade(
     primary_kw: list[str],
     secondary_kw: list[str],
@@ -152,6 +160,10 @@ def fetch_with_cascade(
     year_min: str = "",
     year_max: str = "",
     errors: list | None = None,
+    *,
+    filters: SearchFilters | None = None,
+    max_pages: int | None = None,
+    request_timeout: float | None = None,
 ) -> tuple[list[dict], int]:
     """三级级联检索：核心AND → 主关键词AND → 全部OR。
 
@@ -181,18 +193,51 @@ def fetch_with_cascade(
     q2 = _build_mixed_query(and_kw=[], or_kw=all_kw)
     strategies.append((2, q2))
 
+    effective_filters = coerce_filters(filters, year_min, year_max)
+    if effective_filters is not None:
+        unique_strategies = []
+        seen_queries: set[str] = set()
+        for level, query in strategies:
+            if query and query not in seen_queries:
+                seen_queries.add(query)
+                unique_strategies.append((level, query))
+        strategies = unique_strategies
+
+    filtered_seen: dict[str, dict] = {}
+    last_level = -1
     for level, query in strategies:
         if not query:
             continue
         try:
-            papers = fetch_raw(query, max_results, year_min=year_min, year_max=year_max)
+            if effective_filters is None:
+                papers = fetch_raw(query, max_results, year_min=year_min, year_max=year_max)
+            else:
+                papers = fetch_raw(
+                    query, max_results, year_min=year_min, year_max=year_max,
+                    filters=effective_filters, errors=errors, max_pages=max_pages,
+                    request_timeout=request_timeout)
         except SourceRateLimited as e:
             # 同源后续策略必然同样限流，记录后直接终止该源降级（保持"单源失败不拖垮整体"）
             _record_source_error(errors, e.source, "rate_limited", e.message)
             break
+        if effective_filters is not None:
+            last_level = level
+            for paper in papers:
+                identity = str(paper.get("doi") or paper.get("url") or
+                               (paper.get("title"), paper.get("year"))).casefold()
+                filtered_seen.setdefault(identity, paper)
+                if len(filtered_seen) >= max_results:
+                    _clear_source_incomplete(errors, source)
+                    return list(filtered_seen.values())[:max_results], level
+            fatal = {"rate_limited", "network", "no_match", "invalid_response"}
+            if errors and any(s == source and kind in fatal for s, kind, _ in errors):
+                break
+            continue
         if len(papers) >= min_results or level == strategies[-1][0]:
             return papers, level
 
+    if effective_filters is not None:
+        return list(filtered_seen.values())[:max_results], last_level
     return [], -1
 
 
@@ -206,6 +251,10 @@ def fetch_multi_primary(
     year_min: str = "",
     year_max: str = "",
     errors: list | None = None,
+    *,
+    filters: SearchFilters | None = None,
+    max_pages: int | None = None,
+    request_timeout: float | None = None,
 ) -> list[dict]:
     """多主关键词独立检索 + 合并加权。
 
@@ -226,12 +275,15 @@ def fetch_multi_primary(
     Returns:
         papers 列表，含 api_score（多路命中已加权）
     """
+    effective_filters = coerce_filters(filters, year_min, year_max)
     if not primary_kw:
         papers, _ = fetch_with_cascade(
             primary_kw=[], secondary_kw=secondary_kw,
             regular_kw=regular_kw, source=source,
             max_results=max_results, min_results=min_results,
-            year_min=year_min, year_max=year_max, errors=errors)
+            year_min=year_min, year_max=year_max, errors=errors,
+            filters=effective_filters, max_pages=max_pages,
+            request_timeout=request_timeout)
         return papers
 
     seen: dict[str, tuple[dict, int]] = {}
@@ -252,10 +304,10 @@ def fetch_multi_primary(
             year_min=year_min,
             year_max=year_max,
             errors=errors,
+            filters=effective_filters,
+            max_pages=max_pages,
+            request_timeout=request_timeout,
         )
-        # 已被限流：后续主关键词路必然同样失败，短路避免重复退避等待
-        if errors and any(e[0] == source and e[1] == "rate_limited" for e in errors):
-            break
         for p in papers:
             pid = (p.get("title", "") + "|" + p.get("source", "") + "|"
                    + str(p.get("year", ""))).lower()
@@ -267,6 +319,27 @@ def fetch_multi_primary(
                     seen[pid] = (prev, hits + 1)
             else:
                 seen[pid] = (p, 1)
+        # 已取得的 partial 必须先合并；之后再停止同源无效请求。
+        fatal = {"rate_limited", "network", "no_match", "invalid_response"}
+        if errors and any(e[0] == source and e[1] in fatal for e in errors):
+            break
+
+    # 筛选后各主词配额可能不足：再用所有词 OR 做一次受控补取。
+    if effective_filters is not None and len(seen) < max_results:
+        fatal = {"rate_limited", "network", "no_match", "invalid_response"}
+        if not (errors and any(e[0] == source and e[1] in fatal for e in errors)):
+            supplement, _ = fetch_with_cascade(
+                primary_kw=[], secondary_kw=[],
+                regular_kw=primary_kw + secondary_kw + regular_kw,
+                source=source, max_results=max_results, min_results=min_results,
+                year_min=year_min, year_max=year_max, errors=errors,
+                filters=effective_filters, max_pages=max_pages,
+                request_timeout=request_timeout)
+            for p in supplement:
+                pid = (p.get("title", "") + "|" + p.get("source", "") + "|"
+                       + str(p.get("year", ""))).lower()
+                if pid not in seen:
+                    seen[pid] = (p, 1)
 
     max_hits = max(h[1] for h in seen.values()) if seen else 1
     result = []
@@ -277,6 +350,8 @@ def fetch_multi_primary(
         result.append(paper)
 
     result.sort(key=lambda p: p.get("api_score", 0), reverse=True)
+    if effective_filters is not None and len(result) >= max_results:
+        _clear_source_incomplete(errors, source)
     return result[:max_results]
 
 

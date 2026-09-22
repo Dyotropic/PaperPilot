@@ -859,7 +859,8 @@ def build_library_page(ctx):
                 ft.TextButton(
                     content=ft.Text(pdoi, size=13),
                     on_click=lambda e, d=pdoi: webbrowser.open(f"https://doi.org/{d}"),
-                    style=ft.ButtonStyle(padding=ft.padding.Padding.all(0)),
+                    style=ft.ButtonStyle(padding=ft.padding.Padding(
+                        left=0, top=0, right=0, bottom=0)),
                 ),
             ], spacing=0, wrap=True))
         if purl:
@@ -1287,7 +1288,8 @@ def build_library_page(ctx):
                     ft.TextButton(
                         content=ft.Text(doi, size=13),
                         on_click=lambda e, d=doi: webbrowser.open(f"https://doi.org/{d}"),
-                        style=ft.ButtonStyle(padding=ft.padding.Padding.all(0)),
+                        style=ft.ButtonStyle(padding=ft.padding.Padding(
+                            left=0, top=0, right=0, bottom=0)),
                     ),
                 ], spacing=0))
 
