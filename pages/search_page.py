@@ -2,6 +2,7 @@
 import asyncio
 import os
 import threading
+from datetime import datetime
 
 import flet as ft
 
@@ -99,6 +100,34 @@ def _build_filter_fields_layout(year_from_field, year_to_field,
         ft.ResponsiveRow([author_filter_field, journal_filter_field], columns=12,
                          spacing=SP_SM, run_spacing=SP_SM),
     ], spacing=SP_SM, width=float("inf"))
+
+
+def _year_dropdown_options(current_year: int | None = None) -> list:
+    """Return newest-first year options without an artificial unlimited item."""
+    latest = current_year if current_year is not None else datetime.now().year
+    return [ft.dropdown.Option(str(year), str(year))
+            for year in range(latest, 1899, -1)]
+
+
+def _build_year_filter(label: str) -> tuple[ft.Dropdown, ft.Row]:
+    """Build a newest-first year dropdown with a separate clear action."""
+    field = ft.Dropdown(
+        label=label, hint_text="不限制", value=None,
+        options=_year_dropdown_options(), menu_height=240, expand=True)
+
+    def clear_year(e):
+        field.value = None
+        field.update()
+
+    row = ft.Row([
+        field,
+        ft.IconButton(
+            icon=ft.Icons.CLEAR,
+            tooltip=f"清除{label}",
+            on_click=clear_year,
+        ),
+    ], spacing=SP_XS)
+    return field, row
 
 
 def _run_pipeline(max_per: int, year_min: str, year_max: str,
@@ -771,8 +800,8 @@ def build_search_page(ctx):
         prefix_icon=ft.Icons.DESCRIPTION, multiline=True, min_lines=3, max_lines=5,
         expand=True,
     )
-    year_from_field = ft.TextField(label="起始年份", hint_text="如 2020", width=140)
-    year_to_field = ft.TextField(label="结束年份", hint_text="如 2025", width=140)
+    year_from_field, year_from_control = _build_year_filter("起始年份")
+    year_to_field, year_to_control = _build_year_filter("结束年份")
     author_filter_field = ft.TextField(
         label="作者", hint_text="单个姓名短语，如 Sophia Lunt", expand=True)
     journal_filter_field = ft.TextField(
@@ -1677,7 +1706,7 @@ def build_search_page(ctx):
         ft.Text("筛选条件（多个字段按 AND 组合；缺失受限元数据的论文不会通过筛选）",
                 size=FS_XS, color=text_secondary()),
         _build_filter_fields_layout(
-            year_from_field, year_to_field, author_filter_field,
+            year_from_control, year_to_control, author_filter_field,
             journal_filter_field),
     ], spacing=SP_MD, visible=True)
     exact_mode_section = ft.Column([
