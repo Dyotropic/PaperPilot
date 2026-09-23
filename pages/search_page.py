@@ -1004,7 +1004,8 @@ def build_search_page(ctx):
 
     def _summary_text():
         if _last_mode["value"] == "exact":
-            return f"精确查找  |  找到 {len(state.scores)} 篇论文  |  得分表示精确匹配，不是 CE 分数"
+            return (f"精确查找  |  找到 {len(state.scores)} 篇论文  |  "
+                    "保存到课题后可在文献库按课题 AI 打分；精确匹配不是 CE 分数")
         return (
             f"{state.topic_name}  |  检索到 {len(state.scores)} 篇论文  |  "
             f"关键词：{', '.join(state.keywords[:5])}"
@@ -1128,6 +1129,11 @@ def build_search_page(ctx):
     def on_ai_score(e):
         """AI 精排：筛选有摘要的论文 → 批量打分 → 重排序。"""
         global _ai_scored
+        if _last_mode["value"] == "exact":
+            state.status_text = "请先保存到指定课题，再在文献库按课题进行 AI 打分"
+            status_text.value = state.status_text
+            status_text.update()
+            return
         if not ctx.ai_service.is_available:
             ai_score_btn.tooltip = "需要配置 DeepSeek API Key"
             ai_score_btn.update()
@@ -1277,7 +1283,8 @@ def build_search_page(ctx):
         )
         new_desc_field = ft.TextField(
             label="课题描述",
-            hint_text=state.topic_desc[:200],
+            hint_text=("可选：输入研究问题，供后续 AI 打分使用"
+                       if _last_mode["value"] == "exact" else state.topic_desc[:200]),
             visible=False,
         )
 
@@ -1317,7 +1324,8 @@ def build_search_page(ctx):
                 try:
                     proj = library.create_project(
                         project_name,
-                        new_desc_field.value.strip() or state.topic_desc,
+                        new_desc_field.value.strip() or (
+                            state.topic_desc if _last_mode["value"] == "topic" else ""),
                     )
                     repo_manager.save_catalog(proj.name, {"papers": {}})
                     pid = proj.id
@@ -1665,8 +1673,8 @@ def build_search_page(ctx):
                         state.status_text += "  ⚠ " + "；".join(partial_warnings[:3])
                     results_section.visible = True
                     save_to_library_btn.visible = True
-                    ai_score_btn.visible = ctx.ai_service.is_available
-                    ai_limit_dd.visible = ctx.ai_service.is_available
+                    ai_score_btn.visible = ctx.ai_service.is_available and mode == "topic"
+                    ai_limit_dd.visible = ctx.ai_service.is_available and mode == "topic"
                     _ai_scored = False
                     refresh_results_table()
                     summary.value = _summary_text()
