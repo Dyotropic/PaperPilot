@@ -4,6 +4,7 @@
 重复检索几乎瞬时返回；摘要补齐并发 4 路。
 """
 
+import math
 import socket
 import time
 
@@ -13,6 +14,9 @@ from paperpilot.config import load_config
 from paperpilot.sources.base import (
     PaperSource, SourceRateLimited, _build_search_query, cache_ttl_seconds,
     open_cache,
+)
+from paperpilot.search_filters import (
+    SearchFilters, author_matches, coerce_filters, normalize_name, search_limits,
 )
 
 _OA_CACHE_DIR = "openalex"
@@ -172,14 +176,22 @@ def get_work_refs(dois: list, errors: list | None = None) -> dict:
 
 
 def _parse_openalex_work(w: dict) -> dict | None:
-    title = (w.get("title") or "").strip()
+    if not isinstance(w, dict):
+        return None
+    title_value = w.get("title")
+    title = title_value.strip() if isinstance(title_value, str) else ""
     if not title:
         return None
     authorship = w.get("authorships") or []
-    authors = ", ".join(
-        a.get("author", {}).get("display_name", "")
-        for a in authorship[:10]
-    )
+    if not isinstance(authorship, list):
+        authorship = []
+    author_names = [
+        (a.get("author") or {}).get("display_name", "")
+        for a in authorship
+        if isinstance(a, dict) and isinstance(a.get("author"), dict)
+        and (a.get("author") or {}).get("display_name", "")
+    ]
+    authors = ", ".join(author_names)
     year = w.get("publication_year") or None
     doi = w.get("doi") or None
     if doi:
@@ -192,7 +204,11 @@ def _parse_openalex_work(w: dict) -> dict | None:
     paper_type = w.get("type")  # "review", "article", "book-chapter", ...
     cited_by = w.get("cited_by_count")
     primary_loc = w.get("primary_location") or {}
+    if not isinstance(primary_loc, dict):
+        primary_loc = {}
     source_info = primary_loc.get("source") or {}
+    if not isinstance(source_info, dict):
+        source_info = {}
     journal = source_info.get("display_name") or None
     oa_id = w.get("id") or None  # "https://openalex.org/W2023271753"
 
@@ -208,6 +224,7 @@ def _parse_openalex_work(w: dict) -> dict | None:
         "cited_by_count": cited_by,
         "journal": journal,
         "openalex_id": oa_id,
+        "_author_names": author_names,
     }
 
 
@@ -220,9 +237,257 @@ def _decode_inverted_index(inv: dict) -> str:
     return " ".join(words)
 
 
+def _append_error(errors: list | None, kind: str, message: str) -> None:
+    if errors is not None and not any(s == "openalex" and k == kind and m == message
+                                      for s, k, m in errors):
+        errors.append(("openalex", kind, message))
+
+
+def _resolve_openalex_entities(kind: str, name: str, *, timeout: float,
+                               errors: list | None) -> list[str]:
+    """Resolve an exact display name to all matching OpenAlex entity IDs."""
+    wanted = normalize_name(name)
+    ckey = f"entity:{kind}:{wanted}"
+    cached = _oa_cache.get(ckey) if _oa_cache is not None else None
+    if cached is not None:
+        if isinstance(cached, dict):
+            warning = cached.get("warning")
+            if warning:
+                _append_error(errors, cached.get("kind", "truncated"), warning)
+            cached_ids = cached.get("ids") or []
+            if isinstance(cached_ids, list):
+                return list(cached_ids)
+        elif isinstance(cached, list):
+            return list(cached)
+        _append_error(errors, "invalid_response",
+                      f"OpenAlex {kind} 名称解析缓存格式错误")
+        return []
+    url = f"https://api.openalex.org/{kind}"
+    params = {"search": name, "per_page": 50, "mailto": "paperpilot@example.com"}
+    api_key = _get_api_key()
+    if api_key:
+        params["api_key"] = api_key
+    try:
+        response = requests.get(url, params=params,
+                                headers={"User-Agent": "PaperPilot/1.0"}, timeout=timeout)
+        if response.status_code in (403, 429):
+            _append_error(errors, "rate_limited",
+                          f"OpenAlex {kind} 名称解析受限（HTTP {response.status_code}）")
+            return []
+        response.raise_for_status()
+    except requests.RequestException:
+        _append_error(errors, "network", f"OpenAlex {kind} 名称解析失败")
+        return []
+    try:
+        payload = response.json()
+    except (ValueError, TypeError):
+        _append_error(errors, "invalid_response",
+                      f"OpenAlex {kind} 名称解析响应无法解析")
+        return []
+    if not isinstance(payload, dict):
+        _append_error(errors, "invalid_response", f"OpenAlex {kind} 名称解析响应格式错误")
+        return []
+    results = payload.get("results") or []
+    if not isinstance(results, list):
+        _append_error(errors, "invalid_response", f"OpenAlex {kind} 名称解析响应格式错误")
+        return []
+    def name_matches(item: dict) -> bool:
+        display = item.get("display_name")
+        if kind == "authors":
+            return author_matches({"_author_names": [display]}, name)
+        return normalize_name(display) == wanted
+    ids = [str(item.get("id") or "").rsplit("/", 1)[-1]
+           for item in results if isinstance(item, dict) and item.get("id")
+           and name_matches(item)]
+    ids = list(dict.fromkeys(ids))
+    warning = ""
+    warning_kind = "truncated"
+    count = (payload.get("meta") or {}).get("count") if isinstance(payload.get("meta"), dict) else None
+    if isinstance(count, int) and count > len(results):
+        warning = f"OpenAlex {kind} 名称候选超过首批 50 条，解析范围有限"
+        _append_error(errors, warning_kind, warning)
+    if len(ids) > 10:
+        warning = f"OpenAlex {kind} 同名实体超过 10 个，仅使用前 10 个候选"
+        _append_error(errors, warning_kind, warning)
+        ids = ids[:10]
+    if not ids:
+        label = "作者" if kind == "authors" else "期刊"
+        warning = f"OpenAlex 未找到名称匹配的{label}实体"
+        warning_kind = "no_match"
+        _append_error(errors, warning_kind, warning)
+    if _oa_cache is not None:
+        _oa_cache.set(ckey, {"ids": ids, "warning": warning, "kind": warning_kind},
+                      expire=_CACHE_TTL)
+    return ids
+
+
+def _fetch_openalex_filtered(query: str, max_results: int, filters: SearchFilters,
+                             *, errors: list | None, max_pages: int | None,
+                             request_timeout: float | None) -> list[dict]:
+    if max_results <= 0:
+        return []
+    pages, timeout = search_limits(max_pages, request_timeout)
+    filter_parts: list[str] = []
+    if filters.year_from is not None and filters.year_to is not None:
+        filter_parts.append(f"publication_year:{filters.year_from}-{filters.year_to}")
+    elif filters.year_from is not None:
+        filter_parts.append(f"publication_year:>{filters.year_from - 1}")
+    elif filters.year_to is not None:
+        filter_parts.append(f"publication_year:<{filters.year_to + 1}")
+    if filters.author:
+        ids = _resolve_openalex_entities("authors", filters.author,
+                                        timeout=timeout, errors=errors)
+        if not ids:
+            return []
+        filter_parts.append("authorships.author.id:" + "|".join(ids))
+    if filters.journal:
+        ids = _resolve_openalex_entities("sources", filters.journal,
+                                        timeout=timeout, errors=errors)
+        if not ids:
+            return []
+        filter_parts.append("primary_location.source.id:" + "|".join(ids))
+
+    url = "https://api.openalex.org/works"
+    headers = {"User-Agent": "PaperPilot/1.0 (mailto:paperpilot@example.com)"}
+    api_key = _get_api_key()
+    cursor = "*"
+    seen_cursors: set[str] = set()
+    papers: list[dict] = []
+    seen_ids: set[str] = set()
+    per_page = min(100, max(25, max_results))
+    for _ in range(pages):
+        if cursor in seen_cursors:
+            _append_error(errors, "incomplete", "OpenAlex 返回重复游标，分页已停止")
+            break
+        seen_cursors.add(cursor)
+        params = {"search": query, "per_page": per_page, "cursor": cursor,
+                  "mailto": "paperpilot@example.com"}
+        if filter_parts:
+            params["filter"] = ",".join(filter_parts)
+        if api_key:
+            params["api_key"] = api_key
+        ckey = f"filtered:{query}|{filters.cache_key}|{cursor}|{per_page}"
+        cached = _oa_cache.get(ckey) if _oa_cache is not None else None
+        if cached is not None:
+            data = cached
+            fetched = False
+            if not isinstance(data, dict):
+                _append_error(errors, "invalid_response",
+                              "OpenAlex 缓存响应格式错误，分页已停止")
+                break
+        else:
+            try:
+                response = requests.get(url, params=params, headers=headers, timeout=timeout)
+                if response.status_code in (403, 429):
+                    if not papers:
+                        raise SourceRateLimited("openalex", response.status_code)
+                    _append_error(errors, "rate_limited",
+                                  f"OpenAlex 分页受限，已保留 {len(papers)} 篇合规结果")
+                    break
+                response.raise_for_status()
+            except SourceRateLimited:
+                raise
+            except requests.RequestException:
+                _append_error(errors, "network",
+                              f"OpenAlex 分页失败，已保留 {len(papers)} 篇合规结果")
+                break
+            try:
+                data = response.json()
+            except (ValueError, TypeError):
+                _append_error(errors, "invalid_response",
+                              f"OpenAlex 响应无法解析，已保留 {len(papers)} 篇合规结果")
+                break
+            if not isinstance(data, dict):
+                _append_error(errors, "invalid_response",
+                              f"OpenAlex 响应格式错误，已保留 {len(papers)} 篇合规结果")
+                break
+            fetched = True
+        results = data.get("results") or []
+        if not isinstance(results, list):
+            _append_error(errors, "invalid_response", "OpenAlex 结果列表格式错误")
+            break
+        if not results:
+            break
+        meta = data.get("meta")
+        if meta is not None and not isinstance(meta, dict):
+            _append_error(errors, "invalid_response", "OpenAlex 分页元数据格式错误")
+            break
+        if fetched and _oa_cache is not None:
+            _oa_cache.set(ckey, data, expire=_CACHE_TTL)
+        for item in results:
+            if not isinstance(item, dict):
+                _append_error(errors, "invalid_response", "OpenAlex 跳过了格式错误的结果")
+                continue
+            if fetched:
+                _cache_work_refs(item)
+            paper = _parse_openalex_work(item)
+            if paper and filters.matches(paper):
+                identity = str(paper.get("doi") or paper.get("openalex_id") or
+                               (paper.get("title"), paper.get("year"))).casefold()
+                if identity in seen_ids:
+                    continue
+                seen_ids.add(identity)
+                rel = item.get("relevance_score")
+                try:
+                    score = float(rel) if rel is not None else None
+                except (TypeError, ValueError, OverflowError):
+                    score = None
+                    _append_error(errors, "invalid_response", "OpenAlex 跳过了无效相关度分数")
+                if score is not None and not math.isfinite(score):
+                    score = None
+                    _append_error(errors, "invalid_response", "OpenAlex 跳过了无效相关度分数")
+                paper["api_score"] = score if score is not None else max(
+                    0.0, 1.0 - len(papers) / max(max_results, 1))
+                papers.append(paper)
+                if len(papers) >= max_results:
+                    break
+        if len(papers) >= max_results:
+            break
+        next_cursor = str((meta or {}).get("next_cursor") or "")
+        if not next_cursor or next_cursor == cursor:
+            break
+        cursor = next_cursor
+        if fetched:
+            time.sleep(0.1)
+    if len(papers) < max_results:
+        _append_error(errors, "incomplete",
+                      f"OpenAlex 筛选后得到 {len(papers)}/{max_results} 篇，已耗尽结果或达到分页上限")
+    papers = _normalize_api_scores(papers[:max_results])
+    return _fetch_missing_abstracts(papers)
+
+
+def _normalize_api_scores(papers: list[dict]) -> list[dict]:
+    api_scores = [p.get("api_score") for p in papers if p.get("api_score") is not None]
+    if api_scores:
+        min_s, max_s = min(api_scores), max(api_scores)
+        if max_s > 1.0 or min_s < 0.0:
+            if max_s > min_s:
+                for paper in papers:
+                    if paper.get("api_score") is not None:
+                        paper["api_score"] = (paper["api_score"] - min_s) / (max_s - min_s)
+            else:
+                for paper in papers:
+                    if paper.get("api_score") is not None:
+                        paper["api_score"] = 0.5
+    total = max(len(papers), 1)
+    for index, paper in enumerate(papers):
+        if paper.get("api_score") is None:
+            paper["api_score"] = 1.0 - index / total
+    return papers
+
+
 def _fetch_openalex_raw(query: str, max_results: int = 30,
-                        year_min: str = "", year_max: str = "") -> list[dict]:
+                        year_min: str = "", year_max: str = "", *,
+                        filters: SearchFilters | None = None,
+                        errors: list | None = None,
+                        max_pages: int | None = None,
+                        request_timeout: float | None = None) -> list[dict]:
     """Fetch papers from OpenAlex with a raw query string (internal helper)."""
+    effective_filters = coerce_filters(filters, year_min, year_max)
+    if effective_filters is not None:
+        return _fetch_openalex_filtered(
+            query, max_results, effective_filters, errors=errors,
+            max_pages=max_pages, request_timeout=request_timeout)
     url = "https://api.openalex.org/works"
     papers = []
     per_page = min(50, max_results)
@@ -298,25 +563,7 @@ def _fetch_openalex_raw(query: str, max_results: int = 30,
                 time.sleep(0.1)  # 网络请求后的礼貌速率
     finally:
         socket.setdefaulttimeout(old_timeout)
-    # Normalize api_score to [0, 1] — OpenAlex relevance_score may exceed [0, 1]
-    api_scores = [p.get("api_score") for p in papers if p.get("api_score") is not None]
-    if api_scores:
-        min_s, max_s = min(api_scores), max(api_scores)
-        if max_s > 1.0 or min_s < 0.0:
-            if max_s > min_s:
-                for p in papers:
-                    if p.get("api_score") is not None:
-                        p["api_score"] = (p["api_score"] - min_s) / (max_s - min_s)
-            else:
-                for p in papers:
-                    if p.get("api_score") is not None:
-                        p["api_score"] = 0.5
-    # Fill remaining None with position-based scores
-    total = max(len(papers), 1)
-    for i, p in enumerate(papers):
-        if p.get("api_score") is None:
-            p["api_score"] = 1.0 - (i / total)
-    papers = papers[:max_results]
+    papers = _normalize_api_scores(papers[:max_results])
     papers = _fetch_missing_abstracts(papers)
     return papers
 
@@ -378,12 +625,19 @@ def _fetch_missing_abstracts(papers: list[dict]) -> list[dict]:
 
 def fetch_openalex(keywords: list[str], max_results: int = 30,
                    logic: str = "OR",
-                   year_min: str = "", year_max: str = "") -> list[dict]:
+                   year_min: str = "", year_max: str = "", *,
+                   filters: SearchFilters | None = None,
+                   errors: list | None = None,
+                   max_pages: int | None = None,
+                   request_timeout: float | None = None) -> list[dict]:
     """通过 OpenAlex API 检索论文（免 Key）。"""
     if not keywords:
         return []
     query = _build_search_query(keywords, logic=logic)
-    return _fetch_openalex_raw(query, max_results, year_min=year_min, year_max=year_max)
+    return _fetch_openalex_raw(
+        query, max_results, year_min=year_min, year_max=year_max,
+        filters=filters, errors=errors, max_pages=max_pages,
+        request_timeout=request_timeout)
 
 
 class OpenAlexSource(PaperSource):
@@ -394,8 +648,9 @@ class OpenAlexSource(PaperSource):
     raw_fetcher = staticmethod(_fetch_openalex_raw)
 
     def fetch_raw(self, query: str, max_results: int = 30,
-                  year_min: str = "", year_max: str = "") -> list[dict]:
-        return _fetch_openalex_raw(query, max_results, year_min=year_min, year_max=year_max)
+                  year_min: str = "", year_max: str = "", **kwargs) -> list[dict]:
+        return _fetch_openalex_raw(query, max_results, year_min=year_min,
+                                   year_max=year_max, **kwargs)
 
 
 def register() -> OpenAlexSource:

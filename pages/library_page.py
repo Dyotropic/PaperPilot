@@ -859,7 +859,8 @@ def build_library_page(ctx):
                 ft.TextButton(
                     content=ft.Text(pdoi, size=13),
                     on_click=lambda e, d=pdoi: webbrowser.open(f"https://doi.org/{d}"),
-                    style=ft.ButtonStyle(padding=ft.padding.Padding.all(0)),
+                    style=ft.ButtonStyle(padding=ft.padding.Padding(
+                        left=0, top=0, right=0, bottom=0)),
                 ),
             ], spacing=0, wrap=True))
         if purl:
@@ -1287,7 +1288,8 @@ def build_library_page(ctx):
                     ft.TextButton(
                         content=ft.Text(doi, size=13),
                         on_click=lambda e, d=doi: webbrowser.open(f"https://doi.org/{d}"),
-                        style=ft.ButtonStyle(padding=ft.padding.Padding.all(0)),
+                        style=ft.ButtonStyle(padding=ft.padding.Padding(
+                            left=0, top=0, right=0, bottom=0)),
                     ),
                 ], spacing=0))
 
@@ -1328,11 +1330,24 @@ def build_library_page(ctx):
             try:
                 full_text, source = get_full_text_for_paper(paper)
                 if not full_text:
-                    _error = f"无法获取《{title}》的全文。\n\n请先导入 PDF 或确保论文有可访问的 arXiv 链接。"
-                    _done.set()
-                    return
+                    abstract = (paper.get("abstract") or "").strip()
+                    if len(abstract) >= 50:
+                        source = "abstract_fallback"
+                        full_text = f"（注意：仅获取到摘要，无全文）\n\n{abstract}"
+                        _status = (
+                            f"未获取到全文，将基于摘要降级分析（{len(abstract)} 字符）\n"
+                            "正在 RLM 分析... 📖"
+                        )
+                    else:
+                        _error = (
+                            f"无法获取《{title}》的全文，且摘要不足以降级精读。\n\n"
+                            "请先导入 PDF 或确保论文有可访问的 arXiv 链接。"
+                        )
+                        _done.set()
+                        return
 
-                _status = f"已获取全文（{len(full_text)} 字符，来源: {source}）\n正在 RLM 分层分析... 📖"
+                if source != "abstract_fallback":
+                    _status = f"已获取全文（{len(full_text)} 字符，来源: {source}）\n正在 RLM 分层分析... 📖"
 
                 result = ctx.ai_service.deep_read(paper, full_text)
                 if not result:
@@ -1348,6 +1363,8 @@ def build_library_page(ctx):
                     _result.update(result)
                     return
 
+                if source == "abstract_fallback":
+                    result["_source"] = source
                 _result.update(result)
 
                 # 保存到数据库
@@ -1407,6 +1424,10 @@ def build_library_page(ctx):
                 f"严谨性 {scores.get('rigor', '?')}/10  |  "
                 f"重要性 {scores.get('significance', '?')}/10"
             )
+            source_note = (
+                "\n\n⚠️ 本次未获取到全文，仅基于摘要进行降级分析。"
+                if r.get("_source") == "abstract_fallback" else ""
+            )
 
             msg = (
                 f"📖 精读分析：《{title}》\n\n"
@@ -1417,6 +1438,7 @@ def build_library_page(ctx):
                 f"⚠️ 局限不足\n{r.get('limitations', '—')}\n\n"
                 f"📈 {score_line}\n\n"
                 f"（完整结果已保存到本地 outputs/deep_read/）"
+                f"{source_note}"
             )
             ctx.send_agent_message(msg, role="agent")
             _save_msg("assistant", msg)

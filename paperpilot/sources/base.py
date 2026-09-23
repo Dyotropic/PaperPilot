@@ -87,15 +87,17 @@ class PaperSource:
     raw_fetcher = None
 
     def fetch(self, keywords: list[str], max_results: int = 30,
-              logic: str = "OR", year_min: str = "", year_max: str = "") -> list[dict]:
+              logic: str = "OR", year_min: str = "", year_max: str = "",
+              **kwargs) -> list[dict]:
         """按关键词检索：引号包裹查询串后调用 fetch_raw（与各源原 fetch_xxx 一致）。"""
         if not keywords:
             return []
         query = _build_search_query(keywords, logic=logic)
-        return self.fetch_raw(query, max_results, year_min=year_min, year_max=year_max)
+        return self.fetch_raw(query, max_results, year_min=year_min,
+                              year_max=year_max, **kwargs)
 
     def fetch_raw(self, query: str, max_results: int = 30,
-                  year_min: str = "", year_max: str = "") -> list[dict]:
+                  year_min: str = "", year_max: str = "", **kwargs) -> list[dict]:
         """以原始查询串抓取，返回统一 paper dict 列表。子类必须实现。"""
         raise NotImplementedError
 
