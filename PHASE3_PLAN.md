@@ -2,7 +2,7 @@
 
 > 文档版本：v1.1 | 核对日期：2026-09-19 | 状态：部分已实现，待办未重新排期
 >
-> 本文档区分当前代码与未来设计。已实现不等于已验收；本轮测试摘要记录在本文 7.4 节。旧报告和 Word/PPT 保留为历史材料，不作为当前功能说明。
+> 本文档区分当前代码与未来设计。已实现不等于已验收；本轮测试摘要记录在本文 7.3 节。旧报告和 Word/PPT 保留为历史材料，不作为当前功能说明。原有协作/合并流程已移除；接口表是历史设计约定，修改前须与当前源码核对。
 
 ---
 
@@ -437,25 +437,22 @@ app.py 已降为约 230 行，页面在 pages/，通过 AppContext 共享状态�
 
 #### 7.1.1 模块间接口冻结规则
 
-以下接口为**已稳定接口**，Phase 3 中**禁止修改签名**，只允许向后兼容地添加可选参数（有默认值）：
+以下是 Phase 3 设计时记录的公共接口，不代表当前源码的完整签名。修改前须核对实现及调用点；优先保持向后兼容：
 
 | 模块 | 接口 | 说明 |
 |------|------|------|
 | `library.py` | `get_all_projects()` → `list[Project]` | 文献库所有课题 |
-| `library.py` | `get_project_papers(project_id)` → `list[dict]` | 课题下论文列表 |
-| `library.py` | `save_papers_to_project(pid, papers, scores)` → `(int, int)`（新增关联数、补填 PDF 路径数） | 保存检索结果 |
-| `library.py` | `create_project(name, desc)` → `Project` | 新建课题 |
-| `library.py` | `update_project(pid, **kwargs)` | 更新课题信息 |
+| `library.py` | `get_project_papers(project_id, status_filter=None)` → `list[dict]` | 课题下论文列表 |
+| `library.py` | `save_papers_to_project(project_id, papers, scores=None)` → `tuple[int, int]`（新增关联数、补填 PDF 路径数） | 保存检索结果 |
+| `library.py` | `create_project(name, description, push_interval_days=7)` → `Project` | 新建课题 |
+| `library.py` | `update_project(project_id, name=None, description=None, push_interval_days=None)` → `bool` | 更新课题信息 |
 | `ai_service.py` | `AIService.chat(project_id, project_name, message, ...)` → `dict` | Agent 对话 |
-| `ai_service.py` | `AIService.deep_read(paper, full_text)` → `dict` | AI 精读 |
-| `ai_service.py` | `AIService.score_papers(topic, papers)` → `list[dict]` | AI 精排 |
-| `app.py` | `send_agent_message(text, role)` | Agent 面板发消息 |
-| `app.py` | `set_agent_project(pid, name, desc)` | 切换 Agent 课题 |
+| `ai_service.py` | `AIService.deep_read(paper, full_text=None)` → `dict` | AI 精读 |
+| `ai_service.py` | `AIService.score_papers(topic_desc, papers, max_papers=50)` → `list[dict]` | AI 精排 |
+| `pages/agent_panel.py` | `send_agent_message(text, role="user")` | Agent 面板发消息 |
+| `pages/agent_panel.py` | `set_agent_project(project_id, project_name="", topic_desc="")` | 切换 Agent 课题 |
 
-**修改已稳定接口前必须**：
-1. 在 PR 描述中说明修改原因和向后兼容方案
-2. 搭档代码 Review 通过后方可合并
-3. 更新本文档中的接口表格
+修改上述接口时，应说明必要性、调用方影响和向后兼容方案，并同步更新相关接口记录。
 
 #### 7.1.2 新接口规范
 
@@ -467,9 +464,9 @@ app.py 已降为约 230 行，页面在 pages/，通过 AppContext 共享状态�
 
 #### 7.1.3 数据库 Schema 变更规则
 
-- `models.py` 是**两人共用的宪法文件**，任何字段变更必须先提 PR 合并，不得单方面修改
+- `models.py` 字段变更须先核对现有数据库、调用方与迁移方案，不得只按新库设计直接改写
 - 新增字段必须有默认值（不破坏现有数据库），推荐 `nullable=True` 或指定 `default`
-- 新增表须同步更新 `init_db()` 并在 PR 中说明迁移方案
+- 新增表须同步更新 `init_db()` 并说明迁移方案
 - 字段重命名须提供迁移脚本（`alembic` 或手写 SQL），不得直接删除旧字段
 
 #### 7.1.4 config.yaml 变更规则
@@ -517,75 +514,7 @@ app.py 已降为约 230 行，页面在 pages/，通过 AppContext 共享状态�
 
 ---
 
-### 7.3 Git 提交规范
-
-#### 7.3.1 分支策略
-
-```
-main          ← 稳定版本，仅接受来自 develop 的 PR
-develop       ← 日常开发集成分支
-feature/xxx   ← 功能分支，从 develop 拉出，完成后 PR 回 develop
-hotfix/xxx    ← P0/P1 修复分支
-```
-
-**禁止**直接向 `main` 或 `develop` push，所有变更通过 PR 合并。
-
-#### 7.3.2 Commit Message 格式
-
-使用 [Conventional Commits](https://www.conventionalcommits.org/) 格式：
-
-```
-<type>(<scope>): <subject>
-
-[可选 body，说明 WHY，不超过 72 字/行]
-```
-
-| type | 用途 |
-|------|------|
-| `feat` | 新功能 |
-| `fix` | Bug 修复 |
-| `refactor` | 重构（不改变功能） |
-| `docs` | 文档更新 |
-| `test` | 测试相关 |
-| `chore` | 依赖/配置更新 |
-| `perf` | 性能优化 |
-
-scope 示例：`llm`、`sources`、`graph`、`push`、`writing`、`collab`、`ui`、`db`
-
-示例：
-```
-feat(llm): add OpenAI-compatible LLM client abstraction
-
-Replaces direct DeepSeek HTTP calls with LLMClient.
-Supports DeepSeek / OpenAI / Qwen / GLM / Ollama via openai SDK.
-Claude uses anthropic SDK with same interface.
-
-fix(sources): handle Europe PMC 429 with exponential backoff
-
-chore(deps): bump openai to 1.30.0, add anthropic 0.30.0
-```
-
-#### 7.3.3 PR 规范
-
-每个 PR 必须包含：
-1. **标题**：一句话描述变更（同 commit subject 格式）
-2. **变更说明**：做了什么、为什么这样做
-3. **测试说明**：如何验证功能正确（手动测试步骤 / 自动化测试）
-4. **接口变更**（如有）：说明变更的接口签名及向后兼容方案
-5. **数据库变更**（如有）：迁移方案
-
-PR 大小：单个 PR 尽量不超过 400 行新增，大功能拆分为多个小 PR（如先合并 LLM 抽象层，再合并各 Provider 实现）。
-
-#### 7.3.4 代码 Review 规则
-
-- 涉及**稳定接口**变更的 PR：搭档必须 Review 且 Approve 后方可合并
-- 涉及 `models.py` / `config.py` 变更的 PR：同上强制 Review
-- 其他生成代码 PR：遵循 AGENTS.md，由搭档 review 后合并
-- Review 时重点关注：接口兼容性、边界处理、线程安全、配置安全
-
----
-
-### 7.4 测试规范与现有入口
+### 7.3 验证记录与现有入口
 
 本轮验证采用本地独立 Python 脚本和 check/assert，并补充 unittest 与 UI 检查；这些测试脚本、报告和证据目录不随本次项目提交。单元/mock 集成测试不得依赖真实 API；真实服务与端到端验收使用隔离数据库、文件和小规模调用。
 
@@ -593,20 +522,19 @@ PR 大小：单个 PR 尽量不超过 400 行新增，大功能拆分为多个�
 
 上述数字只代表该次本机快照，拉取仓库后不能据此推定当前环境仍通过。测试缺失、跳过、服务受限、降级与功能失败必须分别报告；没有完整执行的链路不得判为通过。测试不得写入用户数据库/仓库或泄露真实 Key。
 
-### 7.5 当前开发检查清单
+### 7.4 当前开发检查清单
 
 - [x] 页面拆分，app.py 小于 500 行。
 - [x] LLM 抽象和 config.example.yaml 已包含多供应商字段。
 - [x] 三个数据源及知识图谱已接入 UI。
 - [ ] 依赖版本锁定与可重复安装验证。
-- [x] 2026-09-19 本机离线、真实服务与 UI 回归完成，结果见 7.4 节。
+- [x] 2026-09-19 本机离线、真实服务与 UI 回归完成，结果见 7.3 节。
 - [ ] PDF/图谱窗口此前一次整窗空白的根因确认与针对性回归。
 - [ ] Zotero、推送、写作、多用户：设计与开发尚未完成。
-- [ ] 搭档 review 与独立机器复核。
 
-## 八、后续协作边界
+## 八、后续开发边界
 
-后端先确定接口和数据契约，再接 UI；核心打分和排序策略由人设计。已完成底座不重复安排“从零开发”。推送/写作/协作的新表与字段仍须先经 models.py PR 和迁移方案审核。未落实的新功能须重新确定两人分工与时间，不将旧建议视为已接受任务。
+新增能力先确定接口和数据契约，再接 UI；核心打分和排序策略须结合业务目标审视。已完成底座不重复安排“从零开发”。推送/写作/协作若需新增表与字段，须先明确迁移方案；未落实的新功能应按当前需求重新排序，不将旧建议视为已接受任务。
 
 ## 附录：关键技术参考
 
@@ -624,7 +552,7 @@ PR 大小：单个 PR 尽量不超过 400 行新增，大功能拆分为多个�
 ---
 
 *文档作者：Claude Opus 4.6（辅助生成） | 最终版本由开发者确认后生效*
-*如有疑问或需要修订，直接编辑本文档并在 PR 中说明变更原因*
+*如有疑问或需要修订，应说明变更原因并核对当前源码。*
 
 
 
