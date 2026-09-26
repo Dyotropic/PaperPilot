@@ -12,17 +12,18 @@
     client.is_available / client.test_connection()
 
 thinking 参数三态归一（跨家翻译）：
-    None  = 调用方不关心，不传该参数（DeepSeek v4 默认开启，openai 系忽略）
-    True  = 请求推理（DeepSeek: thinking enabled；Anthropic: thinking block；
-            其余 OpenAI 系模型自行决定，参数省略）
-    False = 显式关闭推理（DeepSeek: thinking disabled；其余省略）
+    None  = 调用方不关心，不传该参数（采用模型默认值）
+    True  = 请求推理（DeepSeek: enabled；GPT-6: high；Claude 新模型: adaptive/high）
+    False = 尽量减少推理（DeepSeek: disabled；GPT-6 Sol/Luna: none；
+            Claude Fable 5.1/Opus 5.5 不支持关闭，改用 adaptive/low）
 
 配置（config.yaml llm 节，缺失键回退默认，不报错）：
     llm:
       provider: deepseek
-      api_key: ""
+      api_key: ""          # 当前 provider 的密钥（兼容旧配置）
+      api_keys: {}          # 设置页保存各 provider 的密钥；可省略
       base_url: ""          # 留空用 PROVIDERS 默认
-      model: deepseek-v4-flash
+      model: deepseek-flash
       score_model: ""       # 任务级覆盖（score/chat/reasoning），空=用 model
       chat_model: ""
       reasoning_model: ""   # 非空才启用两步推理
@@ -53,19 +54,19 @@ PROVIDERS: dict[str, dict] = {
     "deepseek": {
         "label": "DeepSeek",
         "base_url": "https://api.deepseek.com/v1",
-        "default_model": "deepseek-v4-flash",
+        "default_model": "deepseek-flash",
         "key_hint": "platform.deepseek.com 获取，sk- 开头",
     },
     "openai": {
         "label": "OpenAI / ChatGPT",
         "base_url": "https://api.openai.com/v1",
-        "default_model": "gpt-5.5",
+        "default_model": "gpt-6-sol",
         "key_hint": "platform.openai.com 获取，sk- 开头",
     },
     "anthropic": {
         "label": "Anthropic / Claude",
         "base_url": "",  # SDK 默认
-        "default_model": "opus-4.8",
+        "default_model": "claude-opus-5-5",
         "key_hint": "console.anthropic.com 获取，sk-ant- 开头",
     },
     "glm": {
@@ -97,21 +98,24 @@ PROVIDERS: dict[str, dict] = {
 # 每家内置模型清单：(model_id, 显示名)；下拉框额外提供"自定义…"手输
 MODEL_CATALOG: dict[str, list[tuple[str, str]]] = {
     "deepseek": [
-        ("deepseek-v4-flash", "DeepSeek V4 Flash（快）"),
+        ("deepseek-flash", "DeepSeek V4.1 Flash（当前）"),
+        ("deepseek-v4-flash", "旧 ID（暂时转发至 V4.1 Flash）"),
         ("deepseek-v4-pro", "DeepSeek V4 Pro（深度推理）"),
     ],
     "openai": [
+        ("gpt-6-astra", "GPT-6 Astra"),
+        ("gpt-6-sol", "GPT-6 Sol"),
+        ("gpt-6-luna", "GPT-6 Luna"),
         ("gpt-5.6-sol", "GPT-5.6 Sol"),
         ("gpt-5.6-terra", "GPT-5.6 Terra"),
         ("gpt-5.6-luna", "GPT-5.6 Luna"),
         ("gpt-5.5", "GPT-5.5"),
     ],
     "anthropic": [
-        ("fable-5", "Fable 5"),
-        ("opus-5", "Opus 5"),
-        ("opus-4.8", "Opus 4.8"),
-        ("opus-4.7", "Opus 4.7"),
-        ("opus-4.6", "Opus 4.6"),
+        ("claude-fable-5-1", "Claude Fable 5.1"),
+        ("claude-opus-5-5", "Claude Opus 5.5"),
+        ("claude-sonnet-5", "Claude Sonnet 5"),
+        ("claude-haiku-4-5", "Claude Haiku 4.5"),
     ],
     "glm": [
         ("glm-5.3", "GLM-5.3"),
@@ -144,9 +148,19 @@ def _load_llm_cfg() -> dict:
     llm = cfg.get("llm", {}) or {}
 
     if llm.get("provider"):
+        provider = str(llm.get("provider", "")).strip()
+        provider_keys = llm.get("api_keys") or {}
+        if not isinstance(provider_keys, dict):
+            provider_keys = {}
+        if provider in provider_keys:
+            api_key = provider_keys[provider]
+        else:
+            api_key = llm.get("api_key", "")
+            if not api_key and provider == "deepseek":
+                api_key = (cfg.get("deepseek") or {}).get("api_key", "")
         return {
-            "provider": str(llm.get("provider", "")).strip(),
-            "api_key": str(llm.get("api_key", "") or "").strip(),
+            "provider": provider,
+            "api_key": str(api_key or "").strip(),
             "base_url": str(llm.get("base_url", "") or "").strip(),
             "model": str(llm.get("model", "") or "").strip(),
             **{k: str(llm.get(k, "") or "").strip() for k in _TASK_KEYS},
@@ -213,6 +227,14 @@ def get_task_model(task: str) -> str:
     model = cfg["model"] or PROVIDERS.get(cfg["provider"], {}).get("default_model", "")
     task_model = cfg.get(f"{task}_model", "")
     return task_model or model
+
+
+def get_task_model_override(task: str) -> str:
+    """返回显式配置的任务模型；留空时不回退到主模型。"""
+    if task not in ("score", "chat", "reasoning"):
+        return ""
+    cfg = _load_llm_cfg()
+    return cfg.get(f"{task}_model", "") if cfg else ""
 
 
 def llm_configured() -> bool:
@@ -291,7 +313,7 @@ class LLMClient:
         try:
             result = self._do_chat(
                 [{"role": "user", "content": "回复 OK 两个字母即可"}],
-                0.0, 16, 30, self.model, None,
+                0.0, 512, 30, self.model, False,
             )
             if result.content:
                 return True, f"连接成功（模型 {self.model}）"
@@ -330,18 +352,28 @@ class OpenAICompatClient(LLMClient):
             )
         return self._client
 
-    def _do_chat(self, messages, temperature, max_tokens, timeout,
-                 model, thinking) -> ChatResult:
-        kwargs: dict = {
-            "messages": messages,
-            "model": model,
-            "max_tokens": max_tokens,
-        }
-        # DeepSeek v4 必须显式管理 thinking；其余 OpenAI 系不支持该参数，省略
+    def _request_kwargs(self, messages, model, max_tokens, thinking) -> dict:
+        kwargs = {"messages": messages, "model": model}
+        if self.provider == "openai":
+            kwargs["max_completion_tokens"] = max_tokens
+            if model in ("gpt-6-astra", "gpt-6-sol", "gpt-6-luna"):
+                if thinking is True:
+                    kwargs["reasoning_effort"] = "high"
+                elif thinking is False:
+                    kwargs["reasoning_effort"] = (
+                        "low" if model == "gpt-6-astra" else "none"
+                    )
+        else:
+            kwargs["max_tokens"] = max_tokens
         if self.provider == "deepseek" and thinking is not None:
             kwargs["extra_body"] = {
                 "thinking": {"type": "enabled" if thinking else "disabled"}
             }
+        return kwargs
+
+    def _do_chat(self, messages, temperature, max_tokens, timeout,
+                 model, thinking) -> ChatResult:
+        kwargs = self._request_kwargs(messages, model, max_tokens, thinking)
         client = self._get_client(timeout)
         resp = client.chat.completions.create(**kwargs)
         content = ""
@@ -354,16 +386,8 @@ class OpenAICompatClient(LLMClient):
 
     def _do_stream(self, messages, temperature, max_tokens, timeout,
                    model, thinking) -> Iterator[str]:
-        kwargs: dict = {
-            "messages": messages,
-            "model": model,
-            "max_tokens": max_tokens,
-            "stream": True,
-        }
-        if self.provider == "deepseek" and thinking is not None:
-            kwargs["extra_body"] = {
-                "thinking": {"type": "enabled" if thinking else "disabled"}
-            }
+        kwargs = self._request_kwargs(messages, model, max_tokens, thinking)
+        kwargs["stream"] = True
         client = self._get_client(timeout)
         resp = client.chat.completions.create(**kwargs)
         for chunk in resp:
@@ -379,6 +403,12 @@ class AnthropicClient(LLMClient):
 
     # Anthropic thinking 模式的最小预算
     _MIN_THINKING_BUDGET = 1024
+    _ADAPTIVE_MODELS = frozenset({
+        "claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5",
+    })
+    _ALWAYS_THINKING_MODELS = frozenset({
+        "claude-fable-5-1", "claude-opus-5-5",
+    })
 
     def __init__(self, api_key: str, model: str, base_url: str = ""):
         super().__init__(model)
@@ -410,8 +440,24 @@ class AnthropicClient(LLMClient):
         return "\n\n".join(p for p in system_parts if p), rest
 
     def _thinking_kwargs(self, thinking: bool | None,
-                         max_tokens: int) -> tuple[dict, int]:
-        """thinking=True 时构造 thinking 配置并抬高 max_tokens。"""
+                         max_tokens: int, model: str | None = None) -> tuple[dict, int]:
+        """按模型支持的思考模式构造请求参数。"""
+        selected_model = model or self.model
+        if selected_model in self._ADAPTIVE_MODELS:
+            if thinking is True:
+                budget = max(self._MIN_THINKING_BUDGET, min(4000, max_tokens))
+                return ({"thinking": {"type": "adaptive"},
+                         "output_config": {"effort": "high"}}, max_tokens + budget)
+            if thinking is False:
+                if selected_model == "claude-sonnet-5":
+                    return {"thinking": {"type": "disabled"}}, max_tokens
+                # Fable 5.1 / Opus 5.5 的 adaptive thinking 不能关闭。
+                return ({"thinking": {"type": "adaptive"},
+                         "output_config": {"effort": "low"}},
+                        max(max_tokens, self._MIN_THINKING_BUDGET))
+            if selected_model in self._ALWAYS_THINKING_MODELS:
+                return {}, max(max_tokens, self._MIN_THINKING_BUDGET)
+            return {}, max_tokens
         if thinking is not True:
             return {}, max_tokens
         budget = max(self._MIN_THINKING_BUDGET, min(4000, max_tokens))
@@ -421,7 +467,7 @@ class AnthropicClient(LLMClient):
     def _do_chat(self, messages, temperature, max_tokens, timeout,
                  model, thinking) -> ChatResult:
         system, rest = self._split_messages(messages)
-        tkw, use_max = self._thinking_kwargs(thinking, max_tokens)
+        tkw, use_max = self._thinking_kwargs(thinking, max_tokens, model)
         kwargs: dict = {
             "model": model,
             "messages": rest,
@@ -447,7 +493,7 @@ class AnthropicClient(LLMClient):
     def _do_stream(self, messages, temperature, max_tokens, timeout,
                    model, thinking) -> Iterator[str]:
         system, rest = self._split_messages(messages)
-        tkw, use_max = self._thinking_kwargs(thinking, max_tokens)
+        tkw, use_max = self._thinking_kwargs(thinking, max_tokens, model)
         kwargs: dict = {
             "model": model,
             "messages": rest,

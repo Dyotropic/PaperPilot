@@ -256,6 +256,7 @@ class AppContext:
         self.send_agent_message = None
         self.trigger_compare_papers = None
         self.set_agent_project = None
+        self.refresh_agent_panel_theme = None
         self.ai_service = None
         self.build_nav = None
         self.top_nav_ref = None

@@ -2,6 +2,7 @@
 import asyncio
 import json
 import os
+import re
 import threading
 import webbrowser
 
@@ -28,6 +29,33 @@ from paperpilot.ai_service import save_deep_read_json, get_full_text_for_paper
 from paperpilot.library import save_deep_read_notes
 
 state = ctx.state
+
+
+def _format_deep_read_message(title: str, result: dict) -> str:
+    """将结构化精读结果排成适合 StudyCopilot 阅读的 Markdown。"""
+    safe_title = re.sub(r"([\\`*_{}\[\]()#+.!>|-])", r"\\\1", title)
+    sections = (
+        ("核心贡献", "core_contribution"),
+        ("研究方法", "method"),
+        ("关键证据", "key_evidence"),
+        ("创新亮点", "highlights"),
+        ("局限不足", "limitations"),
+    )
+    parts = [f"## 精读分析：{safe_title}"]
+    if result.get("_source") == "abstract_fallback":
+        parts.append("> **资料范围：** 未获取到全文，以下分析仅依据摘要。")
+    for heading, key in sections:
+        parts.append(f"### {heading}\n\n{result.get(key) or '未提及'}")
+    scores = result.get("scores") or {}
+    parts.append(
+        "### 综合评分\n\n"
+        f"**新颖性** {scores.get('novelty', '?')}/10　·　"
+        f"**严谨性** {scores.get('rigor', '?')}/10　·　"
+        f"**重要性** {scores.get('significance', '?')}/10"
+    )
+    if result.get("_saved_json"):
+        parts.append("*完整结构化结果已保存至 `outputs/deep_read/`。*")
+    return "\n\n".join(parts)
 
 
 def build_library_page(ctx):
@@ -1378,7 +1406,7 @@ def build_library_page(ctx):
                         pass
 
                 # 保存到本地 JSON
-                save_deep_read_json(paper, result)
+                _result["_saved_json"] = bool(save_deep_read_json(paper, result))
 
             except Exception as ex:
                 _error = f"精读异常: {ex}"
@@ -1417,29 +1445,7 @@ def build_library_page(ctx):
                 _save_msg("assistant", trunc_msg)
                 return
 
-            r = _result
-            scores = r.get("scores", {})
-            score_line = (
-                f"新颖性 {scores.get('novelty', '?')}/10  |  "
-                f"严谨性 {scores.get('rigor', '?')}/10  |  "
-                f"重要性 {scores.get('significance', '?')}/10"
-            )
-            source_note = (
-                "\n\n⚠️ 本次未获取到全文，仅基于摘要进行降级分析。"
-                if r.get("_source") == "abstract_fallback" else ""
-            )
-
-            msg = (
-                f"📖 精读分析：《{title}》\n\n"
-                f"🔑 核心贡献\n{r.get('core_contribution', '—')}\n\n"
-                f"🔬 研究方法\n{r.get('method', '—')}\n\n"
-                f"📊 关键证据\n{r.get('key_evidence', '—')}\n\n"
-                f"💡 创新亮点\n{r.get('highlights', '—')}\n\n"
-                f"⚠️ 局限不足\n{r.get('limitations', '—')}\n\n"
-                f"📈 {score_line}\n\n"
-                f"（完整结果已保存到本地 outputs/deep_read/）"
-                f"{source_note}"
-            )
+            msg = _format_deep_read_message(paper.get("title") or "论文", _result)
             ctx.send_agent_message(msg, role="agent")
             _save_msg("assistant", msg)
 

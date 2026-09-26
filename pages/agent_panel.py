@@ -23,7 +23,7 @@ from pages.context import (
     FW_REGULAR, FW_MEDIUM, FW_SEMIBOLD, FW_BOLD,
     R_SM, R_MD, R_LG, R_XL, SP_XS, SP_SM, SP_MD, SP_LG, SP_XL, SP_XXL,
     text_primary, text_secondary, text_tertiary, border_color,
-    seed_color, app_bg, surface, surface_hi, accent_container,
+    seed_color, app_bg, surface, surface_hi,
 )
 from pages.components import clamp_width, make_resize_handle, open_dialog, close_dialog
 
@@ -96,11 +96,71 @@ _load_saved_agent_width()
 def _agent_theme_colors():
     """根据当前主题返回 Agent 面板配色。"""
     return {
-        "user_bubble": accent_container(),
-        "agent_bubble": surface_hi(),
-        "user_text": seed_color(),
+        "user_bubble": surface_hi(),
+        "system_bubble": surface_hi(),
+        "user_text": text_primary(),
         "agent_text": text_primary(),
+        "muted_text": text_secondary(),
     }
+
+
+def _agent_markdown_styles(size: int = FS_LG) -> ft.MarkdownStyleSheet:
+    """让长回复在窄面板中保持与桌面主题一致的正文层级。"""
+    primary = text_primary()
+    muted = text_secondary()
+    body = ft.TextStyle(size=size, height=1.55, color=primary,
+                        font_family=FONT_FAMILY)
+    heading = ft.TextStyle(size=FS_XL, height=1.35, color=primary,
+                           weight=FW_SEMIBOLD, font_family=FONT_FAMILY)
+    edge = ft.BorderSide(1, border_color())
+    return ft.MarkdownStyleSheet(
+        p_text_style=body,
+        h1_text_style=heading,
+        h2_text_style=heading,
+        h3_text_style=ft.TextStyle(size=FS_LG, height=1.4, color=primary,
+                                   weight=FW_SEMIBOLD, font_family=FONT_FAMILY),
+        h4_text_style=body,
+        strong_text_style=ft.TextStyle(weight=FW_SEMIBOLD, color=primary),
+        a_text_style=ft.TextStyle(color=ft.Colors.PRIMARY, weight=FW_MEDIUM),
+        code_text_style=ft.TextStyle(size=FS_MD, color=primary,
+                                     bgcolor=surface_hi(), font_family="Consolas"),
+        blockquote_text_style=ft.TextStyle(size=size, height=1.5, color=muted,
+                                           font_family=FONT_FAMILY),
+        blockquote_padding=SP_SM,
+        blockquote_decoration=ft.BoxDecoration(
+            bgcolor=surface_hi(), border=ft.Border(left=ft.BorderSide(2, border_color())),
+            border_radius=R_SM,
+        ),
+        codeblock_padding=SP_SM,
+        codeblock_decoration=ft.BoxDecoration(
+            bgcolor=surface_hi(), border=ft.Border(edge, edge, edge, edge),
+            border_radius=R_SM,
+        ),
+        horizontal_rule_decoration=ft.BoxDecoration(
+            border=ft.Border(bottom=edge),
+        ),
+        table_head_text_style=ft.TextStyle(size=FS_MD, color=primary,
+                                           weight=FW_SEMIBOLD, font_family=FONT_FAMILY),
+        table_body_text_style=body,
+        table_cells_padding=SP_XS,
+        list_bullet_text_style=body,
+        list_indent=SP_LG,
+        block_spacing=SP_SM,
+    )
+
+
+def _agent_markdown(text: str, size: int = FS_LG) -> ft.Markdown:
+    return ft.Markdown(
+        text,
+        selectable=True,
+        extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
+        md_style_sheet=_agent_markdown_styles(size),
+        code_theme=(ft.MarkdownCodeTheme.GITHUB if not state.dark_mode
+                    else ft.MarkdownCodeTheme.A11Y_DARK),
+        auto_follow_links=True,
+        auto_follow_links_target=ft.UrlTarget.BLANK,
+        soft_line_break=True,
+    )
 
 
 def _format_agent_text(text: str):
@@ -191,48 +251,59 @@ def _table_to_list(header: list[str], rows: list[list[str]]) -> str:
 
 
 def _make_bubble(text: str, role: str = "user") -> ft.Container:
-    """构建一条消息气泡（不追加到列表，不调用 update）。"""
+    """构建一条消息；助手回复按正文排版，用户和状态消息使用轻底。"""
     colors = _agent_theme_colors()
-    if role == "user":
-        bg = colors["user_bubble"]
-        fg = colors["user_text"]
-        label = "你"
-    else:
-        bg = colors["agent_bubble"]
-        fg = colors["agent_text"]
-        label = "Agent"
-
     if role == "agent":
         try:
             formatted, _ = _format_agent_text(text)
-            try:
-                body = ft.Markdown(
-                    formatted,
-                    selectable=True,
-                    extension_set="gitHubWeb",
-                )
-            except Exception:
-                logger.warning("Markdown gitHubWeb failed, fallback to plain", exc_info=True)
-                try:
-                    body = ft.Markdown(formatted, selectable=True)
-                except Exception:
-                    raise
+            body = _agent_markdown(formatted)
         except Exception:
             logger.warning("Markdown render failed, fallback to plain text", exc_info=True)
-            body = ft.Text(text, size=13, color=fg, no_wrap=False, selectable=True)
+            body = ft.Text(text, size=FS_LG, color=colors["agent_text"],
+                           no_wrap=False, selectable=True)
+        content = body
+        bg = surface()
+        radius = 0
+        margin = None
+        padding = ft.padding.Padding(left=SP_LG, top=SP_SM,
+                                    right=SP_LG, bottom=SP_MD)
+    elif role == "system":
+        try:
+            body = _agent_markdown(text, FS_MD)
+        except Exception:
+            logger.warning("System Markdown render failed", exc_info=True)
+            body = ft.Text(text, size=FS_MD, color=colors["agent_text"],
+                           no_wrap=False, selectable=True)
+        content = ft.Column([
+            ft.Text("系统", size=FS_XS, color=colors["muted_text"],
+                    weight=FW_SEMIBOLD),
+            body,
+        ], spacing=SP_XS)
+        bg = colors["system_bubble"]
+        radius = R_MD
+        margin = ft.margin.Margin(left=SP_MD, top=0, right=SP_MD, bottom=0)
+        padding = ft.padding.Padding(left=SP_MD, top=SP_SM,
+                                    right=SP_MD, bottom=SP_SM)
     else:
-        body = ft.Text(text, size=13, color=fg, no_wrap=False, selectable=True)
+        content = ft.Column([
+            ft.Text("你", size=FS_XS, color=colors["muted_text"],
+                    weight=FW_SEMIBOLD),
+            ft.Text(text, size=FS_MD, color=colors["user_text"],
+                    no_wrap=False, selectable=True),
+        ], spacing=SP_XS)
+        bg = colors["user_bubble"]
+        radius = R_MD
+        margin = ft.margin.Margin(left=SP_MD, top=0, right=SP_MD, bottom=0)
+        padding = ft.padding.Padding(left=SP_MD, top=SP_SM,
+                                    right=SP_MD, bottom=SP_SM)
 
     return ft.Container(
-        content=ft.Column([
-            ft.Text(label, size=11, color=fg, weight=ft.FontWeight.W_600, opacity=0.7),
-            body,
-        ], spacing=2),
+        content=content,
         bgcolor=bg,
-        border_radius=12,
-        padding=ft.padding.Padding(left=12, top=8, right=12, bottom=8),
-        expand=True,
-        clip_behavior=ft.ClipBehavior.HARD_EDGE,
+        border_radius=radius,
+        margin=margin,
+        padding=padding,
+        data=role,
     )
 
 
@@ -253,28 +324,24 @@ def send_agent_message(text: str, role: str = "user"):
 
 
 def _show_thinking_bubble():
-    """在消息列表末尾添加一个"AI 正在思考"动画气泡。"""
+    """在消息列表末尾添加一个轻量的思考状态行。"""
     global _agent_msg_list, _thinking_active
     if _thinking_active:
         return None, None
     _thinking_active = True
     colors = _agent_theme_colors()
-    fg = colors["agent_text"]
+    fg = colors["muted_text"]
 
     content_text = ft.Text(
-        "AI 正在思考", size=13, color=fg,
+        "AI 正在思考", size=FS_MD, color=fg,
         no_wrap=False, selectable=True, italic=True,
     )
     bubble = ft.Container(
-        content=ft.Column([
-            ft.Text("Agent", size=11, color=fg, weight=ft.FontWeight.W_600, opacity=0.7),
-            content_text,
-        ], spacing=2),
-        bgcolor=colors["agent_bubble"],
-        border_radius=12,
-        padding=ft.padding.Padding(left=12, top=8, right=12, bottom=8),
-        expand=True,
-        clip_behavior=ft.ClipBehavior.HARD_EDGE,
+        content=content_text,
+        bgcolor=surface(),
+        padding=ft.padding.Padding(left=SP_LG, top=SP_SM,
+                                  right=SP_LG, bottom=SP_SM),
+        data="thinking",
     )
 
     _agent_msg_list.controls.append(bubble)
@@ -301,6 +368,49 @@ def _show_thinking_bubble():
 
     threading.Thread(target=_animate, daemon=True).start()
     return content_text, stop_event
+
+
+def refresh_agent_panel_theme() -> None:
+    """主题切换后就地更新已显示消息，保留临时状态与滚动位置。"""
+    if _agent_panel_ref is None or _agent_msg_list is None:
+        return
+
+    colors = _agent_theme_colors()
+    _agent_panel_ref.bgcolor = surface()
+    _agent_panel_ref.border = ft.Border(left=ft.BorderSide(1, border_color()))
+    panel_column = _agent_panel_ref.content
+    header_row = panel_column.controls[0].content
+    header_row.controls[0].color = seed_color()
+    header_row.controls[1].color = text_primary()
+    panel_column.controls[1].color = border_color()
+    panel_column.controls[3].color = border_color()
+
+    for message in _agent_msg_list.controls:
+        role = message.data
+        if role == "agent":
+            message.bgcolor = surface()
+            body = message.content
+            if isinstance(body, ft.Markdown):
+                body.md_style_sheet = _agent_markdown_styles()
+                body.code_theme = (ft.MarkdownCodeTheme.GITHUB if not state.dark_mode
+                                   else ft.MarkdownCodeTheme.A11Y_DARK)
+            else:
+                body.color = colors["agent_text"]
+        elif role in {"user", "system"}:
+            message.bgcolor = colors["user_bubble"]
+            label, body = message.content.controls
+            label.color = colors["muted_text"]
+            if isinstance(body, ft.Markdown):
+                body.md_style_sheet = _agent_markdown_styles(FS_MD)
+                body.code_theme = (ft.MarkdownCodeTheme.GITHUB if not state.dark_mode
+                                   else ft.MarkdownCodeTheme.A11Y_DARK)
+            else:
+                body.color = colors["user_text"]
+        elif role == "thinking":
+            message.bgcolor = surface()
+            message.content.color = colors["muted_text"]
+
+    _agent_panel_ref.update()
 
 
 def _scroll_agent_to_bottom():
@@ -942,7 +1052,10 @@ def build_agent_panel() -> tuple[ft.Container, ft.GestureDetector]:
         border_radius=20,
         content_padding=ft.padding.Padding(left=16, top=10, right=16, bottom=10),
     )
-    _agent_msg_list = ft.ListView(expand=True, spacing=6, padding=ft.padding.Padding(top=4, bottom=4))
+    _agent_msg_list = ft.ListView(
+        expand=True, spacing=SP_SM,
+        padding=ft.padding.Padding(left=0, top=SP_SM, right=0, bottom=SP_SM),
+    )
 
     def _on_agent_send(e):
         if _thinking_active:

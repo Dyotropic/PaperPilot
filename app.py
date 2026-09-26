@@ -16,6 +16,7 @@ from pages.context import (
 )
 from pages.agent_panel import (
     send_agent_message, set_agent_project, build_agent_panel,
+    refresh_agent_panel_theme,
     _trigger_compare_papers,  # noqa: F401  再导出保持模块级可访问
 )
 from pages.sidebar import build_sidebar, ensure_submenu_expanded
@@ -86,6 +87,7 @@ def main(page: ft.Page):
     ctx.send_agent_message = send_agent_message
     ctx.trigger_compare_papers = _trigger_compare_papers
     ctx.set_agent_project = set_agent_project
+    ctx.refresh_agent_panel_theme = refresh_agent_panel_theme
     ctx.build_nav = build_sidebar
     ctx.switch_page = page_switcher
 

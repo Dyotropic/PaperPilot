@@ -147,8 +147,9 @@ PaperPilot 的所有 AI 功能（关键词提取、中英翻译、AI 精读、�
 llm:
   provider: deepseek       # 服务商名，见下表
   api_key: sk-xxxxxxxxxxxx  # 该服务商的 API Key（Ollama 可留空）
+  api_keys: {}              # 可选：设置页按服务商保存密钥，切换时自动回填
   base_url: ""              # 留空用内置默认地址，一般不用填
-  model: deepseek-v4-flash  # 主模型
+  model: deepseek-flash  # 主模型（DeepSeek V4.1 Flash）
   score_model: ""           # 高级：精排打分专用模型，可留空
   chat_model: ""            # 高级：对话专用模型，可留空
   reasoning_model: ""       # 高级：两步推理模型，留空=关闭两步推理
@@ -163,15 +164,15 @@ llm:
 3. **API Key**：粘贴对应服务商的密钥（见下表如何获取）。密钥以明文保存在本地 config.yaml；调用时作为凭据发送给配置的服务端。未实现 keyring/加密。
 4. 点 **「测试」** 验证连通性 → 点 **「保存」** 生效（下次 AI 调用时应用）。
 
-> 切换 Provider 后，Key 和模型都会重置为未保存状态，需要重新填写并保存。
+> 切换 Provider 时，设置页会记住当前会话里各家的 Key 和模型；保存后各家 Key 留在本机 `llm.api_keys` 中。新服务商仍需填写自己的 Key。空 Key 无法保存为远程服务商配置。
 
 **各服务商 API Key 获取方式 + 内置模型：**
 
 | Provider              | 注册/获取 Key                                             | Key 特点       | 内置默认模型                                      |
 | --------------------- | --------------------------------------------------------- | -------------- | ------------------------------------------------- |
-| **DeepSeek**          | https://platform.deepseek.com → 注册 → 「API Keys」→ 创建 | `sk-` 开头     | deepseek-v4-flash / deepseek-v4-pro               |
-| **OpenAI**            | https://platform.openai.com → 「API keys」→ 创建          | `sk-` 开头     | gpt-5.6-sol、gpt-5.6-terra、gpt-5.6-luna、gpt-5.5 |
-| **Anthropic(Claude)** | https://console.anthropic.com →「API Keys」→ 创建         | `sk-ant-` 开头 | fable-5、opus-5、opus-4.8、opus-4.7、opus-4.6     |
+| **DeepSeek**          | https://platform.deepseek.com → 注册 → 「API Keys」→ 创建 | `sk-` 开头     | deepseek-flash（V4.1 Flash）/ deepseek-v4-pro               |
+| **OpenAI**            | https://platform.openai.com → 「API keys」→ 创建          | `sk-` 开头     | gpt-6-astra、gpt-6-sol、gpt-6-luna（保留 GPT-5.6 等旧选项） |
+| **Anthropic(Claude)** | https://console.anthropic.com →「API Keys」→ 创建         | `sk-ant-` 开头 | claude-fable-5-1、claude-opus-5-5、claude-sonnet-5、claude-haiku-4-5 |
 | **智谱 GLM**          | https://open.bigmodel.cn → 注册 →「API 密钥」→ 新建       | 长字符串       | glm-5.3、glm-5.2                                  |
 | **Kimi(Moonshot)**    | https://platform.moonshot.cn → 注册 →「API 密钥」         | `sk-` 开头     | kimi-k3                                           |
 | **通义千问(Qwen)**    | https://dashscope.console.aliyun.com →「API-KEY」         | `sk-` 开头     | qwen-plus、qwen-turbo、qwen-max                   |
@@ -190,7 +191,7 @@ llm:
 | 字段                            | 含义                                                                                                                   | 怎么填                                                                                                                                                                      |
 | ------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Base URL（可选）**            | 自定义 API 服务地址。默认留空用各家内置官方地址；若你用的是第三方中转站/代理/自建网关，填它的完整地址（以 `/v1` 结尾） | 例如用某中转服务的 kimi 接口，就填 `https://你的地址.com/v1`。**普通用户留空即可**                                                                                          |
-| **精排打分模型（score_model）** | 仅「AI 精排打分」用的模型，与主模型分开                                                                                | 想省 token 可填更便宜的模型（如 `deepseek-v4-flash`）；想更高质可填旗舰。**留空 = 用主模型**                                                                                |
+| **精排打分模型（score_model）** | 仅「AI 精排打分」用的模型，与主模型分开                                                                                | 想省 token 可填更便宜的模型（如 `deepseek-flash`）；想更高质可填旗舰。**留空 = 用主模型**                                                                                |
 | **对话模型（chat_model）**      | 仅「StudyCopilot 对话」用的模型                                                                                        | 同上，可单独指定。**留空 = 用主模型**                                                                                                                                       |
 | **推理模型（reasoning_model）** | 开启「两步推理」：先让该模型深度推理，再用对话模型生成回复                                                             | ⚠️ **非空才启用两步推理**，会让每次对话多调一次 API（更慢、更费 token）。**默认留空 = 单步直答（推荐）**；只有你需要更强逻辑链时才填，且需先用「测试」确认该模型支持推理输出 |
 
@@ -366,7 +367,7 @@ python app.py
 
 **AI 对话助手（StudyCopilot）：**
 
-右侧常驻的 **StudyCopilot** 面板是一个课题上下文感知的学术对话助手，支持 **Markdown 富文本渲染**（标题、粗体、列表、表格、代码块）。
+右侧常驻的 **StudyCopilot** 面板是一个课题上下文感知的学术对话助手，支持 **Markdown 富文本渲染**（标题、粗体、列表、表格、代码块、LaTeX 公式和 Markdown 图片）。公式可使用 `$...$` / `$$...$$` 或 `\(...\)` / `\[...\]`；图片需在回复中提供 `![说明](图片地址)`。
 
 - 选择一个课题后，助手会自动加载该课题的论文信息
 - 你可以直接问："这篇论文的方法有什么亮点？" / "对比一下前两篇论文" / "这个研究方向还有哪些值得关注的子方向"

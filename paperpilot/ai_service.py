@@ -16,7 +16,7 @@ import re
 import sys
 from pathlib import Path
 
-from paperpilot.llm_client import get_client, get_task_model
+from paperpilot.llm_client import get_client, get_task_model, get_task_model_override
 
 logger = logging.getLogger(__name__)
 
@@ -279,8 +279,11 @@ class AIService:
                 )},
             ]
 
-            content = self._call_api(messages, temperature=0.3, max_tokens=600,
+            content = self._call_api(messages, temperature=0.3, max_tokens=2200,
                                      timeout=90, thinking=True)
+            if not content.strip():
+                content = self._call_api(messages, temperature=0.3, max_tokens=2200,
+                                         timeout=90, thinking=False)
             if content:
                 notes_parts.append(f"## 片段 {i + 1}/{total_windows}\n\n{content}")
 
@@ -322,15 +325,19 @@ class AIService:
         "你是一位资深学术审稿人。请基于提供的阅读笔记对论文进行结构化精读分析。\n\n"
         "严格按以下 JSON 格式输出，不要额外文字：\n"
         "{\n"
-        '  "core_contribution": "论文解决的核心问题（一句话）",\n'
-        '  "method": "关键技术路线或研究方法（2-3句）",\n'
-        '  "key_evidence": "支撑结论的核心实验或数据，引用原文具体内容",\n'
-        '  "highlights": "创新点或论文最强方面（2-3句）",\n'
-        '  "limitations": "明显局限或改进空间（1-2句）",\n'
+        '  "core_contribution": "研究问题、核心结论及其适用范围（2-4句）",\n'
+        '  "method": "技术路线、关键构造或推导步骤，以及为何这样设计（4-6句）",\n'
+        '  "key_evidence": "支撑结论的定理、实验、数据或图表；给出原文中的具体证据及其含义（3-5句）",\n'
+        '  "highlights": "相对既有工作的创新与价值，说明比较依据（2-4句）",\n'
+        '  "limitations": "论文自述或从证据可判断的局限、尚未验证的问题；区分事实与推断（2-4句）",\n'
         '  "scores": {"novelty": 7, "rigor": 6, "significance": 8}\n'
         "}\n\n"
         "scores 中 novelty/rigor/significance 各为 1-10 的整数。\n"
-        "保持客观，基于笔记而非猜测。如果笔记中某项信息缺失，标注'未提及'而非编造。"
+        "每项给出实质分析，不用套话凑句数；可用简短段落或条目，但字符串须是合法 JSON。"
+        "保留有助于理解方法的公式，使用 $...$ 或 $$...$$ 表示 LaTeX；"
+        "JSON 字符串中的 LaTeX 反斜杠必须写成两个反斜杠。"
+        "保持客观，基于笔记而非猜测。区分作者结论与自己的判断。"
+        "如果笔记中某项信息缺失，标注'未提及'而非编造。"
     )
 
     def deep_read(self, paper: dict, full_text: str | None = None) -> dict:
@@ -399,12 +406,12 @@ class AIService:
             )},
         ]
 
-        content = self._call_api(messages, temperature=0.3, max_tokens=1500,
+        content = self._call_api(messages, temperature=0.3, max_tokens=6000,
                                  timeout=120, thinking=True)
         if not content.strip():
             # Some reasoning responses consume their budget without producing
             # final content. Retry synthesis once without optional reasoning.
-            content = self._call_api(messages, temperature=0.3, max_tokens=1500,
+            content = self._call_api(messages, temperature=0.3, max_tokens=6000,
                                      timeout=120, thinking=False)
         result = self._parse_json_response(content)
 
@@ -680,7 +687,8 @@ class AIService:
         "- 引用论文时使用「标题（作者, 年份）」格式\n"
         "- 如果问题超出文献库信息范围，诚实说明，可以基于常识补充建议\n"
         "- 保持学术但友好的语气，像实验室讨论一样自然\n"
-        "- 回答简洁但有深度，避免冗长的背景铺垫\n"
+        "- 按问题复杂度展开。讨论论文时说明方法、证据、局限与推断依据，避免空泛概括\n"
+        "- 用清晰的 Markdown 标题和加粗突出关键结论，公式使用 $...$ 或 $$...$$\n"
         "- 标记块放在回复末尾，不要在标记前后添加多余文字"
     )
 
@@ -785,7 +793,7 @@ class AIService:
         messages = cm.build_api_messages(sys_prompt, paper_catalog)
 
         # 调用 LLM（支持两步推理：reasoning_model 显式配置时，先深度推理再生成）
-        reasoning_model = self._resolve_task_model("reasoning")
+        reasoning_model = get_task_model_override("reasoning")
         chat_model = self._resolve_task_model("chat")
 
         if reasoning_model:
@@ -821,7 +829,7 @@ class AIService:
         else:
             # 单步模式：直接调用 chat_model
             thinking = True if thinking_enabled else None
-            reply = self._call_api(messages, temperature=0.6, max_tokens=3000,
+            reply = self._call_api(messages, temperature=0.6, max_tokens=6000,
                                    timeout=120, thinking=thinking,
                                    model=chat_model)
 

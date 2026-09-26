@@ -35,6 +35,15 @@ def _build_llm_service_section(ctx) -> ft.Column:
     cur = _load_llm_cfg()
     cur_provider = cur.get("provider", "deepseek") or "deepseek"
     cur_model = cur.get("model", "") or PROVIDERS[cur_provider]["default_model"]
+    saved = load_config()
+    saved_keys = (saved.get("llm") or {}).get("api_keys") or {}
+    key_cache = dict(saved_keys) if isinstance(saved_keys, dict) else {}
+    key_cache.setdefault(cur_provider, cur.get("api_key", "") or "")
+    legacy_key = (saved.get("deepseek") or {}).get("api_key", "")
+    if legacy_key:
+        key_cache.setdefault("deepseek", legacy_key)
+    model_cache = {cur_provider: cur_model}
+    active_provider = cur_provider
 
     # ── 控件 ──
     provider_dd = ft.Dropdown(
@@ -42,14 +51,15 @@ def _build_llm_service_section(ctx) -> ft.Column:
                  for k, v in PROVIDERS.items()],
         value=cur_provider, expand=True,
     )
+    is_custom_model = cur_model not in dict(MODEL_CATALOG.get(cur_provider, []))
     model_dd = ft.Dropdown(
         options=_model_options_for(cur_provider),
-        value=cur_model, expand=True,
+        value=_CUSTOM if is_custom_model else cur_model, expand=True,
     )
     custom_model_field = ft.TextField(
-        label="自定义模型 ID", hint_text="如 deepseek-v4-lab / 其他模型名",
-        value=cur_model if cur_model not in dict(MODEL_CATALOG.get(cur_provider, [])) else "",
-        expand=True, visible=False,
+        label="自定义模型 ID", hint_text="请输入服务商支持的实际 API 模型 ID",
+        value=cur_model if is_custom_model else "",
+        expand=True, visible=is_custom_model,
     )
     api_key_field = ft.TextField(
         label="API Key",
@@ -73,6 +83,15 @@ def _build_llm_service_section(ctx) -> ft.Column:
         label="推理模型（两步推理，可选）", hint_text="留空=单步直答；填写才启用先推理再生成",
         value=cur.get("reasoning_model", "") or "", expand=True,
     )
+    advanced_fields = {
+        "base_url": base_url_field,
+        "score_model": score_model_field,
+        "chat_model": chat_model_field,
+        "reasoning_model": reasoning_model_field,
+    }
+    advanced_cache = {
+        cur_provider: {name: field.value or "" for name, field in advanced_fields.items()}
+    }
     key_status = ft.Text("", size=13)
     test_status = ft.Text("", size=13)
     save_status = ft.Text("", size=13)
@@ -87,15 +106,35 @@ def _build_llm_service_section(ctx) -> ft.Column:
         key_status.color = ft.Colors.ORANGE
 
     def on_change_provider(e):
+        nonlocal active_provider
+        key_cache[active_provider] = (api_key_field.value or "").strip()
+        current_model = (custom_model_field.value or "").strip() if model_dd.value == _CUSTOM \
+            else (model_dd.value or "").strip()
+        if current_model:
+            model_cache[active_provider] = current_model
+        advanced_cache[active_provider] = {
+            name: field.value or "" for name, field in advanced_fields.items()
+        }
         new_p = provider_dd.value or "deepseek"
+        active_provider = new_p
         model_dd.options = _model_options_for(new_p)
-        model_dd.value = PROVIDERS[new_p]["default_model"]
+        next_model = model_cache.get(new_p) or PROVIDERS[new_p]["default_model"]
+        next_is_custom = next_model not in dict(MODEL_CATALOG.get(new_p, []))
+        model_dd.value = _CUSTOM if next_is_custom else next_model
         api_key_field.hint_text = PROVIDERS[new_p]["key_hint"]
-        custom_model_field.visible = False
-        custom_model_field.value = ""
-        # Provider 切换后重置为未保存态
-        api_key_field.value = ""
+        custom_model_field.visible = next_is_custom
+        custom_model_field.value = next_model if next_is_custom else ""
+        api_key_field.value = key_cache.get(new_p, "")
+        for name, field in advanced_fields.items():
+            field.value = advanced_cache.get(new_p, {}).get(name, "")
+            field.update()
+        key_status.value = (f"已配置：{PROVIDERS[new_p]['label']}"
+                            if api_key_field.value or new_p == "ollama"
+                            else "该服务商尚未配置 API Key")
+        key_status.color = (ft.Colors.GREEN if api_key_field.value or new_p == "ollama"
+                            else ft.Colors.ORANGE)
         model_dd.update(); api_key_field.update(); custom_model_field.update()
+        key_status.update()
 
     provider_dd.on_select = on_change_provider  # Flet 0.85 新版 Dropdown 事件为 on_select（无 on_change）
 
@@ -114,6 +153,11 @@ def _build_llm_service_section(ctx) -> ft.Column:
         # 用当前控件值（未保存）构造配置测试
         p = provider_dd.value or "deepseek"
         key = (api_key_field.value or "").strip()
+        if p != "ollama" and not key:
+            test_status.value = "请先填写该服务商的 API Key"
+            test_status.color = ft.Colors.ERROR
+            test_status.update()
+            return
         model = custom_model_field.value.strip() if model_dd.value == _CUSTOM \
             else (model_dd.value or "").strip()
 
@@ -154,10 +198,18 @@ def _build_llm_service_section(ctx) -> ft.Column:
             save_status.color = ft.Colors.ERROR
             save_status.update()
             return
+        key = (api_key_field.value or "").strip()
+        if p != "ollama" and not key:
+            save_status.value = "该服务商的 API Key 为空，未保存；原配置和密钥保持不变"
+            save_status.color = ft.Colors.ERROR
+            save_status.update()
+            return
+        key_cache[p] = key
         updates = {
             "llm": {
                 "provider": p,
-                "api_key": (api_key_field.value or "").strip(),
+                "api_key": key,
+                "api_keys": dict(key_cache),
                 "base_url": (base_url_field.value or "").strip(),
                 "model": model,
                 "score_model": (score_model_field.value or "").strip(),
@@ -291,6 +343,8 @@ def build_settings_page(ctx):
     def on_select_theme(name):
         ctx.state.theme_name = name
         apply_theme(ctx.page, name, ctx.state.dark_mode)
+        if ctx.refresh_agent_panel_theme:
+            ctx.refresh_agent_panel_theme()
         do_save(updates={"ui": {"theme": name, "dark_mode": ctx.state.dark_mode}})
         # 就地更新主题按钮边框（避免重建页面导致滚回顶部）
         for n, btn in theme_buttons.items():
@@ -305,6 +359,8 @@ def build_settings_page(ctx):
     def on_toggle_dark(e):
         ctx.state.dark_mode = e.control.value
         apply_theme(ctx.page, ctx.state.theme_name, ctx.state.dark_mode)
+        if ctx.refresh_agent_panel_theme:
+            ctx.refresh_agent_panel_theme()
         do_save(updates={"ui": {"theme": ctx.state.theme_name, "dark_mode": ctx.state.dark_mode}})
         # 按钮边框不随夜间模式变化，只重建导航栏
         ctx.top_nav_ref.content = ctx.build_nav(2)
