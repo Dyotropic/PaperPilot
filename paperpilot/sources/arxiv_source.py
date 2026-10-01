@@ -5,6 +5,7 @@ arXiv API 频控保守取 5s/次；arxiv 库底层 requests.Session 无默认超
 """
 
 import time
+from paperpilot.agent_runtime import checkpoint, current_run, interruptible_wait
 
 import arxiv
 
@@ -23,7 +24,8 @@ def _wait_arxiv_rate_limit():
     if elapsed < _ARXIV_RATE_LIMIT:
         wait = _ARXIV_RATE_LIMIT - elapsed
         print(f"[arXiv] 频控等待 {wait:.1f}s...", flush=True)
-        time.sleep(wait)
+        interruptible_wait(wait)
+    checkpoint()
     _ARXIV_LAST_CALL = time.time()
 
 
@@ -77,13 +79,19 @@ def _fetch_arxiv_filtered(query: str, max_results: int, filters: SearchFilters,
     )
     client = arxiv.Client(page_size=page_size, num_retries=1, delay_seconds=3)
     original_get = client._session.get
-    client._session.get = lambda *a, **kw: original_get(  # type: ignore[method-assign]
-        *a, **({**kw, "timeout": timeout} if "timeout" not in kw else kw))
+    def guarded_get(*args, **kwargs):
+        checkpoint()
+        kwargs.setdefault("timeout", timeout)
+        response = original_get(*args, **kwargs)
+        checkpoint()
+        return response
+    client._session.get = guarded_get
     papers: list[dict] = []
     seen_ids: set[str] = set()
     try:
         _wait_arxiv_rate_limit()
         for result in client.results(search):
+            checkpoint()
             paper = _parse_arxiv_result(result)
             identity = str(paper.get("url") or paper.get("doi") or paper.get("title") or "").casefold()
             if identity in seen_ids:
@@ -138,6 +146,14 @@ def _fetch_arxiv_raw(query: str, max_results: int = 30,
     print(f"[arXiv] 开始抓取: query={query[:80]}... max={max_results}", flush=True)
 
     client = arxiv.Client(num_retries=2, delay_seconds=3)
+    original_get = client._session.get
+    def guarded_get(*args, **kwargs):
+        checkpoint()
+        kwargs.setdefault("timeout", request_timeout or 45)
+        response = original_get(*args, **kwargs)
+        checkpoint()
+        return response
+    client._session.get = guarded_get
     search = arxiv.Search(
         query=query,
         max_results=max_results,
@@ -147,31 +163,36 @@ def _fetch_arxiv_raw(query: str, max_results: int = 30,
     last_rate_status = 0  # 最后一次限流/被拒状态码（429/403），循环耗尽后用于抛异常
 
     for attempt in range(2):
+        checkpoint()
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         try:
-            future = executor.submit(
-                lambda: list(client.results(search))
-            )
-            results = future.result(timeout=45)
+            if current_run():
+                # Keep the cancellation context in this worker and bound its socket.
+                results = list(client.results(search))
+            else:
+                future = executor.submit(lambda: list(client.results(search)))
+                results = future.result(timeout=45)
             for r in results:
                 papers.append(_parse_arxiv_result(r))
             break
         except concurrent.futures.TimeoutError:
             print(f"[arXiv] 超时(45s) attempt {attempt+1}/2", flush=True)
             if attempt < 1:
-                time.sleep(3)
+                interruptible_wait(3)
         except Exception as e:
             msg = str(e)
             if "429" in msg or "403" in msg:
                 last_rate_status = 429 if "429" in msg else 403
                 wait = (2 ** attempt) * 5 + random.uniform(0, 3)
                 print(f"[arXiv] 限流(attempt {attempt+1}/2)，等待 {wait:.0f}s...", flush=True)
-                time.sleep(wait)
+                interruptible_wait(wait)
             else:
                 print(f"[arXiv] 错误: {e}", flush=True)
                 break
         finally:
             executor.shutdown(wait=False)
+            if current_run() and current_run().token.cancelled:
+                client._session.close()
     else:
         print(f"[arXiv] 请求超时/失败，返回空结果", flush=True)
 
@@ -179,6 +200,8 @@ def _fetch_arxiv_raw(query: str, max_results: int = 30,
     if not papers and last_rate_status:
         raise SourceRateLimited("arxiv", last_rate_status)
 
+    if current_run():
+        client._session.close()
     total = max(len(papers), 1)
     for i, p in enumerate(papers):
         p["api_score"] = 1.0 - (i / total)

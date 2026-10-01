@@ -26,6 +26,7 @@
 """
 
 import os
+from paperpilot.agent_runtime import checkpoint
 import re
 from difflib import SequenceMatcher
 
@@ -198,6 +199,7 @@ def fetch_with_cascade(
         unique_strategies = []
         seen_queries: set[str] = set()
         for level, query in strategies:
+            checkpoint()
             if query and query not in seen_queries:
                 seen_queries.add(query)
                 unique_strategies.append((level, query))
@@ -206,6 +208,7 @@ def fetch_with_cascade(
     filtered_seen: dict[str, dict] = {}
     last_level = -1
     for level, query in strategies:
+        checkpoint()
         if not query:
             continue
         try:
@@ -294,6 +297,7 @@ def fetch_multi_primary(
     merged_regular = secondary_kw + regular_kw
 
     for pk in primary_kw:
+        checkpoint()
         papers, level = fetch_with_cascade(
             primary_kw=[pk],
             secondary_kw=[],

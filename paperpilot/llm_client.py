@@ -32,10 +32,13 @@ thinking 参数三态归一（跨家翻译）：
 """
 
 import logging
+from time import perf_counter
 from dataclasses import dataclass
 from typing import Iterator
 
 from paperpilot.config import load_config
+from paperpilot.llm_usage import TokenUsage, normalize_usage, record_request, usage_scope
+from paperpilot.agent_runtime import current_run, checkpoint, publish_reply, OperationCancelled
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +49,12 @@ class ChatResult:
     （DeepSeek reasoning_content / Anthropic thinking block），无则为空串。"""
     content: str = ""
     reasoning: str = ""
+    usage: TokenUsage | None = None
+    provider: str = ""
+    model: str = ""
+    request_id: str | None = None
+    elapsed_ms: int | None = None
+    first_token_ms: int | None = None
 
 
 # ── Provider 注册表 ──
@@ -214,9 +223,12 @@ def get_client(task: str | None = None) -> "LLMClient | None":
         return None
 
     if provider == "anthropic":
-        return AnthropicClient(api_key=api_key, model=model, base_url=base_url)
-    return OpenAICompatClient(provider=provider, base_url=base_url,
-                              api_key=api_key, model=model)
+        client = AnthropicClient(api_key=api_key, model=model, base_url=base_url)
+    else:
+        client = OpenAICompatClient(provider=provider, base_url=base_url,
+                                    api_key=api_key, model=model)
+    client.task = task or "other"
+    return client
 
 
 def get_task_model(task: str) -> str:
@@ -275,6 +287,16 @@ class LLMClient:
 
     def __init__(self, model: str):
         self.model = model
+        self.task = "other"
+        self.last_result = ChatResult()
+
+    def _record(self, result, messages, use_model, status="ok", *, thinking=None):
+        result.provider = getattr(self, "provider", "")
+        result.model = result.model if isinstance(result.model, str) and result.model else use_model
+        result.request_id = result.request_id if isinstance(result.request_id, str) else None
+        self.last_result = result
+        record_request(result, messages, task=self.task, status=status,
+                       provider=result.provider, model=result.model, thinking=thinking)
 
     @property
     def is_available(self) -> bool:
@@ -287,17 +309,36 @@ class LLMClient:
         """非流式调用。失败重试 1 次（仅网络/5xx），最终失败返回空 ChatResult。"""
         use_model = model or self.model
         for attempt in (1, 2):
+            started = perf_counter()
+            self.last_result = ChatResult()
             try:
-                return self._do_chat(messages, temperature, max_tokens,
-                                     timeout, use_model, thinking)
+                checkpoint()
+                run = current_run()
+                if run:
+                    result = self._do_cancellable(messages, temperature, max_tokens,
+                                                  timeout, use_model, thinking, run.token)
+                else:
+                    result = self._do_chat(messages, temperature, max_tokens,
+                                           timeout, use_model, thinking)
+                checkpoint()
+                result.elapsed_ms = round((perf_counter() - started) * 1000)
+                self._record(result, messages, use_model, thinking=thinking)
+                return result
+            except OperationCancelled as exc:
+                result = exc.result or self.last_result
+                result.elapsed_ms = round((perf_counter() - started) * 1000)
+                self._record(result, messages, use_model, "cancelled", thinking=thinking)
+                raise
             except Exception as e:
+                failed = ChatResult(elapsed_ms=round((perf_counter() - started) * 1000))
+                self._record(failed, messages, use_model, "error", thinking=thinking)
                 if attempt <= retries and _is_retryable(e):
                     logger.warning("LLM call failed (attempt %d, %s): %s",
                                    attempt, type(e).__name__, e)
                     continue
                 logger.warning("LLM call failed (%s): %s", type(e).__name__, e)
                 break
-        return ChatResult()
+        return self.last_result
 
     def chat_stream(self, messages: list[dict], temperature: float = 0.3,
                     max_tokens: int = 2000, timeout: int = 120,
@@ -305,23 +346,59 @@ class LLMClient:
                     thinking: bool | None = None) -> Iterator[str]:
         """流式调用，yield content delta。失败抛异常（调用方自行降级）。"""
         use_model = model or self.model
-        yield from self._do_stream(messages, temperature, max_tokens,
-                                   timeout, use_model, thinking)
+        started = perf_counter()
+        self.last_result = ChatResult()
+        status, first_token, parts = "ok", None, []
+        try:
+            for delta in self._do_stream(messages, temperature, max_tokens,
+                                         timeout, use_model, thinking):
+                if first_token is None:
+                    first_token = round((perf_counter() - started) * 1000)
+                parts.append(delta)
+                yield delta
+        except GeneratorExit:
+            status = "cancelled"
+            raise
+        except Exception:
+            status = "error"
+            raise
+        finally:
+            result = self.last_result
+            result.content = "".join(parts)
+            result.elapsed_ms = round((perf_counter() - started) * 1000)
+            result.first_token_ms = first_token
+            self._record(result, messages, use_model, status, thinking=thinking)
 
     def test_connection(self) -> tuple[bool, str]:
         """轻量连通性测试。Returns: (ok, message)。失败信息含具体异常。"""
+        messages = [{"role": "user", "content": "回复 OK 两个字母即可"}]
+        started = perf_counter()
         try:
             result = self._do_chat(
-                [{"role": "user", "content": "回复 OK 两个字母即可"}],
+                messages,
                 0.0, 512, 30, self.model, False,
             )
+            result.elapsed_ms = round((perf_counter() - started) * 1000)
+            with usage_scope(task="connection_test"):
+                self._record(result, messages, self.model, thinking=False)
             if result.content:
                 return True, f"连接成功（模型 {self.model}）"
             return False, "API 返回空内容，请检查 Key 与模型名"
         except Exception as e:
+            with usage_scope(task="connection_test"):
+                self._record(ChatResult(elapsed_ms=round((perf_counter() - started) * 1000)),
+                             messages, self.model, "error", thinking=False)
             return False, f"连接失败：{type(e).__name__}: {e}"
 
     # 子类实现
+    def _do_cancellable(self, messages, temperature, max_tokens, timeout, model, thinking, token):
+        # Compatibility for custom clients; built-in providers override transport.
+        token.check()
+        self.last_result = self._do_chat(messages, temperature, max_tokens, timeout, model, thinking)
+        token.check()
+        publish_reply(self.last_result.content)
+        return self.last_result
+
     def _do_chat(self, messages, temperature, max_tokens, timeout,
                  model, thinking) -> ChatResult:
         raise NotImplementedError
@@ -353,7 +430,8 @@ class OpenAICompatClient(LLMClient):
         return self._client
 
     def _request_kwargs(self, messages, model, max_tokens, thinking) -> dict:
-        kwargs = {"messages": messages, "model": model}
+        fields = ("role", "content", "name", "tool_calls", "tool_call_id", "reasoning_content", "prefix")
+        kwargs = {"messages": [{k: m[k] for k in fields if k in m} for m in messages], "model": model}
         if self.provider == "openai":
             kwargs["max_completion_tokens"] = max_tokens
             if model in ("gpt-6-astra", "gpt-6-sol", "gpt-6-luna"):
@@ -382,15 +460,83 @@ class OpenAICompatClient(LLMClient):
             msg = resp.choices[0].message
             content = msg.content or ""
             reasoning = getattr(msg, "reasoning_content", "") or ""
-        return ChatResult(content=content, reasoning=reasoning)
+        return ChatResult(content=content, reasoning=reasoning,
+                          usage=normalize_usage(getattr(resp, "usage", None), self.provider),
+                          model=getattr(resp, "model", None) or model,
+                          request_id=getattr(resp, "id", None))
+
+    def _do_cancellable(self, messages, temperature, max_tokens, timeout, model, thinking, token):
+        import openai
+        from contextlib import aclosing
+        from openai.types.chat import ChatCompletionChunk
+        class ManagedChatStream(openai.AsyncStream[ChatCompletionChunk]):
+            """Close SSE iterators in order before the worker's event loop exits.
+
+            The installed SDK closes the response at [DONE], leaving its nested
+            generators for concurrent loop shutdown. Keep its decoder and typed
+            parsing, but explicitly own that iterator lifetime.
+            """
+            def _iter_events(self):
+                self._managed_events = self._read_events()
+                return self._managed_events
+
+            async def _read_events(self):
+                async with aclosing(self.response.aiter_bytes()) as chunks:
+                    async with aclosing(self._decoder.aiter_bytes(chunks)) as events:
+                        async for event in events:
+                            yield event
+
+            async def __stream__(self):
+                async with aclosing(super().__stream__()) as chunks:
+                    try:
+                        async for chunk in chunks:
+                            yield chunk
+                    finally:
+                        events = getattr(self, "_managed_events", None)
+                        if events is not None:
+                            await events.aclose()
+        kwargs = self._request_kwargs(messages, model, max_tokens, thinking)
+        kwargs["stream"] = True
+        if self.provider in {"openai", "deepseek"}:
+            kwargs["stream_options"] = {"include_usage": True}
+        result = self.last_result = ChatResult(model=model)
+        async def request():
+            async with openai.AsyncOpenAI(api_key=self.api_key or "ollama",
+                    base_url=self.base_url or None, timeout=timeout, max_retries=0) as client:
+                async with client.chat.completions.with_streaming_response.create(**kwargs) as response:
+                    stream = await response.parse(to=ManagedChatStream)
+                    async for chunk in stream:
+                        result.request_id = getattr(chunk, "id", None) or result.request_id
+                        result.model = getattr(chunk, "model", None) or result.model
+                        usage = normalize_usage(getattr(chunk, "usage", None), self.provider)
+                        if usage is not None:
+                            result.usage = usage
+                        if chunk.choices:
+                            delta = chunk.choices[0].delta
+                            result.reasoning += getattr(delta, "reasoning_content", "") or ""
+                            if delta.content:
+                                result.content += delta.content
+                                publish_reply(result.content)
+            return result
+        try:
+            return token.run_async(request)
+        except OperationCancelled:
+            raise OperationCancelled(result) from None
 
     def _do_stream(self, messages, temperature, max_tokens, timeout,
                    model, thinking) -> Iterator[str]:
         kwargs = self._request_kwargs(messages, model, max_tokens, thinking)
         kwargs["stream"] = True
+        if self.provider in {"openai", "deepseek"}:
+            kwargs["stream_options"] = {"include_usage": True}
         client = self._get_client(timeout)
         resp = client.chat.completions.create(**kwargs)
         for chunk in resp:
+            usage = normalize_usage(getattr(chunk, "usage", None), self.provider)
+            if usage is not None:
+                self.last_result.usage = usage
+            self.last_result.model = getattr(chunk, "model", None) or model
+            self.last_result.request_id = getattr(chunk, "id", None)
             if not chunk.choices:
                 continue
             delta = chunk.choices[0].delta
@@ -412,6 +558,7 @@ class AnthropicClient(LLMClient):
 
     def __init__(self, api_key: str, model: str, base_url: str = ""):
         super().__init__(model)
+        self.provider = "anthropic"
         self.api_key = api_key
         self.base_url = base_url
         self._client = None
@@ -438,6 +585,37 @@ class AnthropicClient(LLMClient):
         if not rest:
             rest = [{"role": "user", "content": ""}]
         return "\n\n".join(p for p in system_parts if p), rest
+
+    def _do_cancellable(self, messages, temperature, max_tokens, timeout, model, thinking, token):
+        import anthropic
+        system, rest = self._split_messages(messages)
+        tkw, use_max = self._thinking_kwargs(thinking, max_tokens, model)
+        kwargs = dict(model=model, messages=rest, max_tokens=use_max, **tkw)
+        if system:
+            kwargs["system"] = system
+        options = dict(api_key=self.api_key, timeout=timeout, max_retries=0)
+        if self.base_url:
+            options["base_url"] = self.base_url
+        result = self.last_result = ChatResult(model=model)
+        async def request():
+            async with anthropic.AsyncAnthropic(**options) as client:
+                async with client.messages.stream(**kwargs) as stream:
+                    async for event in stream:
+                        if event.type == "content_block_delta":
+                            if event.delta.type == "text_delta":
+                                result.content += event.delta.text
+                                publish_reply(result.content)
+                            elif event.delta.type == "thinking_delta":
+                                result.reasoning += event.delta.thinking
+                    final = await stream.get_final_message()
+                    result.request_id, result.model = final.id, final.model
+                    result.usage = normalize_usage(final.usage, "anthropic")
+            return result
+        try:
+            return token.run_async(request)
+        except OperationCancelled:
+            # Without message_stop the final billing usage is unknown, not zero.
+            raise OperationCancelled(result) from None
 
     def _thinking_kwargs(self, thinking: bool | None,
                          max_tokens: int, model: str | None = None) -> tuple[dict, int]:
@@ -488,7 +666,10 @@ class AnthropicClient(LLMClient):
                 reasoning_parts.append(getattr(block, "thinking", "")
                                        or getattr(block, "text", ""))
         return ChatResult(content="".join(content_parts),
-                          reasoning="\n".join(p for p in reasoning_parts if p))
+                          reasoning="\n".join(p for p in reasoning_parts if p),
+                          usage=normalize_usage(getattr(resp, "usage", None), "anthropic"),
+                          model=getattr(resp, "model", None) or model,
+                          request_id=getattr(resp, "id", None))
 
     def _do_stream(self, messages, temperature, max_tokens, timeout,
                    model, thinking) -> Iterator[str]:
@@ -498,7 +679,6 @@ class AnthropicClient(LLMClient):
             "model": model,
             "messages": rest,
             "max_tokens": use_max,
-            "stream": True,
             **tkw,
         }
         if system:
@@ -507,3 +687,7 @@ class AnthropicClient(LLMClient):
         with client.messages.stream(**kwargs) as stream:
             for text in stream.text_stream:
                 yield text
+            final = stream.get_final_message()
+            self.last_result.usage = normalize_usage(getattr(final, "usage", None), "anthropic")
+            self.last_result.model = getattr(final, "model", None) or model
+            self.last_result.request_id = getattr(final, "id", None)

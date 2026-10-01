@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import threading
+import time
 
 import flet as ft
 
@@ -35,6 +36,8 @@ from paperpilot.ai_service import AIService
 from paperpilot import library
 from paperpilot import repo_manager, downloader
 from paperpilot.keywords import extract_all_keywords
+from paperpilot.llm_usage import UsageStore
+from paperpilot.agent_runtime import AgentRun, OperationCancelled, run_scope, checkpoint
 
 # ── 模块级状态 ──
 _agent_msg_list: ft.ListView | None = None
@@ -44,7 +47,55 @@ ctx.ai_service = _ai_service
 _agent_project_id: int | None = None
 _agent_project_name: str = ""
 _agent_topic_desc: str = ""
+_agent_session_id: str | None = None
+_session_selector: ft.Dropdown | None = None
+_usage_text: ft.Text | None = None
 _thinking_active: bool = False
+_active_run: AgentRun | None = None
+_agent_send_button: ft.IconButton | None = None
+
+
+def _refresh_run_button():
+    if _agent_send_button is None:
+        return
+    busy = _active_run is not None
+    stopping = busy and _active_run.token.cancelled
+    _agent_send_button.icon = ft.Icons.STOP if busy else ft.Icons.ARROW_UPWARD
+    _agent_send_button.tooltip = ("正在停止，等待当前步骤退出" if stopping else
+                                   "停止当前轮（保留记录）" if busy else "发送消息（Enter）")
+    _agent_send_button.disabled = bool(stopping)
+    try:
+        _agent_send_button.update()
+    except RuntimeError:
+        pass
+
+
+def begin_agent_run(cm, pid, goal, operation="chat", on_partial=None):
+    """Shared owner for chat and library tasks; finish only after all child jobs."""
+    global _active_run, _thinking_active
+    if _active_run is not None:
+        return None
+    def done(run, note):
+        global _active_run, _thinking_active
+        if _active_run is not run:
+            return
+        _active_run = None
+        _thinking_active = False
+        if note and run.identity == (_agent_project_id or 0, _agent_session_id):
+            send_agent_message(note, role="agent")
+        _refresh_run_button()
+        refresh_agent_usage()
+    _active_run = AgentRun(cm, pid, goal, operation, on_done=done, on_partial=on_partial)
+    _thinking_active = True
+    _refresh_run_button()
+    return _active_run
+
+
+def stop_agent_run(e=None):
+    run = _active_run
+    if run:
+        run.stop()
+        _refresh_run_button()
 
 # ── Agent 面板拖拽拉伸 ──
 _AGENT_PANEL_MIN = 320
@@ -383,7 +434,14 @@ def refresh_agent_panel_theme() -> None:
     header_row.controls[0].color = seed_color()
     header_row.controls[1].color = text_primary()
     panel_column.controls[1].color = border_color()
-    panel_column.controls[3].color = border_color()
+    for control in panel_column.controls:
+        if isinstance(control, ft.Divider):
+            control.color = border_color()
+    if _session_selector is not None:
+        _session_selector.color = text_primary()
+        _session_selector.border_color = border_color()
+    if _usage_text is not None:
+        _usage_text.color = text_secondary()
 
     for message in _agent_msg_list.controls:
         role = message.data
@@ -422,16 +480,26 @@ def _scroll_agent_to_bottom():
     async def _do():
         await asyncio.sleep(0.3)
         if _agent_msg_list is not None:
-            await _agent_msg_list.scroll_to(offset=-1, duration=0)
+            try:
+                await _agent_msg_list.scroll_to(offset=-1, duration=0)
+            except RuntimeError:
+                pass  # A delayed scroll can outlive the desktop session.
 
     page.run_task(_do)
 
 
 def _trigger_agent_chat(message: str, papers: list | None = None,
                         thinking_enabled: bool = False,
-                        display_message: str = ""):
+                        display_message: str = "", *, include_library_context: bool = False,
+                        operation: str = "chat"):
     """统一的 Agent 对话入口：思考动画 + 后台调用 chat() + 原地显示回复。"""
     global _agent_project_id, _agent_project_name, _agent_topic_desc, _ai_service
+    if _thinking_active:
+        return
+    if _agent_session_id is None:
+        load_agent_conversation()
+    identity = (_agent_project_id or 0, _agent_session_id)
+    project_name, topic_desc = _agent_project_name or "通用", _agent_topic_desc
 
     # 如果用户已手动选了论文，自动作为上下文
     if not papers and ctx.agent_paper_selection:
@@ -443,7 +511,9 @@ def _trigger_agent_chat(message: str, papers: list | None = None,
         try:
             _proj_papers = library.get_project_papers(_agent_project_id)
         except Exception:
-            pass
+            if include_library_context:
+                send_agent_message("无法读取课题文献库，未发起分析；请重试。", role="system")
+                return
 
     # 发送后清空选中状态
     ctx.agent_paper_selection.clear()
@@ -473,24 +543,69 @@ def _trigger_agent_chat(message: str, papers: list | None = None,
     content_text, thinking_stop = _show_thinking_bubble()
     if thinking_stop is None:
         return  # 已有思考动画在进行中
+    thinking_bubble = _agent_msg_list.controls[-1] if _agent_msg_list else None
+
+    last_partial_update = 0.0
+    def show_partial(text):
+        nonlocal last_partial_update
+        if identity != (_agent_project_id or 0, _agent_session_id):
+            return
+        now = time.monotonic()
+        if now - last_partial_update < 0.1:
+            return
+        last_partial_update = now
+        thinking_stop.set()
+        # Do not expose a half-written action payload as executable UI.
+        content_text.value = re.split(r"\[(?:ACTION:|PROJECT_UPDATE)", text, maxsplit=1)[0]
+        try:
+            content_text.update()
+        except RuntimeError:
+            pass
+    cm = _ai_service.get_conversation(identity[0], project_name, topic_desc, identity[1])
+    run = begin_agent_run(cm, identity[0], display_message or message, operation, show_partial)
+    if run is None:
+        thinking_stop.set()
+        return
+
+    def remove_thinking():
+        thinking_stop.set()
+        if identity == (_agent_project_id or 0, _agent_session_id) and _agent_msg_list:
+            if thinking_bubble in _agent_msg_list.controls:
+                _agent_msg_list.controls.remove(thinking_bubble)
+                try:
+                    _agent_msg_list.update()
+                except RuntimeError:
+                    pass
+
+    def _save_error(text):
+        try:
+            _ai_service.log_message(identity[0], project_name, "assistant",
+                                    text, topic_desc, session_id=identity[1])
+        except (ValueError, OSError):
+            logger.warning("Agent error was not saved: the original chat is unavailable")
 
     def _bg_chat():
-        global _thinking_active
         try:
-            result = _ai_service.chat(
-                project_id=_agent_project_id or 0,
-                project_name=_agent_project_name or "通用",
-                message=message,
-                topic_desc=_agent_topic_desc,
-                papers=papers,
-                project_papers=_proj_papers,
-                thinking_enabled=thinking_enabled,
-                display_message=display_message,
-            )
+            with run_scope(run):
+                run.phase("模型回复")
+                result = _ai_service.chat(
+                    project_id=identity[0],
+                    project_name=project_name,
+                    message=message,
+                    topic_desc=topic_desc,
+                    papers=papers,
+                    project_papers=_proj_papers,
+                    thinking_enabled=thinking_enabled,
+                    display_message=display_message,
+                    session_id=identity[1],
+                    include_library_context=include_library_context,
+                    operation=operation,
+                )
+                checkpoint()
             reply = result.get("reply", "抱歉，AI 服务暂时无法回复。")
 
-            # DEBUG: 打印 AI 原始回复，检查是否包含 ACTION 标签
-            logger.info("[Agent] raw reply (%d chars): ...%s", len(reply), reply[-300:] if len(reply) > 300 else reply)
+            # Diagnostic logging contains lengths rather than conversation text.
+            logger.info("[Agent] reply length: %d", len(reply))
 
             # 解析 [ACTION:xxx] 标记，提取动作并在主线程执行
             reply, actions = _parse_agent_actions(reply)
@@ -498,23 +613,26 @@ def _trigger_agent_chat(message: str, papers: list | None = None,
 
             # 检测课题修改提案 [PROJECT_UPDATE]...[/PROJECT_UPDATE]
             proposal = _parse_project_update(reply)
-            if proposal and _agent_project_id:
+            if proposal and identity[0]:
                 new_name, new_desc = proposal
                 reply = re.sub(r'\s*\[PROJECT_UPDATE\].*?\[/PROJECT_UPDATE\]', '', reply, flags=re.DOTALL).strip()
 
             thinking_stop.set()
-            _thinking_active = False
-            if _agent_msg_list and _agent_msg_list.controls:
+            run.token.check()
+            if identity != (_agent_project_id or 0, _agent_session_id):
+                return  # The backend already persisted the response in its original chat.
+            if _agent_msg_list and thinking_bubble in _agent_msg_list.controls:
                 try:
-                    _agent_msg_list.controls.pop()
+                    _agent_msg_list.controls.remove(thinking_bubble)
                     _agent_msg_list.update()
                 except RuntimeError:
                     pass
-            send_agent_message(reply, role="agent")
+            send_agent_message(reply or "AI 未返回内容，请查看用量详情或稍后重试。", role="agent")
 
             # 弹出确认对话框
-            if proposal and _agent_project_id:
-                _show_project_update_dialog(_agent_project_id, new_name, new_desc)
+            if proposal and identity[0]:
+                run.token.check()
+                _show_project_update_dialog(identity[0], new_name, new_desc)
 
             # AI 没输出 ACTION 标签时，根据用户消息意图自动兜底
             if not actions:
@@ -524,34 +642,55 @@ def _trigger_agent_chat(message: str, papers: list | None = None,
 
             # 在主线程执行 Agent 动作（search 是异步的，后续动作需等搜索完成）
             if actions and ctx.page:
+                run.plan(actions)
+                run.reserve()  # Own the scheduled callback before the chat job exits.
                 async def _run_actions():
-                    has_search = any(a["type"] == "search" for a in actions)
-                    if has_search and len(actions) > 1:
-                        _dispatch_agent_action(actions[0])
-                        remaining = [a["type"] for a in actions[1:]]
-                        send_agent_message(
-                            f"检索完成后请再次告诉我执行后续操作（{', '.join(remaining)}）。",
-                            role="system",
-                        )
-                    else:
-                        for action in actions:
-                            _dispatch_agent_action(action)
-                ctx.page.run_task(_run_actions)
-
-        except Exception as ex:
-            thinking_stop.set()
-            _thinking_active = False
-            if _agent_msg_list and _agent_msg_list.controls:
+                    try:
+                        with run_scope(run):
+                            if identity != (_agent_project_id or 0, _agent_session_id):
+                                return
+                            has_search = any(a["type"] == "search" for a in actions)
+                            if has_search and len(actions) > 1:
+                                _dispatch_agent_action(actions[0], run)
+                                remaining = [a["type"] for a in actions[1:]]
+                                send_agent_message(
+                                    f"检索完成后请再次告诉我执行后续操作（{', '.join(remaining)}）。", role="system")
+                            else:
+                                for action in actions:
+                                    checkpoint()
+                                    _dispatch_agent_action(action, run)
+                    except OperationCancelled:
+                        pass
+                    except Exception:
+                        run.fail()
+                        logger.exception("Agent action failed")
+                    finally:
+                        run.finish()
                 try:
-                    _agent_msg_list.controls.pop()
+                    ctx.page.run_task(_run_actions)
+                except Exception:
+                    run.finish()
+                    raise
+
+        except OperationCancelled:
+            pass
+        except Exception as ex:
+            run.fail()
+            thinking_stop.set()
+            if identity != (_agent_project_id or 0, _agent_session_id):
+                _save_error(f"出错了：{ex}")
+                return
+            if _agent_msg_list and thinking_bubble in _agent_msg_list.controls:
+                try:
+                    _agent_msg_list.controls.remove(thinking_bubble)
                     _agent_msg_list.update()
                 except RuntimeError:
                     pass
             send_agent_message(f"出错了：{ex}", role="agent")
-            if _agent_project_id is not None:
-                _ai_service.log_message(
-                    _agent_project_id, _agent_project_name or "通用",
-                    "assistant", f"出错了：{ex}", _agent_topic_desc)
+            _save_error(f"出错了：{ex}")
+        finally:
+            remove_thinking()
+            run.finish()
 
     threading.Thread(target=_bg_chat, daemon=True).start()
 
@@ -559,7 +698,7 @@ def _trigger_agent_chat(message: str, papers: list | None = None,
 def _trigger_compare_papers(papers: list, source: str = "search"):
     """在 Agent 面板发起论文对比分析。"""
     n = len(papers)
-    if n < 2:
+    if n < 2 or _thinking_active:
         return
     source_label = "检索结果" if source == "search" else "文献库"
     visible_msg = f"对比分析 {n} 篇论文（来源：{source_label}）"
@@ -586,18 +725,25 @@ def clear_agent_messages():
 
 def load_agent_conversation():
     """从磁盘加载当前课题的对话历史到面板。"""
-    global _agent_msg_list, _agent_project_id, _agent_project_name, _agent_topic_desc, _ai_service
-    if _agent_msg_list is None or _agent_project_id is None:
+    global _agent_session_id
+    pid, name = _agent_project_id or 0, _agent_project_name or "通用"
+    cm = _ai_service.get_conversation(pid, name, _agent_topic_desc)
+    if _active_run is None or _active_run.identity != (pid, cm.session_id):
+        cm.recover_interrupted_run()
+    _agent_session_id = cm.session_id
+    ctx.agent_session_id = cm.session_id
+    if _session_selector is not None:
+        sessions = _ai_service.session_store(pid, name, _agent_topic_desc).list_sessions()
+        _session_selector.options = [ft.dropdown.Option(s["id"], s["title"]) for s in sessions]
+        _session_selector.value = cm.session_id
+        try:
+            _session_selector.update()
+        except RuntimeError:
+            pass
+    refresh_agent_usage()
+    if _agent_msg_list is None:
         return
-
     clear_agent_messages()
-
-    # 直接从磁盘读取，不依赖 AI service 缓存
-    from paperpilot.conversation import ConversationManager
-    cm = ConversationManager(_agent_project_name, _agent_topic_desc)
-
-    # 注入到 AI service 缓存，保证 chat() 能找到已有上下文
-    _ai_service._conversations[_agent_project_id] = cm
 
     # 批量构建气泡，最后一次性 update + scroll
     bubbles = []
@@ -624,11 +770,12 @@ def load_agent_conversation():
 def set_agent_project(project_id: int | None, project_name: str = "",
                       topic_desc: str = ""):
     """设置 Agent 当前关联的课题，自动加载历史对话。"""
-    global _agent_project_id, _agent_project_name, _agent_topic_desc
+    global _agent_project_id, _agent_project_name, _agent_topic_desc, _agent_session_id
+    rename_warning = None
     name_changed = (project_id is not None and _agent_project_id == project_id
                     and _agent_project_name and _agent_project_name != project_name)
     if name_changed:
-        # 课题改名：重命名仓库文件夹，清除旧的 conversation 缓存。
+        # 课题改名：重命名仓库文件夹，并更新会话存储路径。
         # 失败必须让用户知道——否则 DB 已是新名而目录仍为旧名，
         # 用户会看到对话历史/论文目录"清空"（数据其实在旧目录）
         try:
@@ -640,12 +787,10 @@ def set_agent_project(project_id: int | None, project_name: str = "",
         else:
             _rename_err = "目标目录已存在或不可移动"
         if not renamed:
-            send_agent_message(
-                f"⚠ 课题目录重命名失败（{_rename_err}）。"
-                f"论文与对话目录仍使用旧名称“{_agent_project_name}”。",
-                role="system")
-        if _ai_service:
-            _ai_service._conversations.pop(project_id, None)
+            rename_warning = (f"⚠ 课题目录重命名失败（{_rename_err}）。"
+                              f"论文与对话目录仍使用旧名称“{_agent_project_name}”。")
+        if renamed:
+            _ai_service.rebind_project_storage(project_id, project_name)
     _agent_project_id = project_id
     _agent_project_name = project_name
     _agent_topic_desc = topic_desc
@@ -653,8 +798,136 @@ def set_agent_project(project_id: int | None, project_name: str = "",
     ctx.agent_project_id = project_id
     ctx.agent_project_name = project_name
     ctx.agent_topic_desc = topic_desc
-    if project_id is not None:
+    _agent_session_id = None
+    ctx.agent_session_id = None
+    try:
         load_agent_conversation()
+    except (ValueError, OSError) as ex:
+        clear_agent_messages()
+        send_agent_message(f"无法加载会话：{ex}", role="system")
+    if rename_warning:
+        send_agent_message(rename_warning, role="system")
+
+
+def refresh_agent_usage():
+    """Show weighted token statistics for this chat, with missing usage explicit."""
+    if _usage_text is None:
+        return
+    try:
+        if _session_selector is not None and _agent_session_id:
+            sessions = _ai_service.session_store(_agent_project_id or 0, _agent_project_name or "通用", _agent_topic_desc).list_sessions()
+            _session_selector.options = [ft.dropdown.Option(s["id"], s["title"]) for s in sessions]
+            _session_selector.update()
+        stats = UsageStore().summary(_agent_project_id or 0, _agent_session_id, "chat")
+        ratio = stats["cache_ratio"]
+        cached = f"{ratio:.1%}" if ratio is not None else "暂无数据"
+        input_count = f"{stats['input_tokens']:,}" if stats["reported"] or not stats["requests"] else "未提供"
+        output_count = f"{stats['output_tokens']:,}" if stats["output_reported"] or not stats["requests"] else "未提供"
+        _usage_text.value = (f"输入 {input_count} · 输出 {output_count}\n"
+                             f"主对话缓存 {cached} · {stats['requests']} 次请求")
+        if stats["reported"] < stats["requests"]:
+            _usage_text.value += "（部分无用量）"
+        _usage_text.tooltip = "缓存命中的输入 token / 有缓存计数的输入 token。点击右侧查看各任务详情。"
+        _usage_text.update()
+    except RuntimeError:
+        pass
+    except Exception:
+        _usage_text.value = "用量统计暂不可用"
+        logger.warning("Agent usage display failed", exc_info=True)
+
+
+def _show_usage_details(e=None):
+    store = UsageStore()
+    pid, sid = _agent_project_id or 0, _agent_session_id
+    task_names = {"chat": "主对话", "reasoning": "推理", "deep_read": "精读",
+                  "compression": "上下文压缩", "score": "打分", "translation": "翻译",
+                  "keyword_extraction": "关键词", "connection_test": "连接测试", "other": "其他"}
+    def details(all_tasks=False):
+        lines = ["服务商实际返回值；按任务、服务商和模型分组"]
+        for group in store.groups(None if all_tasks else pid, None if all_tasks else sid):
+            ratio = group["cache_ratio"]
+            cache = f"{ratio:.1%}" if ratio is not None else "未提供"
+            inputs = f"{group['input_tokens']:,}" if group["reported"] else "未提供"
+            outputs = f"{group['output_tokens']:,}" if group["output_reported"] else "未提供"
+            lines.append(f"\n{task_names.get(group['task'], group['task'])} · {group['provider']} / {group['model']}\n"
+                         f"输入 {inputs} / 输出 {outputs}\n"
+                         f"缓存 {cache}（{group['cache_hit_tokens']:,} / {group['cache_input_tokens']:,}）"
+                         f" · 请求 {group['requests']} · 失败 {group['failed']} · 已停止 {group['cancelled']}\n"
+                         f"已返回输入用量 {group['reported']}/{group['requests']} 次 · 缓存计数 {group['cache_reported']} 次")
+        overall = store.summary()
+        lines.append(f"\n本机全部任务已统计：输入 {overall['input_tokens']:,} / 输出 {overall['output_tokens']:,}"
+                     f" · {overall['requests']} 次请求")
+        recent = store.records(None if all_tasks else pid, None if all_tasks else sid, limit=10)
+        if recent:
+            lines.append("\n最近请求（新资料首次输入、服务商缓存预热或回收均可能降低命中）：")
+        operations = {"chat": "聊天", "research_overview": "梳理研究现状", "research_gaps": "发现研究空白",
+                      "research_plan": "建议技术路线", "project_refine": "完善课题"}
+        prefixes = {"cold_start": "首条本机记录", "stable_append": "历史前缀保持",
+                    "system_changed": "系统提示变化", "history_changed": "历史变化",
+                    "history_shortened": "历史缩短"}
+        modes = {"enabled": "思考开启", "disabled": "思考关闭", "default": "服务商默认思考设置"}
+        statuses = {"ok": "已完成", "cancelled": "已停止", "error": "请求失败"}
+        for r in recent:
+            hit, miss = r["cache_hit_tokens"], r["cache_miss_tokens"]
+            cache = f"{hit:,}/{hit + miss:,} ({hit / (hit + miss):.1%})" if hit is not None and miss is not None and hit + miss else "未提供"
+            source = operations.get(r.get("operation"), task_names.get(r["task"], r["task"]))
+            mode = modes.get(r.get("thinking_mode"), "思考设置未记录")
+            lines.append(f"\n#{r['id']} · {source} · {task_names.get(r['task'], r['task'])} · {r['model']}\n"
+                         f"{statuses.get(r['status'], r['status'])} · 缓存 {cache} · {prefixes.get(r['prefix_state'], '前缀未记录')} · {mode}")
+        lines.append("\n推理 token 已包含在输出中，不重复累加。未提供用量的请求不会按零命中计入缓存率。")
+        return "\n".join(lines)
+    body = ft.Text(details(), size=FS_MD, selectable=True)
+    def select_scope(e):
+        body.value = details(e.control.value == "all")
+        body.update()
+    scope = ft.Dropdown(value="chat", text_size=FS_MD,
+                        options=[ft.dropdown.Option("chat", "当前会话"),
+                                 ft.dropdown.Option("all", "本机全部任务")], on_select=select_scope)
+    dlg = ft.AlertDialog(title=ft.Text("用量详情", size=FS_LG),
+                         content=ft.Column([scope, ft.Column([body], expand=True, scroll=ft.ScrollMode.AUTO)],
+                                           width=420, height=360, spacing=SP_SM),
+                         actions=[ft.TextButton("关闭", on_click=lambda e: close_dialog(ctx.page, dlg))])
+    open_dialog(ctx.page, dlg)
+
+
+def _new_agent_session(e=None):
+    try:
+        _ai_service.create_session(_agent_project_id or 0, _agent_project_name or "通用", _agent_topic_desc)
+        load_agent_conversation()
+    except (ValueError, OSError) as ex:
+        send_agent_message(f"无法新建会话：{ex}", role="system")
+
+
+def _select_agent_session(e):
+    try:
+        _ai_service.select_session(_agent_project_id or 0, _agent_project_name or "通用",
+                                   e.control.value, _agent_topic_desc)
+        load_agent_conversation()
+    except (ValueError, OSError) as ex:
+        _session_selector.value = _agent_session_id
+        _session_selector.update()
+        send_agent_message(f"无法切换会话：{ex}", role="system")
+
+
+def _rename_agent_session(e=None):
+    pid, name, sid = _agent_project_id or 0, _agent_project_name or "通用", _agent_session_id
+    store = _ai_service.session_store(pid, name, _agent_topic_desc)
+    title = next(s["title"] for s in store.list_sessions() if s["id"] == sid)
+    field = ft.TextField(value=title, label="会话名称", max_length=80, autofocus=True)
+    def save(e):
+        try:
+            store.rename_session(sid, field.value or "")
+        except ValueError as ex:
+            field.error_text = str(ex)
+            field.update()
+            return
+        close_dialog(ctx.page, dlg)
+        if (pid, sid) == (_agent_project_id or 0, _agent_session_id):
+            load_agent_conversation()
+    dlg = ft.AlertDialog(title=ft.Text("重命名会话", size=FS_LG), content=field,
+                         actions=[ft.TextButton("取消", on_click=lambda e: close_dialog(ctx.page, dlg)),
+                                  ft.TextButton("保存", on_click=save)])
+    open_dialog(ctx.page, dlg)
 
 
 def _parse_project_update(text: str) -> tuple | None:
@@ -755,9 +1028,12 @@ def _infer_actions_from_message(user_msg: str, ai_reply: str) -> list[dict]:
     return actions
 
 
-def _dispatch_agent_action(action: dict):
+def _dispatch_agent_action(action: dict, run: AgentRun | None = None):
     """执行单个 Agent 动作（必须在主线程调用）。"""
     global _agent_project_id, _agent_project_name
+    checkpoint()
+    if run:
+        run.start_step(action["type"])
     action_type = action["type"]
     params = action.get("params", {})
     sa = ctx.search_actions
@@ -811,27 +1087,44 @@ def _dispatch_agent_action(action: dict):
 
         if not state.keywords and topic_desc:
             send_agent_message(f"正在提取关键词并检索：{topic_desc[:60]}...", role="system")
+            if run:
+                run.reserve()
             def _auto_extract_and_search():
+                scheduled = False
                 try:
-                    weighted = extract_all_keywords(topic_desc, top_n=8)
+                    with run_scope(run):
+                        weighted = extract_all_keywords(topic_desc, top_n=8)
+                        checkpoint()
                     async def _set_and_go():
-                        state.keywords = [kw for kw, _ in weighted]
-                        core = [kw for kw, w in weighted if w >= 1.0]
-                        rest = [kw for kw, w in weighted if w < 1.0]
-                        state.primary_keywords = core if core else [kw for kw, _ in weighted[:3]]
-                        state.secondary_keywords = rest if core else [kw for kw, _ in weighted[3:]]
-                        state.regular_keywords = []
                         try:
+                            if run:
+                                run.token.check()
+                                if run.identity != (_agent_project_id or 0, _agent_session_id):
+                                    return
+                            state.keywords = [kw for kw, _ in weighted]
+                            core = [kw for kw, w in weighted if w >= 1.0]
+                            rest = [kw for kw, w in weighted if w < 1.0]
+                            state.primary_keywords = core if core else [kw for kw, _ in weighted[:3]]
+                            state.secondary_keywords = rest if core else [kw for kw, _ in weighted[3:]]
+                            state.regular_keywords = []
                             sa["refresh_all_zones"]()
-                        except Exception:
+                            sa["on_start_search"](None, **({"agent_run": run} if run else {}))
+                        except OperationCancelled:
                             pass
-                        try:
-                            sa["on_start_search"](None)
                         except Exception as ex:
                             send_agent_message(f"检索启动失败：{ex}", role="system")
+                        finally:
+                            if run:
+                                run.finish()
                     ctx.page.run_task(_set_and_go)
+                    scheduled = True
+                except OperationCancelled:
+                    pass
                 except Exception as ex:
                     send_agent_message(f"关键词提取失败：{ex}", role="system")
+                finally:
+                    if run and not scheduled:
+                        run.finish()
             threading.Thread(target=_auto_extract_and_search, daemon=True).start()
             return
 
@@ -841,7 +1134,7 @@ def _dispatch_agent_action(action: dict):
             role="system",
         )
         try:
-            sa["on_start_search"](None)
+            sa["on_start_search"](None, **({"agent_run": run} if run else {}))
         except Exception as ex:
             send_agent_message(f"检索启动失败：{ex}", role="system")
 
@@ -865,7 +1158,7 @@ def _dispatch_agent_action(action: dict):
         else:
             send_agent_message("正在 AI 精排打分...", role="system")
         try:
-            sa["on_ai_score"](None)
+            sa["on_ai_score"](None, **({"agent_run": run} if run else {}))
         except Exception as ex:
             send_agent_message(f"AI 评分启动失败：{ex}", role="system")
 
@@ -934,8 +1227,11 @@ def _dispatch_agent_action(action: dict):
             send_agent_message("没有符合条件的论文。", role="system")
             return
 
+        checkpoint()
         n, _ = library.save_papers_to_project(target_pid, sel_papers,
             [(p, 0.0) for p in sel_papers])
+        if run:
+            run.completed(f"已保存 {n} 篇文献到课题「{target_name}」")
         ctx.search_selected_ids.clear()
 
         if sa and sa.get("refresh_results_table"):
@@ -951,6 +1247,7 @@ def _dispatch_agent_action(action: dict):
 
         imported = 0
         for paper in sel_papers:
+            checkpoint()
             pdf = paper.get("pdf_path", "")
             if not pdf or not os.path.isfile(str(pdf)):
                 pdf = repo_manager.get_cached_pdf(paper)
@@ -969,19 +1266,32 @@ def _dispatch_agent_action(action: dict):
 
         _need_dl = [p for p in sel_papers if not (p.get("pdf_path") and os.path.isfile(str(p.get("pdf_path"))))]
         if _need_dl:
+            if run:
+                run.reserve()
             def _auto_dl():
                 ok = 0
-                for paper in _need_dl:
-                    try:
-                        cache_path = downloader.cache_pdf(paper)
-                        if cache_path and os.path.isfile(cache_path):
-                            paper["pdf_path"] = cache_path
-                            repo_path = repo_manager.import_pdf(paper, target_name)
-                            if repo_path:
-                                library.set_paper_pdf_path_smart(paper, repo_path)
-                            ok += 1
-                    except Exception:
-                        pass
+                try:
+                    with run_scope(run):
+                        for paper in _need_dl:
+                            checkpoint()
+                            try:
+                                cache_path = downloader.cache_pdf(paper)
+                                checkpoint()
+                                if cache_path and os.path.isfile(cache_path):
+                                    paper["pdf_path"] = cache_path
+                                    repo_path = repo_manager.import_pdf(paper, target_name)
+                                    if repo_path:
+                                        library.set_paper_pdf_path_smart(paper, repo_path)
+                                    ok += 1
+                                    if run:
+                                        run.completed(f"已导入 PDF：{paper.get('title', '论文')[:80]}")
+                            except Exception:
+                                pass
+                except OperationCancelled:
+                    pass
+                finally:
+                    if run:
+                        run.finish()
                 if ok:
                     print(f"[auto-dl] Downloaded {ok}/{len(_need_dl)} papers for '{target_name}'", flush=True)
                     if ctx.refresh_paper_list is not None:
@@ -1040,11 +1350,14 @@ def build_agent_panel() -> tuple[ft.Container, ft.GestureDetector]:
     Returns:
         (panel_container, resize_handle)
     """
-    global _agent_msg_list, _agent_input, _agent_panel_ref
+    global _agent_msg_list, _agent_input, _agent_panel_ref, _session_selector, _usage_text, _agent_send_button
+    ctx.refresh_agent_usage = refresh_agent_usage
+    ctx.begin_agent_run = begin_agent_run
 
     _agent_input = ft.TextField(
         hint_text="问问 PaperPilot Agent...",
         multiline=True,
+        shift_enter=True,
         min_lines=1,
         max_lines=4,
         expand=True,
@@ -1070,16 +1383,30 @@ def build_agent_panel() -> tuple[ft.Container, ft.GestureDetector]:
         _trigger_agent_chat(text)
 
     _agent_input.on_submit = _on_agent_send
+    def _send_or_stop(e):
+        if _active_run is not None:
+            stop_agent_run(e)
+        else:
+            _on_agent_send(e)
+    _agent_send_button = ft.IconButton(icon=ft.Icons.ARROW_UPWARD,
+        tooltip="发送消息（Enter）", on_click=_send_or_stop, icon_size=20)
 
-    def _send_preset_prompt(prompt: str):
+    def _send_preset_prompt(prompt: str, operation: str):
         """发送预设课题讨论 prompt，开启深度思考。"""
+        if _thinking_active:
+            return
+        if not _agent_project_id:
+            send_agent_message("请先在文献库中选择一个课题。", role="system")
+            return
         send_agent_message(prompt, role="user")
         _agent_input.value = ""
         _agent_input.update()
-        _trigger_agent_chat(prompt, thinking_enabled=True)
+        _trigger_agent_chat(prompt, thinking_enabled=True, include_library_context=True, operation=operation)
 
     def _send_project_refine(e=None):
         """发送 AI 辅助完善课题 prompt。"""
+        if _thinking_active:
+            return
         if not _agent_project_id:
             send_agent_message("请先在文献库中选择一个课题。", role="system")
             return
@@ -1105,7 +1432,7 @@ def build_agent_panel() -> tuple[ft.Container, ft.GestureDetector]:
         _agent_input.value = ""
         _agent_input.update()
         _trigger_agent_chat(prompt, thinking_enabled=True,
-                           display_message="帮我完善课题设计")
+                           display_message="帮我完善课题设计", include_library_context=True, operation="project_refine")
 
     _preset_menu = ft.PopupMenuButton(
         icon=ft.Icons.AUTO_AWESOME,
@@ -1118,7 +1445,7 @@ def build_agent_panel() -> tuple[ft.Container, ft.GestureDetector]:
                     "1. 该领域要解决的核心问题是什么？\n"
                     "2. 主流方法可以分为哪几类？各自的演进脉络如何？\n"
                     "3. 有哪些关键的突破性成果？\n"
-                    "4. 不同研究组/流派之间是否存在观点分歧？"
+                    "4. 不同研究组/流派之间是否存在观点分歧？", "research_overview"
                 ),
             ),
             ft.PopupMenuItem(
@@ -1128,7 +1455,7 @@ def build_agent_panel() -> tuple[ft.Container, ft.GestureDetector]:
                     "1. 现有方法在哪些场景下表现不佳或未覆盖？\n"
                     "2. 哪些关键问题被普遍忽视？\n"
                     "3. 跨领域的方法或思路是否可以引入？\n"
-                    "4. 有哪些低垂果实值得优先尝试？"
+                    "4. 有哪些低垂果实值得优先尝试？", "research_gaps"
                 ),
             ),
             ft.PopupMenuItem(
@@ -1138,7 +1465,7 @@ def build_agent_panel() -> tuple[ft.Container, ft.GestureDetector]:
                     "1. 如果我要在这个课题上发一篇顶会/顶刊，最值得做的方向是什么？\n"
                     "2. 需要哪些基础模块和数据资源？\n"
                     "3. 可能的技术难点和应对策略？\n"
-                    "4. 建议的实验验证方案"
+                    "4. 建议的实验验证方案", "research_plan"
                 ),
             ),
             ft.PopupMenuItem(
@@ -1148,6 +1475,13 @@ def build_agent_panel() -> tuple[ft.Container, ft.GestureDetector]:
         ],
     )
 
+    _session_selector = ft.Dropdown(
+        options=[], expand=True, text_size=FS_SM, height=40,
+        content_padding=ft.padding.Padding(left=SP_SM, right=SP_SM, top=SP_XS, bottom=SP_XS),
+        color=text_primary(), border_color=border_color(), border_radius=R_SM,
+        tooltip="当前课题的独立会话", on_select=_select_agent_session,
+    )
+    _usage_text = ft.Text("暂无用量", size=FS_XS, color=text_secondary(), expand=True)
     agent_panel = ft.Container(
         content=ft.Column([
             ft.Container(
@@ -1159,12 +1493,22 @@ def build_agent_panel() -> tuple[ft.Container, ft.GestureDetector]:
                 padding=ft.padding.Padding(top=SP_MD, bottom=SP_MD),
             ),
             ft.Divider(height=1, color=border_color()),
+            ft.Row([
+                _session_selector,
+                ft.IconButton(icon=ft.Icons.ADD_COMMENT_OUTLINED, icon_size=FS_XL,
+                              tooltip="新建独立会话", on_click=_new_agent_session),
+                ft.IconButton(icon=ft.Icons.DRIVE_FILE_RENAME_OUTLINE, icon_size=FS_XL,
+                              tooltip="重命名会话", on_click=_rename_agent_session),
+            ], spacing=SP_XS),
+            ft.Row([_usage_text,
+                    ft.IconButton(icon=ft.Icons.QUERY_STATS, icon_size=FS_XL,
+                                  tooltip="用量详情", on_click=_show_usage_details)], spacing=SP_XS),
             _agent_msg_list,
             ft.Divider(height=1, color=border_color()),
             ft.Row([
                 _preset_menu,
                 _agent_input,
-                ft.IconButton(icon=ft.Icons.SEND, on_click=_on_agent_send, icon_size=20),
+                _agent_send_button,
             ], spacing=6),
         ], spacing=SP_XS),
         width=_agent_panel_width,
@@ -1172,6 +1516,10 @@ def build_agent_panel() -> tuple[ft.Container, ft.GestureDetector]:
         border=ft.Border(left=ft.BorderSide(1, border_color())),
     )
     _agent_panel_ref = agent_panel
+    try:
+        load_agent_conversation()
+    except (ValueError, OSError) as ex:
+        send_agent_message(f"无法加载会话：{ex}", role="system")
 
     def _max_panel_w() -> int:
         page_w = ctx.page.width if ctx.page else 1200

@@ -27,6 +27,8 @@ from paperpilot import graph_service as _graph_service
 from paperpilot import graph_window as _graph_window
 from paperpilot.ai_service import save_deep_read_json, get_full_text_for_paper
 from paperpilot.library import save_deep_read_notes
+from paperpilot.llm_usage import usage_scope
+from paperpilot.agent_runtime import run_scope, checkpoint, OperationCancelled
 
 state = ctx.state
 
@@ -1337,26 +1339,40 @@ def build_library_page(ctx):
         """后台精读论文：获取全文 → RLM 分析 → 展示结果。"""
         title = (paper.get("title") or "论文")[:40]
         pp_id = paper.get("project_paper_id")
+        pid, name, desc = ctx.agent_project_id or 0, ctx.agent_project_name or "通用", ctx.agent_topic_desc
+        cm = ctx.ai_service.get_conversation(pid, name, desc, ctx.agent_session_id)
+        sid = cm.session_id
+        goal = f"[精读请求] 请精读论文：《{title}》"
+        run = ctx.begin_agent_run(cm, pid, goal, "deep_read") if ctx.begin_agent_run else None
+        if ctx.begin_agent_run and run is None:
+            ctx.send_agent_message("当前轮仍在运行，请先停止或等待完成。", role="system")
+            return
+
+        def _send(text, role="agent"):
+            if (pid, sid) == (ctx.agent_project_id or 0, ctx.agent_session_id):
+                ctx.send_agent_message(text, role=role)
 
         def _save_msg(role: str, text: str):
-            """将消息写入当前课题的对话记录。"""
-            if ctx.agent_project_id is not None:
-                ctx.ai_service.log_message(
-                    ctx.agent_project_id, ctx.agent_project_name,
-                    role, text, ctx.agent_topic_desc)
+            """Write to the chat that launched this task, even after navigation."""
+            ctx.ai_service.log_message(pid, name, role, text, desc, session_id=sid)
+            if ctx.refresh_agent_usage:
+                ctx.refresh_agent_usage()
 
-        ctx.send_agent_message(f"正在精读：《{title}》...\n\n正在获取全文，请稍候 🔍", role="agent")
-        _save_msg("user", f"[精读请求] 请精读论文：《{title}》")
+        _send(f"正在精读：《{title}》...\n\n正在获取全文，请稍候 🔍")
+        _save_msg("user", goal)
+        if run:
+            run.user_recorded = True
 
         _done = threading.Event()
         _result: dict = {}
         _error: str | None = None
         _status: str = ""  # 中间状态消息，由主线程轮询时展示
 
-        def _run():
+        def _run_impl():
             nonlocal _error, _status
             try:
                 full_text, source = get_full_text_for_paper(paper)
+                checkpoint()
                 if not full_text:
                     abstract = (paper.get("abstract") or "").strip()
                     if len(abstract) >= 50:
@@ -1377,7 +1393,9 @@ def build_library_page(ctx):
                 if source != "abstract_fallback":
                     _status = f"已获取全文（{len(full_text)} 字符，来源: {source}）\n正在 RLM 分层分析... 📖"
 
-                result = ctx.ai_service.deep_read(paper, full_text)
+                with usage_scope(project_id=pid, session_id=sid):
+                    result = ctx.ai_service.deep_read(paper, full_text)
+                checkpoint()
                 if not result:
                     _error = f"精读《{title}》失败，请检查 API Key 和网络连接。"
                     _done.set()
@@ -1396,9 +1414,12 @@ def build_library_page(ctx):
                 _result.update(result)
 
                 # 保存到数据库
+                checkpoint()
                 if pp_id:
                     try:
                         save_deep_read_notes(pp_id, json.dumps(result, ensure_ascii=False))
+                        if run:
+                            run.completed(f"已保存《{title}》的精读笔记")
                         # 首次 AI 精读后自动从未读 → 略读
                         if paper.get("status") == "unread":
                             library.update_paper_status(pp_id, "skimmed")
@@ -1406,6 +1427,7 @@ def build_library_page(ctx):
                         pass
 
                 # 保存到本地 JSON
+                checkpoint()
                 _result["_saved_json"] = bool(save_deep_read_json(paper, result))
 
             except Exception as ex:
@@ -1413,20 +1435,34 @@ def build_library_page(ctx):
             finally:
                 _done.set()
 
+        def _run():
+            try:
+                with run_scope(run):
+                    if run:
+                        run.phase("获取全文与精读")
+                    _run_impl()
+            except OperationCancelled:
+                pass
+            finally:
+                _done.set()
         threading.Thread(target=_run, daemon=True).start()
 
-        async def _poll():
+        async def _poll_impl():
             import asyncio
             last_status = ""
             while not _done.is_set():
                 await asyncio.sleep(0.3)
                 # 主线程安全地展示中间状态消息
-                if _status and _status != last_status:
+                if _status and _status != last_status and not (run and run.token.cancelled):
                     last_status = _status
-                    ctx.send_agent_message(_status, role="agent")
+                    _send(_status)
 
+            if run and run.token.cancelled:
+                return
             if _error:
-                ctx.send_agent_message(f"精读失败：{_error}", role="agent")
+                if run:
+                    run.fail()
+                _send(f"精读失败：{_error}")
                 _save_msg("assistant", f"精读失败：{_error}")
                 return
 
@@ -1435,20 +1471,28 @@ def build_library_page(ctx):
 
             r = _result
             if r.get("_truncated"):
+                if run:
+                    run.fail()
                 trunc_msg = (
                     f"无法精读：《{title}》\n\n"
                     f"该论文在 HTML 源中仅含摘要，正文无法获取。\n\n"
                     f"建议：下载 PDF 文件后导入到文献库，再重新精读。\n"
                     f"操作：点击论文旁的 📥 按钮 → 选择 PDF 文件 → 导入成功后再点 📖"
                 )
-                ctx.send_agent_message(trunc_msg, role="agent")
+                _send(trunc_msg)
                 _save_msg("assistant", trunc_msg)
                 return
 
             msg = _format_deep_read_message(paper.get("title") or "论文", _result)
-            ctx.send_agent_message(msg, role="agent")
+            _send(msg)
             _save_msg("assistant", msg)
 
+        async def _poll():
+            try:
+                await _poll_impl()
+            finally:
+                if run:
+                    run.finish()
         ctx.page.run_task(_poll)
 
     def _on_status_change(pp_id: int, new_status: str):

@@ -111,20 +111,20 @@ def safe_update(ctrl) -> None:
 
 
 def open_dialog(page, dlg) -> None:
-    """追加到 overlay 并打开对话框的统一入口。"""
-    page.overlay.append(dlg)
-    dlg.open = True
-    page.update()
+    """使用 Flet 的对话框栈，保留事件注册与关闭动画的完整生命周期。"""
+    page.show_dialog(dlg)
 
 
 def close_dialog(page, dlg) -> None:
-    """关闭并从 overlay 移除对话框（修复对象泄漏）。"""
+    """关闭指定对话框；由 show_dialog 在客户端 dismiss 后移除控件。"""
+    if not dlg.open:
+        return
     dlg.open = False
     try:
-        page.overlay.remove(dlg)
-    except ValueError:
+        dlg.update()
+    except RuntimeError:
+        # A background operation may finish after the user has dismissed it.
         pass
-    page.update()
 
 
 def make_resize_handle(get_width, set_width, min_w, max_w, on_end=None,

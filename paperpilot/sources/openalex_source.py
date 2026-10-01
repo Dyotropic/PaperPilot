@@ -7,6 +7,8 @@
 import math
 import socket
 import time
+from contextvars import copy_context
+from paperpilot.agent_runtime import checkpoint, interruptible_wait
 
 import requests
 
@@ -138,6 +140,7 @@ def get_work_refs(dois: list, errors: list | None = None) -> dict:
             if api_key:
                 params["api_key"] = api_key
             try:
+                checkpoint()
                 resp = requests.get(url, params=params, headers=headers, timeout=15)
                 # 429 退避 2s/5s/10s（遵循 Retry-After），与检索链路同策略
                 for wait in (2, 5, 10):
@@ -145,9 +148,10 @@ def get_work_refs(dois: list, errors: list | None = None) -> dict:
                         break
                     retry_after = resp.headers.get("Retry-After", "")
                     try:
-                        time.sleep(min(float(retry_after), 30) if retry_after else wait)
+                        interruptible_wait(min(float(retry_after), 30) if retry_after else wait)
                     except ValueError:
-                        time.sleep(wait)
+                        interruptible_wait(wait)
+                    checkpoint()
                     resp = requests.get(url, params=params, headers=headers, timeout=15)
                 if resp.status_code == 429:
                     hint = "OpenAlex 被限流(429)，未能补查部分论文的引用关系"
@@ -164,7 +168,7 @@ def get_work_refs(dois: list, errors: list | None = None) -> dict:
                     if _oa_cache is not None:
                         _oa_cache.set(f"refs:{payload['doi']}", payload,
                                       expire=_REFS_TTL)
-                time.sleep(0.1)  # 批间礼貌速率
+                interruptible_wait(0.1)  # 批间礼貌速率
             except requests.RequestException:
                 # 网络失败：放弃该批继续（图谱降级为仅共现/时间线）
                 if errors is not None:
@@ -268,6 +272,7 @@ def _resolve_openalex_entities(kind: str, name: str, *, timeout: float,
     if api_key:
         params["api_key"] = api_key
     try:
+        checkpoint()
         response = requests.get(url, params=params,
                                 headers={"User-Agent": "PaperPilot/1.0"}, timeout=timeout)
         if response.status_code in (403, 429):
@@ -356,6 +361,7 @@ def _fetch_openalex_filtered(query: str, max_results: int, filters: SearchFilter
     seen_ids: set[str] = set()
     per_page = min(100, max(25, max_results))
     for _ in range(pages):
+        checkpoint()
         if cursor in seen_cursors:
             _append_error(errors, "incomplete", "OpenAlex 返回重复游标，分页已停止")
             break
@@ -377,6 +383,7 @@ def _fetch_openalex_filtered(query: str, max_results: int, filters: SearchFilter
                 break
         else:
             try:
+                checkpoint()
                 response = requests.get(url, params=params, headers=headers, timeout=timeout)
                 if response.status_code in (403, 429):
                     if not papers:
@@ -448,7 +455,7 @@ def _fetch_openalex_filtered(query: str, max_results: int, filters: SearchFilter
             break
         cursor = next_cursor
         if fetched:
-            time.sleep(0.1)
+            interruptible_wait(0.1)
     if len(papers) < max_results:
         _append_error(errors, "incomplete",
                       f"OpenAlex 筛选后得到 {len(papers)}/{max_results} 篇，已耗尽结果或达到分页上限")
@@ -523,6 +530,7 @@ def _fetch_openalex_raw(query: str, max_results: int = 30,
                 results = _oa_cache.get(ckey)
             if results is None:
                 try:
+                    checkpoint()
                     resp = requests.get(url, params=params, headers=headers, timeout=15)
                     # 429 退避：2s/5s/10s，优先遵循 Retry-After 头；耗尽且一无所获 → 抛限流异常
                     for wait in (2, 5, 10):
@@ -530,9 +538,10 @@ def _fetch_openalex_raw(query: str, max_results: int = 30,
                             break
                         retry_after = resp.headers.get("Retry-After", "")
                         try:
-                            time.sleep(min(float(retry_after), 30) if retry_after else wait)
+                            interruptible_wait(min(float(retry_after), 30) if retry_after else wait)
                         except ValueError:
-                            time.sleep(wait)
+                            interruptible_wait(wait)
+                        checkpoint()
                         resp = requests.get(url, params=params, headers=headers, timeout=15)
                     if resp.status_code == 429 and not papers:
                         hint = "请在设置页配置 OpenAlex API Key（2026-02 起无 key 每日仅 100 次额度）"
@@ -560,7 +569,7 @@ def _fetch_openalex_raw(query: str, max_results: int = 30,
             if len(papers) >= max_results:
                 break
             if fetched:
-                time.sleep(0.1)  # 网络请求后的礼貌速率
+                interruptible_wait(0.1)  # 网络请求后的礼貌速率
     finally:
         socket.setdefaulttimeout(old_timeout)
     papers = _normalize_api_scores(papers[:max_results])
@@ -587,6 +596,7 @@ def _fetch_missing_abstracts(papers: list[dict]) -> list[dict]:
     socket.setdefaulttimeout(10)
 
     def _fetch_one(paper: dict) -> bool:
+        checkpoint()
         oa_id = paper["openalex_id"]
         ckey = f"abs:{oa_id}"
         if _oa_cache is not None:
@@ -595,7 +605,9 @@ def _fetch_missing_abstracts(papers: list[dict]) -> list[dict]:
                 paper["abstract"] = cached
                 return True
         try:
+            checkpoint()
             resp = requests.get(oa_id, headers=headers, timeout=10)
+            checkpoint()
             if resp.status_code == 200:
                 w = resp.json()
                 _cache_work_refs(w)  # 全量 work JSON 顺带缓存引用/关键词
@@ -614,7 +626,8 @@ def _fetch_missing_abstracts(papers: list[dict]) -> list[dict]:
     try:
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-            count = sum(1 for ok in executor.map(_fetch_one, to_fetch) if ok)
+            futures = [executor.submit(copy_context().run, _fetch_one, paper) for paper in to_fetch]
+            count = sum(1 for future in futures if future.result())
     finally:
         socket.setdefaulttimeout(old_timeout)
 

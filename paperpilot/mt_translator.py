@@ -55,7 +55,7 @@ def translate_terms(chinese_terms: list[str]) -> list[str]:
         f"{numbered}"
     )
 
-    client = get_client()
+    client = get_client(task="translation")
     if not client or not client.is_available:
         return results
 
@@ -140,7 +140,7 @@ def translate_all_terms(*term_lists: list[str]) -> list[list[str]]:
         f"{numbered}"
     )
 
-    client = get_client()
+    client = get_client(task="translation")
     if not client or not client.is_available:
         return results
 

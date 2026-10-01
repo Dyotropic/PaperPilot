@@ -281,6 +281,9 @@ class AppContext:
         self.agent_project_id = None
         self.agent_project_name = ""
         self.agent_topic_desc = ""
+        self.agent_session_id = None
+        self.refresh_agent_usage = None
+        self.begin_agent_run = None
 
         # 文献库页注册的课题能力（左侧导航通过 ctx 触发）+ 侧栏项目子菜单
         self.library_select_project = None     # (pid) -> None

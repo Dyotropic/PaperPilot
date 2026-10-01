@@ -2,6 +2,8 @@
 import asyncio
 import os
 import threading
+from paperpilot.agent_runtime import run_scope, checkpoint, OperationCancelled
+from paperpilot.llm_usage import usage_scope
 from datetime import datetime
 
 import flet as ft
@@ -160,6 +162,7 @@ def _run_pipeline(max_per: int, year_min: str, year_max: str,
         print(f"[PaperPilot] 年份筛选: {year_min or '—'} ~ {year_max or '—'}", flush=True)
 
     # 1. 翻译课题描述
+    checkpoint()
     state.status_text = "翻译课题描述..."
     desc_en_query = None
     context = search_context or {}
@@ -174,6 +177,7 @@ def _run_pipeline(max_per: int, year_min: str, year_max: str,
         print(f"[PaperPilot] 课题描述原文即英文: {desc_en_query[:80]}...")
 
     # 2. 翻译三层关键词
+    checkpoint()
     state.status_text = "翻译关键词..."
     primary_input = list(context.get("primary_keywords", state.primary_keywords))
     secondary_input = list(context.get("secondary_keywords", state.secondary_keywords))
@@ -194,6 +198,7 @@ def _run_pipeline(max_per: int, year_min: str, year_max: str,
 
     # 3. arXiv 检索（单次级联，避免多路并发触发限流）
     if use_arxiv:
+        checkpoint()
         state.status_text = "arXiv 抓取中..."
         arxiv_papers = []
         try:
@@ -230,6 +235,7 @@ def _run_pipeline(max_per: int, year_min: str, year_max: str,
                 src_errors.append(("arxiv", "error", "arXiv 描述检索失败"))
 
     if use_openalex:
+        checkpoint()
         state.status_text = "OpenAlex 抓取中..."
         oa_papers = []
         try:
@@ -266,6 +272,7 @@ def _run_pipeline(max_per: int, year_min: str, year_max: str,
                 src_errors.append(("openalex", "error", "OpenAlex 描述检索失败"))
 
     if use_europepmc:
+        checkpoint()
         state.status_text = "Europe PMC 抓取中..."
         epmc_papers = []
         try:
@@ -302,6 +309,7 @@ def _run_pipeline(max_per: int, year_min: str, year_max: str,
                 src_errors.append(("europepmc", "error", "Europe PMC 描述检索失败"))
 
     # 4. 去重
+    checkpoint()
     state.status_text = "去重中..."
     papers = deduplicate(papers)
     print(f"[PaperPilot] 去重后: {len(papers)} 篇")
@@ -311,6 +319,7 @@ def _run_pipeline(max_per: int, year_min: str, year_max: str,
         return [], [], src_errors
 
     # 5. 排序打分（首次会加载 942MB 语义模型，约需 10-30 秒）
+    checkpoint()
     state.status_text = f"语义精排中（{len(papers)} 篇）..."
     query_for_scoring = desc_en_query if desc_en_query else desc
     scores = rank_papers(
@@ -1126,7 +1135,7 @@ def build_search_page(ctx):
 
     _ai_score_status = ft.Text("", size=13, visible=False)
 
-    def on_ai_score(e):
+    def on_ai_score(e, *, agent_run=None):
         """AI 精排：筛选有摘要的论文 → 批量打分 → 重排序。"""
         global _ai_scored
         if _last_mode["value"] == "exact":
@@ -1185,6 +1194,8 @@ def build_search_page(ctx):
             _ai_score_status.update()
             return
 
+        if agent_run:
+            agent_run.reserve()
         source_label = "已选" if ctx.search_selected_ids else f"前 {limit}"
         ai_score_btn.disabled = True
         ai_score_btn.content = ft.Text("AI 评分中...")
@@ -1200,9 +1211,14 @@ def build_search_page(ctx):
         def _run():
             nonlocal _results
             try:
-                _results = ctx.ai_service.score_papers(
-                    state.topic_desc or state.topic_name, candidates,
-                    max_papers=limit)
+                with run_scope(agent_run), usage_scope(
+                    project_id=agent_run.identity[0] if agent_run else None,
+                    session_id=agent_run.identity[1] if agent_run else None):
+                    _results = ctx.ai_service.score_papers(
+                        state.topic_desc or state.topic_name, candidates, max_papers=limit)
+                    checkpoint()
+            except OperationCancelled:
+                pass
             except Exception as ex:
                 _results = []
                 _log.getLogger(__name__).warning(f"AI score_papers error: {ex}")
@@ -1211,7 +1227,7 @@ def build_search_page(ctx):
 
         threading.Thread(target=_run, daemon=True).start()
 
-        async def _poll():
+        async def _poll_impl():
             import asyncio
             while not _done.is_set():
                 await asyncio.sleep(0.3)
@@ -1219,7 +1235,15 @@ def build_search_page(ctx):
             ai_score_btn.disabled = False
             ai_score_btn.content = ft.Text("AI 精排")
 
+            if agent_run and agent_run.token.cancelled:
+                _ai_score_status.value = "本轮评分已停止，保留此前评分结果"
+                _ai_score_status.update()
+                ai_score_btn.update()
+                return
+
             if not _results:
+                if agent_run:
+                    agent_run.fail()
                 _ai_score_status.value = "AI 评分失败：网络超时 / API 繁忙 / 返回格式异常，可减少评分篇数后重试"
                 _ai_score_status.update()
                 ai_score_btn.update()
@@ -1242,6 +1266,8 @@ def build_search_page(ctx):
                 new_scores.append((p, ce_score))  # 保留原始 CE 分数不变
 
             state.scores = new_scores
+            if agent_run:
+                agent_run.completed(f"AI 评分完成：{len(_results)} 篇")
             global _ai_scored, _sort_column, _sort_ascending
             _ai_scored = True
             _sort_column = "score"
@@ -1252,6 +1278,12 @@ def build_search_page(ctx):
             _ai_score_status.update()
             ai_score_btn.update()
 
+        async def _poll():
+            try:
+                await _poll_impl()
+            finally:
+                if agent_run:
+                    agent_run.finish()
         ctx.page.run_task(_poll)
 
     ai_score_btn.on_click = on_ai_score
@@ -1518,7 +1550,8 @@ def build_search_page(ctx):
 
     manual_kw_field.on_submit = on_add_keyword
 
-    def on_start_search(e):
+    def on_start_search(e, *, agent_run=None):
+        global _ai_scored
         import logging as _logging
         if state.is_searching or _is_extracting["value"]:
             _logging.getLogger(__name__).warning("[on_start_search] BLOCKED: already searching")
@@ -1549,6 +1582,9 @@ def build_search_page(ctx):
                 return
             filters = None
 
+        previous = (state.papers, state.scores, _ai_scored, _last_mode["value"])
+        if agent_run:
+            agent_run.reserve()
         state.topic_name = (topic_name_field.value.strip() or "未命名检索") if mode == "topic" else "精确查找"
         state.topic_desc = topic_desc_field.value.strip() if mode == "topic" else exact_input_field.value.strip()
         _last_mode["value"] = mode
@@ -1558,7 +1594,6 @@ def build_search_page(ctx):
         state.scores = []
         ctx.search_selected_ids.clear()
         ctx.agent_paper_selection.clear()
-        global _ai_scored
         _ai_scored = False
         results_section.visible = False
         save_to_library_btn.visible = False
@@ -1598,22 +1633,27 @@ def build_search_page(ctx):
         def _run_in_thread():
             """在独立线程中执行流水线，避免 run_in_executor 嵌套回调丢失。"""
             try:
-                if mode == "exact":
-                    papers, src_errors = exact_search(
-                        _exact_value, _exact_type, use_arxiv=_use_arxiv,
-                        use_openalex=_use_openalex, use_europepmc=_use_europepmc)
-                    scores = [(paper, 0.0) for paper in papers]
-                else:
-                    papers, scores, src_errors = _run_pipeline(
-                        max_per=_max_per, year_min=_year_min, year_max=_year_max,
-                        use_arxiv=_use_arxiv, use_openalex=_use_openalex,
-                        use_europepmc=_use_europepmc,
-                        top_k=_top_k, ce_candidates=_ce_candidates,
-                        filters=filters, search_context=_search_context,
-                    )
+                with run_scope(agent_run), usage_scope(
+                    project_id=agent_run.identity[0] if agent_run else None,
+                    session_id=agent_run.identity[1] if agent_run else None):
+                    if mode == "exact":
+                        papers, src_errors = exact_search(
+                            _exact_value, _exact_type, use_arxiv=_use_arxiv,
+                            use_openalex=_use_openalex, use_europepmc=_use_europepmc)
+                        scores = [(paper, 0.0) for paper in papers]
+                    else:
+                        papers, scores, src_errors = _run_pipeline(
+                            max_per=_max_per, year_min=_year_min, year_max=_year_max,
+                            use_arxiv=_use_arxiv, use_openalex=_use_openalex,
+                            use_europepmc=_use_europepmc,
+                            top_k=_top_k, ce_candidates=_ce_candidates,
+                            filters=filters, search_context=_search_context)
+                    checkpoint()
                 _result["papers"] = papers
                 _result["scores"] = scores
                 _result["errors"] = src_errors
+            except OperationCancelled:
+                _result["cancelled"] = True
             except Exception as ex:
                 _result["error"] = ex
             finally:
@@ -1623,6 +1663,7 @@ def build_search_page(ctx):
 
         async def _poll():
             import traceback
+            global _ai_scored
             last_status = status_text.value
             while not _done.is_set():
                 await asyncio.sleep(0.5)
@@ -1634,11 +1675,22 @@ def build_search_page(ctx):
 
             # 流水线完成，执行一次性 UI 更新
             try:
+                if agent_run and agent_run.token.cancelled:
+                    state.papers, state.scores, _ai_scored, _last_mode["value"] = previous
+                    state.status_text = "本轮检索已停止，保留此前检索结果"
+                    results_section.visible = True
+                    save_to_library_btn.visible = bool(state.scores)
+                    ai_score_btn.visible = bool(state.scores) and _last_mode["value"] == "topic"
+                    ai_limit_dd.visible = ai_score_btn.visible
+                    refresh_results_table()
+                    return
                 src_errors = _result.get("errors") or []
                 limited = _rate_limited_names(src_errors)
                 error_messages = list(dict.fromkeys(msg for _, _, msg in src_errors))
                 partial_warnings = _partial_warning_messages(src_errors)
                 if "error" in _result:
+                    if agent_run:
+                        agent_run.fail()
                     state.status_text = f"检索失败: {_result['error']}"
                     traceback.print_exception(
                         type(_result["error"]), _result["error"],
@@ -1662,6 +1714,8 @@ def build_search_page(ctx):
                 else:
                     state.papers = _result["papers"]
                     state.scores = _result["scores"]
+                    if agent_run:
+                        agent_run.completed(f"检索完成：{len(state.scores)} 篇")
                     state.status_text = f"完成！共 {len(_result['scores'])} 篇"
                     if mode == "topic" and filters is not None and len(_result["scores"]) < _top_k:
                         state.status_text += f"（目标 {_top_k} 篇，筛选后实际不足）"
@@ -1689,6 +1743,8 @@ def build_search_page(ctx):
                 status_text.value = state.status_text
                 if ctx.page:
                     ctx.page.update()
+                if agent_run:
+                    agent_run.finish()
 
         ctx.page.run_task(_poll)
 
@@ -1761,13 +1817,13 @@ def build_search_page(ctx):
     ], spacing=0, expand=True)
 
     # ── 注册检索页回调，供 Agent [ACTION:xxx] 标记使用 ──
-    def on_topic_search(e=None):
+    def on_topic_search(e=None, *, agent_run=None):
         if state.is_searching:
             return
         mode_dd.value = "topic"
         topic_mode_section.visible = True
         exact_mode_section.visible = False
-        on_start_search(e)
+        on_start_search(e, agent_run=agent_run)
 
     ctx.search_actions = {
         "on_start_search": on_topic_search,

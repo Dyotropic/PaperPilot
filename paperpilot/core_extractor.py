@@ -46,7 +46,7 @@ def extract_core_keywords(topic: str) -> list[str]:
     if not llm_configured():
         return []
 
-    client = get_client()
+    client = get_client(task="keyword_extraction")
     if not client or not client.is_available:
         return []
 
@@ -95,7 +95,7 @@ def extract_regular_keywords(topic: str) -> list[str]:
     if not llm_configured():
         return []
 
-    client = get_client()
+    client = get_client(task="keyword_extraction")
     if not client or not client.is_available:
         return []
 

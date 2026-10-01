@@ -6,6 +6,7 @@
 
 import socket
 import time
+from paperpilot.agent_runtime import checkpoint, interruptible_wait
 import re
 
 import requests
@@ -121,6 +122,7 @@ def _fetch_europepmc_filtered(query: str, max_results: int, filters: SearchFilte
     seen_ids: set[str] = set()
     effective_query = _epmc_filtered_query(query, filters)
     for _ in range(pages):
+        checkpoint()
         if cursor in seen_cursors:
             _append_error(errors, "incomplete", "Europe PMC 返回重复游标，分页已停止")
             break
@@ -135,6 +137,7 @@ def _fetch_europepmc_filtered(query: str, max_results: int, filters: SearchFilte
             break
         if data is None:
             try:
+                checkpoint()
                 response = requests.get(_EPMC_BASE, params=params,
                                         headers={"User-Agent": "PaperPilot/1.0"}, timeout=timeout)
                 if response.status_code in (403, 429):
@@ -247,13 +250,15 @@ def _fetch_europepmc_raw(query: str, max_results: int = 30,
         socket.setdefaulttimeout(15)
         try:
             for attempt in range(3):
+                checkpoint()
                 try:
+                    checkpoint()
                     resp = requests.get(_EPMC_BASE, params=params,
                                         headers={"User-Agent": "PaperPilot/1.0"},
                                         timeout=15)
                     last_status = resp.status_code
                     if resp.status_code == 429:
-                        time.sleep(1 * (attempt + 1))
+                        interruptible_wait(1 * (attempt + 1))
                         continue
                     resp.raise_for_status()
                     body = resp.json()
@@ -263,7 +268,7 @@ def _fetch_europepmc_raw(query: str, max_results: int = 30,
                         _epmc_cache.set(ckey, data, expire=_CACHE_TTL)
                     break
                 except requests.RequestException:
-                    time.sleep(1 * (attempt + 1))
+                    interruptible_wait(1 * (attempt + 1))
                     continue
         finally:
             socket.setdefaulttimeout(old_timeout)
