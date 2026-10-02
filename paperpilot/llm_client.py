@@ -55,6 +55,7 @@ class ChatResult:
     request_id: str | None = None
     elapsed_ms: int | None = None
     first_token_ms: int | None = None
+    finish_reason: str | None = None
 
 
 # ── Provider 注册表 ──
@@ -461,6 +462,7 @@ class OpenAICompatClient(LLMClient):
             content = msg.content or ""
             reasoning = getattr(msg, "reasoning_content", "") or ""
         return ChatResult(content=content, reasoning=reasoning,
+                          finish_reason=getattr(resp.choices[0], "finish_reason", None) if resp.choices else None,
                           usage=normalize_usage(getattr(resp, "usage", None), self.provider),
                           model=getattr(resp, "model", None) or model,
                           request_id=getattr(resp, "id", None))
@@ -512,6 +514,7 @@ class OpenAICompatClient(LLMClient):
                         if usage is not None:
                             result.usage = usage
                         if chunk.choices:
+                            result.finish_reason = getattr(chunk.choices[0], "finish_reason", None) or result.finish_reason
                             delta = chunk.choices[0].delta
                             result.reasoning += getattr(delta, "reasoning_content", "") or ""
                             if delta.content:
@@ -609,6 +612,7 @@ class AnthropicClient(LLMClient):
                                 result.reasoning += event.delta.thinking
                     final = await stream.get_final_message()
                     result.request_id, result.model = final.id, final.model
+                    result.finish_reason = final.stop_reason
                     result.usage = normalize_usage(final.usage, "anthropic")
             return result
         try:
@@ -666,6 +670,7 @@ class AnthropicClient(LLMClient):
                 reasoning_parts.append(getattr(block, "thinking", "")
                                        or getattr(block, "text", ""))
         return ChatResult(content="".join(content_parts),
+                          finish_reason=getattr(resp, "stop_reason", None),
                           reasoning="\n".join(p for p in reasoning_parts if p),
                           usage=normalize_usage(getattr(resp, "usage", None), "anthropic"),
                           model=getattr(resp, "model", None) or model,

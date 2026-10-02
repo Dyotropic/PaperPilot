@@ -218,6 +218,8 @@ def _build_llm_service_section(ctx) -> ft.Column:
             }
         }
         do_save(updates)
+        if ctx.refresh_agent_usage:
+            ctx.refresh_agent_usage()
         label = _P[p]["label"]
         save_status.value = f"已保存：{label} / {model}，下次 AI 调用生效"
         save_status.color = ft.Colors.GREEN

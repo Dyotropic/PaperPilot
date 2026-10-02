@@ -16,6 +16,9 @@ embedding:
   cache_dir: ./cache/embedding
 agent:
   usage_enabled: true      # 本地记录真实 token 计数与请求指纹；不保存提示词或密钥
+  context_windows: {}      # 按服务商/模型覆盖容量，如 {deepseek: {deepseek-flash: 1000000}}
+  auto_compact_ratio: 0.7  # 达到模型窗口的此比例时压缩；未知容量沿用 80000 token 阈值
+  keep_recent_rounds: 2    # 压缩时保留最近完整轮次；短会话手动压缩可覆盖全部完整轮次
 data_sources:
   arxiv: false
   openalex: true

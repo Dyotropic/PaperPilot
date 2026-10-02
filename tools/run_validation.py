@@ -121,6 +121,16 @@ downloader.DEFAULT_CACHE_DIR = work / "pdf"
 downloader.HTML_CACHE_DIR = work / "html"
 
 # Resolve existing model paths before redirecting Path.home for window caches.
+if sys.platform == "win32" and not os.environ.get("FLET_VIEW_PATH"):
+    from importlib.metadata import version, PackageNotFoundError
+    try:
+        desktop_version = version('flet-desktop')
+    except PackageNotFoundError:
+        desktop_version = ""
+    native_client = Path.home() / ".flet" / "client" / f"flet-desktop-full-{desktop_version}" / "flet"
+    if desktop_version and (native_client / "flet.exe").is_file():
+        # Reuse the installed binary read-only; runtime output still goes to E:.
+        os.environ["FLET_VIEW_PATH"] = str(native_client)
 from paperpilot import keywords, indexer
 from paperpilot import pdf_viewer, graph_window
 pdf_viewer._PDFJS_DIR = work / "pdfjs"

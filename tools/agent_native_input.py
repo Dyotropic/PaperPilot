@@ -20,7 +20,7 @@ u.SetActiveWindow.restype = w.HWND
 u.SetThreadDpiAwarenessContext.argtypes = [ctypes.c_void_p]
 u.SetThreadDpiAwarenessContext(ctypes.c_void_p(-4))
 title = sys.argv[2] if len(sys.argv) > 2 else "PaperPilot Native Input 20261001"
-assert re.fullmatch(r"PaperPilot Native (?:Input 20261001|Stop \d+)", title), "Unexpected validation window"
+assert re.fullmatch(r"PaperPilot Native (?:Input 20261001|Stop \d+|Context \d+)", title), "Unexpected validation window"
 hwnd = u.FindWindowW(None, title)
 assert hwnd
 u.ShowWindow(hwnd, 9)
@@ -75,8 +75,14 @@ for action in json.loads(sys.argv[1]):
         actual = w.POINT()
         assert u.GetCursorPos(ctypes.byref(actual))
         assert (actual.x, actual.y) == (rect.left + x, rect.top + y), "Target clipped by desktop bounds"
-        u.mouse_event(2, 0, 0, 0, 0)
-        u.mouse_event(4, 0, 0, 0, 0)
+        # Allow the desktop/Flutter pointer target to settle after foreground
+        # acquisition and cursor movement before injecting the button pair.
+        time.sleep(.2)
+        down = Input(type=0, data=Union(mouse=Mouse(0, 0, 0, 2, 0, 0)))
+        up = Input(type=0, data=Union(mouse=Mouse(0, 0, 0, 4, 0, 0)))
+        assert u.SendInput(1, ctypes.byref(down), ctypes.sizeof(down)) == 1
+        time.sleep(.06)
+        assert u.SendInput(1, ctypes.byref(up), ctypes.sizeof(up)) == 1
     elif action[0] == "text":
         for c in action[1]:
             key(0, 4, ord(c)); key(0, 6, ord(c))
@@ -86,6 +92,9 @@ for action in json.loads(sys.argv[1]):
         if action[0] == "shiftenter": key(0x10)
         key(0x0D); key(0x0D, 2)
         if action[0] == "shiftenter": key(0x10, 2)
+    elif action[0] in ("escape", "down", "up", "tab"):
+        vk = {"escape": 0x1B, "down": 0x28, "up": 0x26, "tab": 0x09}[action[0]]
+        key(vk); key(vk, 2)
     else:
         raise ValueError("Unknown native input")
     time.sleep(.4)

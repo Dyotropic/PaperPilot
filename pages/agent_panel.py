@@ -50,6 +50,12 @@ _agent_topic_desc: str = ""
 _agent_session_id: str | None = None
 _session_selector: ft.Dropdown | None = None
 _usage_text: ft.Text | None = None
+_context_text: ft.Text | None = None
+_context_bar: ft.ProgressBar | None = None
+_command_menu: ft.Container | None = None
+_command_rows: dict = {}
+_slash_dismissed = False
+_slash_index = 0
 _thinking_active: bool = False
 _active_run: AgentRun | None = None
 _agent_send_button: ft.IconButton | None = None
@@ -81,13 +87,15 @@ def begin_agent_run(cm, pid, goal, operation="chat", on_partial=None):
             return
         _active_run = None
         _thinking_active = False
-        if note and run.identity == (_agent_project_id or 0, _agent_session_id):
+        if note and not run.maintenance and run.identity == (_agent_project_id or 0, _agent_session_id):
             send_agent_message(note, role="agent")
         _refresh_run_button()
         refresh_agent_usage()
+        _refresh_command_menu()
     _active_run = AgentRun(cm, pid, goal, operation, on_done=done, on_partial=on_partial)
     _thinking_active = True
     _refresh_run_button()
+    _refresh_command_menu()
     return _active_run
 
 
@@ -442,6 +450,17 @@ def refresh_agent_panel_theme() -> None:
         _session_selector.border_color = border_color()
     if _usage_text is not None:
         _usage_text.color = text_secondary()
+    if _context_text is not None:
+        _context_text.color = text_secondary()
+        _context_bar.bgcolor = surface_hi()
+    if _command_menu is not None:
+        _command_menu.bgcolor = surface()
+        _command_menu.border = ft.Border.all(1, border_color())
+        _command_menu.content.controls[0].color = text_secondary()
+        _command_menu.content.controls[-1].color = text_secondary()
+        for row in _command_rows.values():
+            row.content.controls[0].color = text_primary()
+            row.content.controls[1].color = text_secondary()
 
     for message in _agent_msg_list.controls:
         role = message.data
@@ -467,7 +486,19 @@ def refresh_agent_panel_theme() -> None:
         elif role == "thinking":
             message.bgcolor = surface()
             message.content.color = colors["muted_text"]
+        elif role == "compression":
+            tile = message.content
+            tile.bgcolor = tile.collapsed_bgcolor = surface_hi()
+            tile.text_color = tile.collapsed_text_color = text_primary()
+            tile.icon_color = tile.collapsed_icon_color = text_secondary()
+            tile.leading.color = seed_color()
+            for label in tile.title.controls:
+                label.color = text_primary() if label.size == FS_MD else text_secondary()
+            tile.controls[0].md_style_sheet = _agent_markdown_styles(FS_MD)
+            tile.controls[0].code_theme = (ft.MarkdownCodeTheme.GITHUB if not state.dark_mode
+                                         else ft.MarkdownCodeTheme.A11Y_DARK)
 
+    _refresh_command_menu()
     _agent_panel_ref.update()
 
 
@@ -627,7 +658,10 @@ def _trigger_agent_chat(message: str, papers: list | None = None,
                     _agent_msg_list.update()
                 except RuntimeError:
                     pass
-            send_agent_message(reply or "AI 未返回内容，请查看用量详情或稍后重试。", role="agent")
+            if result.get("compressed"):
+                load_agent_conversation()
+            else:
+                send_agent_message(reply or "AI 未返回内容，请查看用量详情或稍后重试。", role="agent")
 
             # 弹出确认对话框
             if proposal and identity[0]:
@@ -748,13 +782,19 @@ def load_agent_conversation():
     # 批量构建气泡，最后一次性 update + scroll
     bubbles = []
 
-    for cs in cm.compressed_summaries:
-        text = f"📋 历史摘要：{cs.get('rounds_summary', '')}"
-        bubbles.append(_make_bubble(text, role="agent"))
-
-    for msg in cm.display_messages:
-        role = "user" if msg["role"] == "user" else "agent"
-        bubbles.append(_make_bubble(msg["content"], role=role))
+    for item in cm.display_timeline():
+        if item["kind"] == "compression":
+            bubbles.append(_make_compaction_card(item["record"]))
+        else:
+            msg = item["message"]
+            role = "user" if msg["role"] == "user" else "agent"
+            bubbles.append(_make_bubble(msg["content"], role=role))
+    maintenance = cm._meta.get("maintenance", {})
+    if maintenance.get("state") in {"interrupted", "failed", "cancelled"}:
+        text = {"interrupted": "上次压缩未正常结束；已提交的摘要与原始对话保留。",
+                "failed": "上次压缩未完成，原上下文保留。",
+                "cancelled": "上次压缩已停止，原始对话保留。"}[maintenance["state"]]
+        bubbles.append(_make_bubble(text, role="system"))
 
     _agent_msg_list.controls.extend(bubbles)
     if len(_agent_msg_list.controls) > 200:
@@ -811,6 +851,7 @@ def set_agent_project(project_id: int | None, project_name: str = "",
 
 def refresh_agent_usage():
     """Show weighted token statistics for this chat, with missing usage explicit."""
+    refresh_agent_context()
     if _usage_text is None:
         return
     try:
@@ -834,6 +875,222 @@ def refresh_agent_usage():
     except Exception:
         _usage_text.value = "用量统计暂不可用"
         logger.warning("Agent usage display failed", exc_info=True)
+
+
+def refresh_agent_context():
+    if _context_text is None:
+        return
+    try:
+        draft = (_agent_input.value or "") if _agent_input else ""
+        if _slash_filter(draft) is not None:
+            draft = ""
+        status = _ai_service.get_context_status(_agent_project_id or 0, _agent_project_name or "通用",
+                    _agent_topic_desc, session_id=_agent_session_id, draft=draft)
+        window = f"{status['window']:,}" if status["window"] else "未配置"
+        ratio = f" · {status['ratio']:.1%}" if status["ratio"] is not None else ""
+        _context_text.value = f"上下文 ≈{status['used']:,} / {window} token{ratio}"
+        _context_bar.value = min(1, status["ratio"]) if status["ratio"] is not None else 0
+        _context_bar.color = ft.Colors.ERROR if (status["ratio"] or 0) >= .9 else seed_color()
+        detail = "最近聊天输入用量 + 后续内容估算" if status["anchored"] else "当前发送上下文估算"
+        _context_text.tooltip = (f"{status['model'] or '模型未配置'}；{detail}。不是累计账单用量。"
+            f"草稿约 {status['draft_tokens']:,} token；自动压缩阈值 {status['compact_threshold']:,}。点击查看详情与配置容量。")
+        _context_text.update()
+        _context_bar.update()
+    except RuntimeError:
+        pass
+    except Exception:
+        _context_text.value = "上下文统计暂不可用"
+        logger.warning("Agent context display failed", exc_info=True)
+
+
+def _make_compaction_card(record):
+    before, after = record.get("before_tokens"), record.get("after_tokens")
+    label = (f"估算 {before:,} → {after:,} token · 原始记录保留" if before is not None and after is not None
+             else f"涵盖 {record.get('original_rounds', '?')} 轮 · 原始记录按现有历史保存")
+    body = _agent_markdown(record.get("rounds_summary", ""), FS_MD)
+    summary_key = ft.ScrollKey("context-summary-" + record.get("compressed_at", "legacy"))
+    body.key = summary_key
+    async def reveal(e):
+        if e.control.expanded and _agent_msg_list is not None:
+            await asyncio.sleep(.35)
+            try:
+                await _agent_msg_list.scroll_to(scroll_key=summary_key, duration=150)
+            except RuntimeError:
+                pass
+    tile = ft.ExpansionTile(
+        title=ft.Column([
+            ft.Text("手动压缩已完成" if record.get("mode") == "manual" else "上下文已压缩",
+                    size=FS_MD, weight=FW_MEDIUM, color=text_primary()),
+            ft.Text(label, size=FS_XS, color=text_secondary()),
+        ], spacing=SP_XS, tight=True),
+        leading=ft.Icon(ft.Icons.COMPRESS, size=FS_XL, color=seed_color()),
+        controls=[body], on_change=reveal,
+        expanded=False, dense=True, maintain_state=True,
+        tile_padding=ft.padding.Padding(left=SP_SM, right=SP_SM, top=SP_XS, bottom=SP_XS),
+        controls_padding=ft.padding.Padding(left=SP_MD, right=SP_MD, top=SP_SM, bottom=SP_MD),
+        bgcolor=surface_hi(), collapsed_bgcolor=surface_hi(),
+        text_color=text_primary(), collapsed_text_color=text_primary(),
+        icon_color=text_secondary(), collapsed_icon_color=text_secondary(),
+    )
+    return ft.Container(content=tile, border_radius=R_MD, data="compression")
+
+
+def _show_context_details(e=None):
+    from paperpilot.config import save_config
+    status = _ai_service.get_context_status(_agent_project_id or 0, _agent_project_name or "通用",
+                            _agent_topic_desc, session_id=_agent_session_id)
+    cm = _ai_service.get_conversation(_agent_project_id or 0, _agent_project_name or "通用",
+                                    _agent_topic_desc, _agent_session_id)
+    source = "官方标注 1M，按 1,000,000 保守计" if status["source"].startswith("https:") else status["source"]
+    capacity = f"{status['window']:,} token" if status["window"] else "未配置（不猜测模型容量）"
+    recent = status["sample"].get("input_tokens")
+    lines = (f"模型：{status['provider'] or '未配置'} / {status['model'] or '未配置'}\n"
+             f"总窗口：{capacity} · {source}\n当前占用：约 {status['used']:,} token\n"
+             f"自动压缩阈值：约 {status['compact_threshold']:,} token\n"
+             f"回复预留：{status['output_reserve']:,} token\n"
+             "当前占用包括规则、有效摘要、近期对话和已注入的研究资料；属于估算，"
+             "不等于累计输入/输出用量。压缩后的估算立即重算，下一次聊天用量会更新基准。")
+    if recent is not None:
+        lines += f"\n最近聊天请求实际输入：{recent:,} token（不是压缩请求的用量）。"
+    if not cm._meta.get("history_complete", True):
+        lines += "\n部分旧会话在历史版本中已丢弃压缩前原文，现有记录保留；不能恢复缺失原文。"
+    field = ft.TextField(label="覆盖此模型的总窗口（token）", value="",
+                         autofocus=True,
+                         hint_text="留空保留现有容量", keyboard_type=ft.KeyboardType.NUMBER,
+                         text_size=FS_MD, disabled=not bool(status["model"]))
+    feedback = ft.Text("只影响当前服务商／模型的容量设置。", size=FS_SM, color=text_secondary())
+    def save(e):
+        value = (field.value or "").strip()
+        if not value:
+            close_dialog(ctx.page, dlg)
+            return
+        if not value.isdecimal() or not 1024 <= int(value) <= 50_000_000:
+            field.error_text = "请输入 1,024 到 50,000,000 之间的整数"
+            field.update()
+            return
+        try:
+            save_config({"agent": {"context_windows": {status["provider"]: {status["model"]: int(value)}}}})
+        except Exception:
+            feedback.value = "容量设置保存失败，原设置保留。"
+            feedback.color = ft.Colors.ERROR
+            feedback.update()
+            return
+        close_dialog(ctx.page, dlg)
+        refresh_agent_context()
+    dlg = ft.AlertDialog(title=ft.Text("上下文窗口", size=FS_LG),
+        content=ft.Column([ft.Text(lines, size=FS_MD, selectable=True), field, feedback],
+                          width=SP_XXL * 13, tight=True, scroll=ft.ScrollMode.AUTO, height=SP_XXL * 11),
+        actions=[ft.TextButton(content=ft.Text("关闭"), on_click=lambda e: close_dialog(ctx.page, dlg)),
+                 ft.TextButton(content=ft.Text("保存容量"), on_click=save)])
+    open_dialog(ctx.page, dlg)
+
+
+_SLASH_COMMANDS = (("compact", "压缩上下文", "保留原始记录，生成继续工作摘要"),
+                   ("new", "新建会话", "在当前课题下开始独立聊天"),
+                   ("usage", "用量详情", "查看请求消耗与缓存命中"))
+
+
+def _slash_filter(text):
+    """Only a single leading slash word is a command; prose/paths stay ordinary."""
+    if not text.startswith("/") or "/" in text[1:] or "\n" in text or any(c.isspace() for c in text.strip()):
+        return None
+    return text.strip()[1:].casefold()
+
+
+def _refresh_command_menu():
+    if _command_menu is None or _agent_input is None:
+        return
+    query = _slash_filter(_agent_input.value or "")
+    matches = [name for name, _, _ in _SLASH_COMMANDS if query is not None and name.startswith(query)]
+    _command_menu.visible = query is not None and not _slash_dismissed
+    menu_navigation = bool(_command_menu.visible)
+    if _agent_input.ignore_up_down_keys != menu_navigation:
+        _agent_input.ignore_up_down_keys = menu_navigation
+        try:
+            _agent_input.update()
+        except RuntimeError:
+            pass
+    selected = matches[min(_slash_index, len(matches) - 1)] if matches else None
+    for name, row in _command_rows.items():
+        row.visible = name in matches
+        row.disabled = _thinking_active and name in {"compact", "new"}
+        row.style = ft.ButtonStyle(bgcolor=surface_hi() if name == selected else surface(),
+            alignment=ft.Alignment(-1, 0), shape=ft.RoundedRectangleBorder(radius=R_SM))
+    _command_menu.content.controls[-1].value = (
+        "正在工作；请先停止当前轮，再压缩或新建会话。" if _thinking_active else
+        "Enter 执行选中项 · Esc 收起" if matches else "没有匹配的命令；修改文字或按 Esc 收起。")
+    try:
+        _command_menu.update()
+    except RuntimeError:
+        pass
+
+
+def _dispatch_command(name):
+    if _thinking_active and name in {"compact", "new"}:
+        return
+    _command_menu.visible = False
+    _agent_input.value = ""
+    _agent_input.update()
+    _command_menu.update()
+    if name == "compact":
+        _start_context_compaction()
+    elif name == "new":
+        _new_agent_session()
+    elif name == "usage":
+        _show_usage_details()
+
+
+def _start_context_compaction(e=None):
+    if _thinking_active:
+        return
+    pid, name, topic, sid = _agent_project_id or 0, _agent_project_name or "通用", _agent_topic_desc, _agent_session_id
+    cm = _ai_service.get_conversation(pid, name, topic, sid)
+    run = begin_agent_run(cm, pid, "/compact", "compression")
+    if run is None:
+        return
+    pending = _make_bubble("正在压缩上下文…\n保留原始记录、研究目标与近期对话，可点击方块停止。", role="system")
+    _agent_msg_list.controls.append(pending)
+    _agent_msg_list.update()
+    _scroll_agent_to_bottom()
+    async def worker():
+        def work():
+            with run_scope(run):
+                run.phase("生成上下文检查点")
+                result = _ai_service.compact_context(pid, name, topic, session_id=cm.session_id)
+                if result["status"] == "completed":
+                    run.completed("上下文压缩")
+                elif result["status"] == "failed":
+                    run.fail()
+                return result
+        try:
+            result = await asyncio.to_thread(work)
+            if run.identity == (_agent_project_id or 0, _agent_session_id):
+                if result["status"] == "completed":
+                    load_agent_conversation()
+                elif pending in _agent_msg_list.controls:
+                    index = _agent_msg_list.controls.index(pending)
+                    _agent_msg_list.controls[index] = _make_bubble(result["message"], role="system")
+                    _agent_msg_list.update()
+        except OperationCancelled:
+            if run.identity == (_agent_project_id or 0, _agent_session_id) and pending in _agent_msg_list.controls:
+                index = _agent_msg_list.controls.index(pending)
+                _agent_msg_list.controls[index] = _make_bubble("已停止压缩，原上下文与研究目标保留。", role="system")
+                _agent_msg_list.update()
+        except asyncio.CancelledError:
+            # Closing the desktop must also cancel its background summarizer;
+            # a task cancellation is never a successful maintenance checkpoint.
+            run.stop()
+            raise
+        except Exception:
+            run.fail()
+            logger.warning("Manual context compaction failed", exc_info=True)
+            if run.identity == (_agent_project_id or 0, _agent_session_id) and pending in _agent_msg_list.controls:
+                index = _agent_msg_list.controls.index(pending)
+                _agent_msg_list.controls[index] = _make_bubble("压缩未完成；已保存的记录保留，请重试。", role="system")
+                _agent_msg_list.update()
+        finally:
+            run.finish()
+    ctx.page.run_task(worker)
 
 
 def _show_usage_details(e=None):
@@ -1351,11 +1608,14 @@ def build_agent_panel() -> tuple[ft.Container, ft.GestureDetector]:
         (panel_container, resize_handle)
     """
     global _agent_msg_list, _agent_input, _agent_panel_ref, _session_selector, _usage_text, _agent_send_button
+    global _context_text, _context_bar, _command_menu, _command_rows, _slash_dismissed, _slash_index
+    _slash_dismissed, _slash_index = False, 0
     ctx.refresh_agent_usage = refresh_agent_usage
     ctx.begin_agent_run = begin_agent_run
 
     _agent_input = ft.TextField(
-        hint_text="问问 PaperPilot Agent...",
+        key=ft.ValueKey("agent-composer-input"),
+        hint_text="输入消息，或 / 查看命令",
         multiline=True,
         shift_enter=True,
         min_lines=1,
@@ -1372,17 +1632,60 @@ def build_agent_panel() -> tuple[ft.Container, ft.GestureDetector]:
 
     def _on_agent_send(e):
         if _thinking_active:
-            send_agent_message("AI 正在思考中，请稍候...", role="system")
             return
         text = _agent_input.value.strip()
         if not text:
             return
+        query = _slash_filter(_agent_input.value or "")
+        if query is not None:
+            matches = [name for name, _, _ in _SLASH_COMMANDS if name.startswith(query)]
+            if matches:
+                _dispatch_command(matches[min(_slash_index, len(matches) - 1)])
+            else:
+                send_agent_message("未识别的命令。输入 / 可查看可用选项。", role="system")
+            return
         send_agent_message(text, role="user")
         _agent_input.value = ""
         _agent_input.update()
+        _refresh_command_menu()
         _trigger_agent_chat(text)
 
     _agent_input.on_submit = _on_agent_send
+    async def composer_change(e):
+        global _slash_dismissed, _slash_index
+        was_visible = bool(_command_menu and _command_menu.visible)
+        _slash_dismissed, _slash_index = False, 0
+        _refresh_command_menu()
+        refresh_agent_context()
+        if was_visible != bool(_command_menu and _command_menu.visible):
+            # Inserting the command menu changes the composer layout. Preserve
+            # editing focus so Enter cannot activate an unrelated page menu.
+            await asyncio.sleep(.1)
+            await _agent_input.focus()
+    _agent_input.on_change = composer_change
+    previous_keyboard = ctx.page.on_keyboard_event
+    async def composer_keyboard(e):
+        global _slash_dismissed, _slash_index
+        if _command_menu and _command_menu.visible:
+            key = e.key.casefold().replace(" ", "")
+            if key in {"escape", "esc"}:
+                _slash_dismissed = True
+                _refresh_command_menu()
+                await _agent_input.focus()
+                return
+            if key in {"arrowdown", "arrowup"}:
+                query = _slash_filter(_agent_input.value or "")
+                matches = [name for name, _, _ in _SLASH_COMMANDS if query is not None and name.startswith(query)]
+                if matches:
+                    _slash_index = (_slash_index + (1 if key == "arrowdown" else -1)) % len(matches)
+                    _refresh_command_menu()
+                return
+        if previous_keyboard:
+            result = previous_keyboard(e)
+            import inspect
+            if inspect.isawaitable(result):
+                await result
+    ctx.page.on_keyboard_event = composer_keyboard
     def _send_or_stop(e):
         if _active_run is not None:
             stop_agent_run(e)
@@ -1482,6 +1785,26 @@ def build_agent_panel() -> tuple[ft.Container, ft.GestureDetector]:
         tooltip="当前课题的独立会话", on_select=_select_agent_session,
     )
     _usage_text = ft.Text("暂无用量", size=FS_XS, color=text_secondary(), expand=True)
+    _context_text = ft.Text("正在读取上下文…", size=FS_XS, color=text_secondary(), no_wrap=False)
+    _context_bar = ft.ProgressBar(value=0, height=SP_XS, color=seed_color(), bgcolor=surface_hi())
+    context_meter = ft.Container(content=ft.Column([_context_text, _context_bar], spacing=SP_XS),
+                                 on_click=_show_context_details,
+                                 padding=ft.padding.Padding(left=SP_SM, right=SP_SM, top=SP_XS, bottom=SP_XS))
+    _command_rows = {
+        name: ft.TextButton(content=ft.Column([
+            ft.Text(f"/{name}  {title}", size=FS_MD, color=text_primary()),
+            ft.Text(description, size=FS_SM, color=text_secondary()),
+        ], spacing=SP_XS, tight=True), on_click=lambda e, command=name: _dispatch_command(command))
+        for name, title, description in _SLASH_COMMANDS
+    }
+    _command_menu = ft.Container(visible=False, bgcolor=surface(), border_radius=R_MD,
+        border=ft.Border.all(1, border_color()),
+        padding=ft.padding.Padding(left=SP_SM, right=SP_SM, top=SP_XS, bottom=SP_XS),
+        content=ft.Column([
+            ft.Text("命令", size=FS_XS, color=text_secondary()),
+            *_command_rows.values(),
+            ft.Text("Enter 执行选中项 · Esc 收起", size=FS_XS, color=text_secondary()),
+        ], spacing=SP_XS, tight=True, horizontal_alignment=ft.CrossAxisAlignment.STRETCH))
     agent_panel = ft.Container(
         content=ft.Column([
             ft.Container(
@@ -1505,11 +1828,16 @@ def build_agent_panel() -> tuple[ft.Container, ft.GestureDetector]:
                                   tooltip="用量详情", on_click=_show_usage_details)], spacing=SP_XS),
             _agent_msg_list,
             ft.Divider(height=1, color=border_color()),
+            context_meter,
+            # Keep a composer sibling mounted even when the menu is hidden.
+            # Flutter must not reuse its TextField state for a different child
+            # when visible controls are filtered out of a Column.
+            ft.Container(content=_command_menu, key=ft.ValueKey("agent-command-host")),
             ft.Row([
                 _preset_menu,
                 _agent_input,
                 _agent_send_button,
-            ], spacing=6),
+            ], spacing=6, key=ft.ValueKey("agent-composer-row")),
         ], spacing=SP_XS),
         width=_agent_panel_width,
         bgcolor=surface(),

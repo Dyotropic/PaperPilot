@@ -8,6 +8,7 @@
 {
   "_meta": { project_name, created_at, updated_at, total_rounds, estimated_tokens, compressed_count },
   "messages": [ {role, content, attached_papers?, timestamp}, ... ],
+  "history": [ 全部已保存的原始消息，压缩不删除 ],
   "compressed": [ {rounds_summary, original_rounds, compressed_at}, ... ]
 }
 """
@@ -28,7 +29,8 @@ logger = logging.getLogger(__name__)
 
 _REPO_ROOT = _get_app_dir() / "repository"
 
-# 128K 上下文窗口，80K 触发压缩，留 48K 给回复
+# Compatibility fallback for models whose context capacity has not been configured.
+# Model-scoped capacity and pressure policy live in context_budget.py.
 _MAX_TOKENS = 80000
 # 初始加载显示最近 N 轮对话
 _DISPLAY_ROUNDS = 30
@@ -78,6 +80,7 @@ class ConversationManager:
         data = self._load()
         self._meta: dict = data["_meta"]
         self._messages: list[dict] = data["messages"]
+        self._history: list[dict] = data.get("history", copy.deepcopy(self._messages))
         self._compressed: list[dict] = data.get("compressed", [])
 
     # ── 加载 / 保存 ──
@@ -93,15 +96,22 @@ class ConversationManager:
                 kind = event["kind"]
                 if kind == "snapshot":
                     data = event["data"]
+                    data.setdefault("history", copy.deepcopy(data["messages"]))
+                    data["_meta"].setdefault("history_complete", not bool(data.get("compressed")))
                 elif kind == "message":
                     data["messages"].append(event["message"])
+                    data["history"].append(event["message"])
                 elif kind == "metadata":
                     data["_meta"].update(event["changes"])
                 elif kind == "compression":
+                    event["summary"].setdefault("history_boundary",
+                        len(data["history"]) - len(data["messages"]) + event["count"])
                     data.setdefault("compressed", []).append(event["summary"])
                     data["messages"] = data["messages"][event["count"]:]
                 elif kind == "clear":
-                    data["messages"], data["compressed"] = [], []
+                    data["messages"], data["compressed"], data["history"] = [], [], []
+                    data["_meta"].pop("context_sample", None)
+                    data["_meta"]["history_complete"] = True
                 else:
                     raise ValueError("会话日志包含未知事件；原文件已保留")
             data["_meta"]["total_rounds"] = sum(m["role"] == "user" for m in data["messages"])
@@ -110,7 +120,10 @@ class ConversationManager:
             return data
         if self._path.is_file():
             try:
-                return json.loads(self._path.read_text(encoding="utf-8"))
+                data = json.loads(self._path.read_text(encoding="utf-8"))
+                data.setdefault("history", copy.deepcopy(data["messages"]))
+                data["_meta"].setdefault("history_complete", not bool(data.get("compressed")))
+                return data
             except (json.JSONDecodeError, OSError):
                 if self.session_id:
                     raise ValueError("会话记录无法读取；原文件已保留")
@@ -166,8 +179,10 @@ class ConversationManager:
                 "total_rounds": 0,
                 "estimated_tokens": 0,
                 "compressed_count": 0,
+                "history_complete": True,
             },
             "messages": [],
+            "history": [],
             "compressed": [],
         }
 
@@ -182,6 +197,7 @@ class ConversationManager:
         out = {
             "_meta": self._meta,
             "messages": self._messages,
+            "history": self._history,
             "compressed": self._compressed,
         }
         atomic_write_text(self._path, json.dumps(out, ensure_ascii=False, indent=2))
@@ -195,9 +211,25 @@ class ConversationManager:
             self._meta["last_run"] = copy.deepcopy(state)
             self._save()
 
+    def set_maintenance_state(self, state: dict):
+        """Compaction is maintenance; it must not replace an interrupted user goal."""
+        with self.lock:
+            self._append_event("metadata", changes={"maintenance": state})
+            self._meta["maintenance"] = copy.deepcopy(state)
+            self._save()
+
+    def set_context_sample(self, sample: dict):
+        with self.lock:
+            self._append_event("metadata", changes={"context_sample": sample})
+            self._meta["context_sample"] = copy.deepcopy(sample)
+            self._save()
+
     def recover_interrupted_run(self):
         """Called on load only when this process has no live owner for this chat."""
         with self.lock:
+            maintenance = self._meta.get("maintenance", {})
+            if maintenance.get("state") in {"running", "stopping"}:
+                self.set_maintenance_state({**maintenance, "state": "interrupted"})
             state = self._meta.get("last_run", {})
             if state.get("state") not in {"running", "stopping"}:
                 return
@@ -239,6 +271,7 @@ class ConversationManager:
         with self.lock:
             self._append_event("message", message=msg)
             self._messages.append(msg)
+            self._history.append(msg)
             self._save()
 
     def add_assistant_message(self, content: str, display_content: str = "") -> None:
@@ -253,6 +286,7 @@ class ConversationManager:
         with self.lock:
             self._append_event("message", message=msg)
             self._messages.append(msg)
+            self._history.append(msg)
             self._save()
 
     # ── 查询 ──
@@ -265,7 +299,7 @@ class ConversationManager:
         避免 UI 显示注入的论文详情。
         """
         msgs = []
-        for m in self._messages[-(_DISPLAY_ROUNDS * 2):]:
+        for m in self._history[-(_DISPLAY_ROUNDS * 2):]:
             copy = dict(m)
             if m.get("display_content"):
                 copy["content"] = m["display_content"]
@@ -275,22 +309,43 @@ class ConversationManager:
     @property
     def has_more_history(self) -> bool:
         """是否有更早的对话可加载。"""
-        return len(self._messages) > _DISPLAY_ROUNDS * 2
+        return len(self._history) > _DISPLAY_ROUNDS * 2
 
     def load_more_history(self, rounds: int = _DISPLAY_ROUNDS) -> list[dict]:
         """加载更早的对话（往前多取 rounds 轮）。"""
-        current_visible = len(self.display_messages) if hasattr(self, '_visible_count') else _DISPLAY_ROUNDS * 2
-        # NOT a property leak — just a dict
-        if not hasattr(self, '_visible_count'):
-            object.__setattr__(self, '_visible_count', _DISPLAY_ROUNDS * 2)
-        self._visible_count += rounds * 2
-        start = max(0, len(self._messages) - self._visible_count)
-        return self._messages[start:-(self._visible_count - rounds * 2)] if start > 0 else []
+        previous = getattr(self, "_visible_count", _DISPLAY_ROUNDS * 2)
+        self._visible_count = previous + max(0, rounds) * 2
+        end = max(0, len(self._history) - previous)
+        start = max(0, len(self._history) - self._visible_count)
+        return copy.deepcopy(self._history[start:end])
 
     @property
     def compressed_summaries(self) -> list[dict]:
         """压缩历史摘要列表。"""
-        return list(self._compressed)
+        return copy.deepcopy(self._compressed)
+
+    def _active_summaries(self):
+        # Legacy checkpoints accumulated; a consolidated checkpoint supersedes
+        # all its predecessors, while keeping their records available in the UI.
+        start = next((i for i in range(len(self._compressed) - 1, -1, -1)
+                      if self._compressed[i].get("consolidated")), 0)
+        return self._compressed[start:]
+
+    def display_timeline(self):
+        with self.lock:
+            start = max(0, len(self._history) - _DISPLAY_ROUNDS * 2)
+            markers = {}
+            for record in self._compressed:
+                boundary = max(start, record.get("history_boundary", start))
+                markers.setdefault(boundary, []).append(copy.deepcopy(record))
+            timeline = []
+            for i in range(start, len(self._history) + 1):
+                timeline.extend(dict(kind="compression", record=r) for r in markers.get(i, []))
+                if i < len(self._history):
+                    m = dict(self._history[i])
+                    m["content"] = m.get("display_content") or m["content"]
+                    timeline.append(dict(kind="message", message=m))
+            return timeline
 
     @property
     def total_rounds(self) -> int:
@@ -311,9 +366,15 @@ class ConversationManager:
                            if m.get("library_context_hash")), None)
             return latest == fingerprint
 
-    def needs_compression(self, threshold: int = _MAX_TOKENS, *, extra_tokens: int = 0) -> bool:
-        """是否需要压缩。"""
-        summaries = sum(_estimate_tokens(c.get("rounds_summary", "")) for c in self._compressed)
+    def needs_compression(self, threshold: int = _MAX_TOKENS, *, extra_tokens: int = 0,
+                          current_tokens: int | None = None) -> bool:
+        """是否需要压缩；调用方可提供与仪表一致的已校准占用。
+
+        不提供 current_tokens 时保持历史字符估算接口的语义。
+        """
+        if current_tokens is not None:
+            return current_tokens + extra_tokens > threshold
+        summaries = sum(_estimate_tokens(c.get("rounds_summary", "")) for c in self._active_summaries())
         return _estimate_messages_tokens(self._messages) + summaries + extra_tokens > threshold
 
     # ── API 消息构建 ──
@@ -337,7 +398,7 @@ class ConversationManager:
         # A compaction changes history, but must preserve the reusable system prefix.
         if self._compressed:
             summaries = []
-            for c in self._compressed:
+            for c in self._active_summaries():
                 summaries.append(
                     f"[历史摘要：涵盖 {c.get('original_rounds', '?')} 轮对话]\n"
                     f"{c.get('rounds_summary', '')}"
@@ -365,16 +426,72 @@ class ConversationManager:
 
     def apply_compression(self, summary: str, batch: list[dict]) -> None:
         """将一批对话替换为摘要。"""
+        if self._messages[:len(batch)] != batch:
+            raise ValueError("待压缩上下文已变化，原记录保留；请重试")
         original_rounds = sum(1 for m in batch if m["role"] == "user")
         record = {
             "rounds_summary": summary,
             "original_rounds": original_rounds,
             "compressed_at": datetime.now().isoformat(),
+            "history_boundary": len(self._history) - len(self._messages) + len(batch),
         }
         self._append_event("compression", summary=record, count=len(batch))
         self._compressed.append(record)
         self._messages = self._messages[len(batch):]
         self._save()
+
+    def compaction_plan(self, system_prompt, keep_rounds=2, *, manual=False):
+        """Snapshot a complete prefix, keeping recent question/answer turns verbatim."""
+        with self.lock:
+            boundaries = [i + 1 for i, m in enumerate(self._messages)
+                          if m["role"] == "assistant"
+                          and (i + 1 == len(self._messages) or self._messages[i + 1]["role"] == "user")]
+            if not boundaries:
+                return None
+            if not manual and len(boundaries) <= keep_rounds:
+                return None
+            index = max(0, len(boundaries) - keep_rounds - 1)
+            count = boundaries[index]
+            # For short chats manual compaction can include the completed history.
+            # An unanswered trailing user message always remains verbatim.
+            if manual and len(boundaries) <= keep_rounds:
+                count = boundaries[-1]
+            batch = copy.deepcopy(self._messages[:count])
+            api = self.build_api_messages(system_prompt)
+            prefix_count = len(api) - len(self._messages)
+            return dict(batch=batch, summaries=copy.deepcopy(self._active_summaries()),
+                        api_messages=api[:prefix_count + count], system_prompt=system_prompt)
+
+    def commit_compaction(self, summary, plan, *, mode, provider, model):
+        from paperpilot.context_budget import estimate_request_tokens
+        from paperpilot.agent_runtime import checkpoint
+        with self.lock:
+            checkpoint()
+            batch = plan["batch"]
+            if self._messages[:len(batch)] != batch or self._active_summaries() != plan["summaries"]:
+                raise ValueError("待压缩上下文已变化，原记录保留；请重试")
+            before = estimate_request_tokens(self.build_api_messages(plan["system_prompt"]))
+            prior_rounds = sum(c.get("original_rounds", 0) for c in plan["summaries"])
+            rounds = prior_rounds + sum(m["role"] == "user" for m in batch)
+            record = dict(rounds_summary=summary, original_rounds=rounds,
+                          compressed_at=datetime.now().isoformat(), consolidated=True,
+                          mode=mode, provider=provider, model=model,
+                          history_boundary=len(self._history),
+                          messages_compacted=len(batch), before_tokens=before)
+            after_messages = [dict(role="system", content=plan["system_prompt"]),
+                dict(role="user", content=f"此前对话摘要（作为历史背景）：\n[历史摘要：涵盖 {rounds} 轮对话]\n{summary}")]
+            after_messages.extend(dict(role=m["role"], content=m["content"]) for m in self._messages[len(batch):])
+            after = estimate_request_tokens(after_messages)
+            if after >= before:
+                return None
+            record["after_tokens"] = after
+            # One flushed event is the replacement checkpoint. Original message
+            # events and the history projection remain intact and recoverable.
+            self._append_event("compression", summary=record, count=len(batch))
+            self._compressed.append(record)
+            self._messages = self._messages[len(batch):]
+            self._save()
+            return copy.deepcopy(record)
 
     # ── 更新课题信息 ──
 
@@ -394,7 +511,10 @@ class ConversationManager:
         """清空对话历史。"""
         self._append_event("clear")
         self._messages.clear()
+        self._history.clear()
         self._compressed.clear()
+        self._meta.pop("context_sample", None)
+        self._meta["history_complete"] = True
         self._save()
 
     def delete_file(self) -> None:

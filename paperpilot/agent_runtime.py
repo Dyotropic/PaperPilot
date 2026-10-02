@@ -131,6 +131,7 @@ class AgentRun:
         self.cm = cm
         self.identity = (project_id, cm.session_id)
         self.user_message, self.operation = goal, operation
+        self.maintenance = operation == "compression"
         previous = copy.deepcopy(cm._meta.get("last_run", {}))
         continuing = goal.strip().strip("。.!！").casefold() in {
             "继续", "继续工作", "继续执行", "接着做", "resume", "continue"}
@@ -157,7 +158,8 @@ class AgentRun:
         self._save()
 
     def _save(self):
-        self.cm.set_run_state(dict(run_id=self.id, state=self._state,
+        save = self.cm.set_maintenance_state if self.maintenance else self.cm.set_run_state
+        save(dict(run_id=self.id, state=self._state,
             goal=self.goal, operation=self.operation, phase=self._phase,
             completed_steps=list(self._completed), started_at=self._started,
             pending_steps=list(self._pending),
@@ -229,6 +231,12 @@ class AgentRun:
             self._state = "cancelled" if self.token.cancelled else (
                 "failed" if self._state == "failed" else "completed")
             note = ""
+            if self.maintenance:
+                if self.token.cancelled:
+                    note = ("已停止压缩；已提交的摘要与原始记录保留。" if self._completed
+                            else "已停止压缩，原上下文与研究目标保留。")
+                self._save()
+                return note
             if self.token.cancelled:
                 # Record the goal even when interrupted during pre-request compaction.
                 if not self.user_recorded:
