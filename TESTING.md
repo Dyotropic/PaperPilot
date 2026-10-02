@@ -29,6 +29,8 @@
 
 `tools/run_validation.py` 从示例构造去凭据配置，不读取用户 `config.yaml`；数据库、课题仓库、输出、下载缓存及临时路径重定向到项目内 `.validation-search-20260922/目标脚本名/`。Python 写入守卫拒绝目标目录以外的写入；可读取已有本地模型缓存。隔离的是配置和数据写入，不自动禁止所有网络请求，缺模型时仍可能尝试下载。
 
+可用 `PAPERPILOT_VALIDATION_SCRATCH` 指定项目内新的 `.validation-*` 目录。本 runner 会清理该目录下同名脚本的旧工作目录；应使用本次任务专用目录，不能指向需要保留的历史证据。
+
 | 脚本 | 主要验证范围 |
 | --- | --- |
 | `tools/validate_agent_context.py` | 模型容量与估算/校准、自动预算、手动压缩、结构/缩减/选区检查、取消保留、原始历史、日志重建及继续 |
@@ -48,6 +50,39 @@
 ```
 
 无需为文档编辑或低风险改动机械执行所有脚本。先读脚本的调用与退出语义，按改动选择覆盖；实际数据源、模型、窗口及付费脚本不因文件名包含 `test` 就被当作离线检查。
+
+## 检索并行与性能验证
+
+```powershell
+$env:PAPERPILOT_VALIDATION_SCRATCH = '.validation-search-my-run'
+.\.venv\Scripts\python.exe -B tools/run_validation.py tools/validate_search_performance.py
+.\.venv\Scripts\python.exe -B tools/run_validation.py tools/validate_remaining_sources.py
+.\.venv\Scripts\python.exe -B tools/run_validation.py tools/validate_search_workflow.py
+.\.venv\Scripts\python.exe -B tools/run_validation.py tools/validate_search_originals.py
+.\.venv\Scripts\python.exe -B tools/run_validation.py tools/validate_search_native.py
+.\.venv\Scripts\python.exe -B tools/run_validation.py tools/validate_search_app.py
+.\.venv\Scripts\python.exe -B tools/run_validation.py tools/validate_search_graph_native.py
+.\.venv\Scripts\python.exe -B tools/run_validation.py tools/benchmark_sources.py --live --count 400
+.\.venv\Scripts\python.exe -B tools/run_validation.py tools/benchmark_search.py --live-openalex --cached-model --count 400
+```
+
+`validate_search_performance.py` 用受控数据源与模型、本地真实 HTTP 服务检查多源重叠、固定合并顺序、单源依赖顺序、描述召回/严格筛选、错误与取消排空、同时检索的上下文归属、400 条分页/摘要批量请求、正/缺失缓存兼容与过期、异常不负缓存、双语翻译复用、旧去重算法等价，以及在途预测的模型释放。受控延迟比较仅证明调度收益，不代表真实源加速比例。
+
+`validate_search_native.py` 启动隔离的 Flet 桌面窗口，通过限制窗口归属的 Win32 鼠标输入点击探针按钮，使用生产检索事件、后台流水线、轮询和结果控件；三源各 400 条替身数据、替身 CE，核对源重叠和 50 条结果，截图保存在本次工作目录。探针预填真实控件和扁平/分层关键词；不能把仅赋值业务状态当作用户已经输入。它不证明云端召回或模型排序质量。
+
+`benchmark_search.py` 默认不执行：必须显式选择 `--live-openalex` 或 `--cached-model`。400 规模采用英文课题、关键词和描述两路召回，50 篇展示、100 个 CE 候选；不调用云端 LLM，模型只允许现有本地缓存，不下载。真实 API 使用隔离的无凭据配置，是否可用以实际响应为准；需要网络权限。脚本报告初次/复用缓存的阶段耗时和计数，随后用同批数据对比原去重算法的内容/顺序与耗时，并保存 `benchmark_report.json`。`--seed-cache <项目内隔离缓存目录>` 可复制此前真实请求的缓存用于离线复放，报告明确标记 `seeded_cache`；该模式的网络阶段不能当作新真实请求或冷网络数据。
+
+`validate_remaining_sources.py` 经本地真实 HTTP 与 arXiv SDK 验证 400 条单页、完整摘要、缓存兼容/副本、跨查询连接复用、严格筛选、后页失败保留、取消不缓存、全局频控、超时透传、失败停止级联、403/429 与重试次数。`validate_search_workflow.py` 用机器人、肿瘤免疫、钙钛矿三领域中英文输入，真实三源适配器连接本地元数据服务，现有真实 CPU CE 每次精排 100 候选/取 50 条；继续走实际数据库、重复保存、库内重排、AI 评分/摘要与全文精读、Agent 对话/独立会话、导出、PDF 下载/归档/本地导入和缓存引用构图。LLM 使用真实 SDK 的 JSON/SSE 传输与受控回复，不测试云端回答质量；未安装 ReportLab 时用项目现有 PyMuPDF 构造文本 PDF。
+
+`validate_search_app.py` 使用 `app.main` 构建全部原生页面；受限鼠标触发探针，进入生产 Agent 检索动作，再调用生产勾选/保存对话框/文献库 CE 回调，检查三源重叠、50 行、保存归属、模型复用与检索/库/设置页切换。默认源与 CE 是替身；显式 `--live-sources --cached-model` 改用真实公开 API 与现有真实 CE，不下载模型、不调用云端 LLM。保存后 PDF 自动下载在探针内禁用，下载/导入另由连续业务测试与原生阅读器验证；不得把探针回调等同于所有控件都经鼠标逐一操作。
+
+`benchmark_sources.py --live` 对三个领域各源目标 400 条，分别记录首次与缓存召回（不含 CE/UI），中文课题使用人工指定英文术语，成功与失败均写报告。返回不足 400 必须报告真实数量；实际网络错误不伪装成缓存加速。原生阅读器/图谱的本地窗口回归另见本地 `test_native_regression.py`。
+
+`validate_search_originals.py` 使用真实本地 HTTP，检查带正式 DOI 的现代/旧式 arXiv 链接经 PDF/HTML 下载、缓存、归档与数据库路径补填后保持原始身份；另检查普通出版商 DOI/外站链接不会被数字误识别。它不证明旧文献在 arXiv 上有 HTML，也不证明外部出版商可下载。连续业务测试可用 `--case-index 0/1/2` 聚焦重跑一个领域；已有三领域覆盖不因重跑同一路径重复计数。
+
+`validate_search_graph_native.py` 从实际 SQLite 文献库及受控引用缓存调用生产构图服务，打开原生 ECharts 窗口，核对三节点、两引用边、三共现边、三视图、详情关闭与最小化恢复。使用现有引擎缓存，不联网下载；视图/详情通过原生页面 JS 事件调用，并非真实鼠标点击节点。旧窗口回归的单节点样本仅证明窗口与恢复行为，不能代替非空边的显示检查。
+
+本次验收说明见 [三源优化与流程验证](validation_evidence/search_all_sources_20261002.md)，逐次证据见 `validation_evidence/search_performance_20261002*.json/png` 与 `search_all_sources_20261002*.json/png`。未做付费云端中文翻译、AI 服务质量或所有服务商的完整验收；真实网络、本地受控 SDK、真实本地模型和原生替身界面须分别列明，不降低召回或 CE 候选换取更短数字。
 
 ## 桌面与原生输入验证
 

@@ -30,8 +30,10 @@ if sys.platform == "win32":
 target = (ROOT / sys.argv[1]).resolve()
 if not target.is_relative_to(ROOT) or not target.is_file():
     raise SystemExit("Expected a local test file under the project root")
-work = ROOT / ".validation-search-20260922" / target.stem
-scratch_root = ROOT / ".validation-search-20260922"
+scratch_root = (ROOT / os.environ.get("PAPERPILOT_VALIDATION_SCRATCH", ".validation-search-20260922")).resolve()
+if not scratch_root.is_relative_to(ROOT) or not scratch_root.name.startswith(".validation-"):
+    raise SystemExit("Validation scratch must be a .validation-* directory under this project")
+work = scratch_root / target.stem
 if work.exists():
     if not work.is_relative_to(scratch_root):
         raise SystemExit("Refusing to clear validation path outside scratch root")

@@ -4,8 +4,9 @@
 排序以服务高引发现（智能推送铺垫），区别于相关度排序。
 """
 
-import socket
 import time
+from copy import deepcopy
+from paperpilot.search_metrics import count, timed_stage
 from paperpilot.agent_runtime import checkpoint, interruptible_wait
 import re
 
@@ -13,7 +14,7 @@ import requests
 
 from paperpilot.sources.base import (
     PaperSource, SourceRateLimited, _build_search_query, cache_ttl_seconds,
-    open_cache,
+    open_cache, source_get,
 )
 from paperpilot.search_filters import SearchFilters, coerce_filters, search_limits
 
@@ -49,7 +50,9 @@ def _parse_europepmc_result(r: dict) -> dict | None:
     doi = (r.get("doi") or "").strip() or None
     pmid = r.get("pmid")
     author_names: list[str] = []
-    for item in (r.get("authorList") or {}).get("author", []) or []:
+    author_list = r.get("authorList") or {}
+    author_items = author_list.get("author", []) if isinstance(author_list, dict) else []
+    for item in author_items if isinstance(author_items, list) else []:
         if not isinstance(item, dict):
             continue
         first = str(item.get("firstName") or "").strip()
@@ -138,7 +141,7 @@ def _fetch_europepmc_filtered(query: str, max_results: int, filters: SearchFilte
         if data is None:
             try:
                 checkpoint()
-                response = requests.get(_EPMC_BASE, params=params,
+                response = source_get(_EPMC_BASE, params=params,
                                         headers={"User-Agent": "PaperPilot/1.0"}, timeout=timeout)
                 if response.status_code in (403, 429):
                     if not papers:
@@ -217,7 +220,9 @@ def _fetch_europepmc_raw(query: str, max_results: int = 30,
         return _fetch_europepmc_filtered(
             query, max_results, effective_filters, errors=errors,
             max_pages=max_pages, request_timeout=request_timeout)
-    papers: list[dict] = []
+    if max_results <= 0:
+        return []
+    _, timeout = search_limits(max_pages, request_timeout)
     page_size = min(1000, max_results)
     params = {
         "query": query,
@@ -236,58 +241,80 @@ def _fetch_europepmc_raw(query: str, max_results: int = 30,
             params["filter"] = f"FIRST_PDATE:[1900-01-01 TO {year_max}-12-31]"
 
     ckey = f"search:{query}|{page_size}|{params.get('filter', '')}|{_EPMC_SORT}"
+    parsed_key = "parsed-v1:" + ckey
+    checkpoint()
+    parsed = _epmc_cache.get(parsed_key) if _epmc_cache is not None else None
+    if isinstance(parsed, list) and all(isinstance(p, dict) and p.get("source") == "europepmc"
+                                       and isinstance(p.get("title"), str) for p in parsed):
+        count("query_cache_hits", source="europepmc")
+        return deepcopy(parsed[:max_results])
     cached = None
     if _epmc_cache is not None:
         cached = _epmc_cache.get(ckey)
     if cached is not None:
         data = cached
-        fetched = False
+        count("query_cache_hits", source="europepmc")
     else:
         data = None
-        fetched = False
         last_status = 0
-        old_timeout = socket.getdefaulttimeout()
-        socket.setdefaulttimeout(15)
-        try:
-            for attempt in range(3):
+        for attempt in range(3):
+            checkpoint()
+            try:
                 checkpoint()
-                try:
-                    checkpoint()
-                    resp = requests.get(_EPMC_BASE, params=params,
-                                        headers={"User-Agent": "PaperPilot/1.0"},
-                                        timeout=15)
-                    last_status = resp.status_code
-                    if resp.status_code == 429:
-                        interruptible_wait(1 * (attempt + 1))
-                        continue
-                    resp.raise_for_status()
-                    body = resp.json()
-                    data = (body.get("resultList") or {}).get("result") or []
-                    fetched = True
-                    if _epmc_cache is not None:
-                        _epmc_cache.set(ckey, data, expire=_CACHE_TTL)
-                    break
-                except requests.RequestException:
-                    interruptible_wait(1 * (attempt + 1))
+                resp = source_get(_EPMC_BASE, params=params,
+                                    headers={"User-Agent": "PaperPilot/1.0"},
+                                    timeout=timeout)
+                last_status = resp.status_code
+                if resp.status_code == 403:
+                    raise SourceRateLimited("europepmc", 403)
+                if resp.status_code == 429:
+                    if attempt < 2:
+                        interruptible_wait(attempt + 1)
                     continue
-        finally:
-            socket.setdefaulttimeout(old_timeout)
+                resp.raise_for_status()
+                with timed_stage("decode", source="europepmc"):
+                    body = resp.json()
+                result_list = body.get("resultList") if isinstance(body, dict) else None
+                data = result_list.get("result", []) if isinstance(result_list, dict) else None
+                if not isinstance(data, list):
+                    _append_error(errors, "invalid_response", "Europe PMC 返回了无效结果，未写入缓存")
+                    return []
+                break
+            except (ValueError, TypeError):
+                _append_error(errors, "invalid_response", "Europe PMC 返回了无效 JSON，未写入缓存")
+                return []
+            except requests.RequestException:
+                if attempt < 2:
+                    interruptible_wait(attempt + 1)
+                continue
         # 3 次重试后仍 429 → 抛限流异常（编排层捕获降级，UI 明确提示）
         if data is None and last_status == 429:
             raise SourceRateLimited("europepmc", 429)
 
     if data is None:
+        _append_error(errors, "network", "Europe PMC 请求失败，已停止该源后续召回")
+        return []
+    if not isinstance(data, list):
+        _append_error(errors, "invalid_response", "Europe PMC 缓存格式错误，已停止该源后续召回")
         return []
 
     total = max(len(data), 1)
     collected: list[dict] = []
-    for i, item in enumerate(data):
-        paper = _parse_europepmc_result(item)
-        if paper:
-            paper["api_score"] = 1.0 - (i / total)
-            collected.append(paper)
-        if len(collected) >= max_results:
-            break
+    with timed_stage("parse", source="europepmc"):
+        for i, item in enumerate(data):
+            checkpoint()
+            paper = _parse_europepmc_result(item)
+            if paper:
+                paper["api_score"] = 1.0 - (i / total)
+                collected.append(paper)
+            if len(collected) >= max_results:
+                break
+    checkpoint()
+    # Cache exactly the public records, retaining full abstracts and author
+    # identities while dropping unused affiliations and other bulky core fields.
+    # Read the previous raw-list cache above for backwards compatibility.
+    if _epmc_cache is not None:
+        _epmc_cache.set(parsed_key, collected, expire=_CACHE_TTL)
     return collected[:max_results]
 
 

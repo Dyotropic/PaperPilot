@@ -206,7 +206,7 @@ class AgentStopTests(unittest.TestCase):
         run.finish()
         self.assertEqual(len(calls),1)
 
-    def test_cancel_reaches_parallel_abstract_workers(self):
+    def test_cancel_reaches_batch_abstract_request(self):
         from paperpilot.sources import openalex_source as source
         run=AgentRun(self.cm,self.project.id,'补齐摘要')
         observed=[]
@@ -223,7 +223,7 @@ class AgentStopTests(unittest.TestCase):
         run.finish()
         self.assertTrue(observed)
         self.assertTrue(all(owner is run for owner in observed))
-        self.assertLessEqual(len(observed),4)
+        self.assertEqual(len(observed),1)
         self.assertTrue(all(not p['abstract'] for p in papers))
 
     def test_parallel_job_completion_emits_one_terminal_record(self):

@@ -4,7 +4,17 @@
 """
 
 import re
+import time
+import threading
+from collections import OrderedDict
+from paperpilot.config import load_config
+from paperpilot.agent_runtime import checkpoint
+from paperpilot.search_metrics import count
 from paperpilot.llm_client import get_client, llm_configured
+
+_cache = OrderedDict()
+_cache_lock = threading.Lock()
+_CACHE_LIMIT = 512
 
 _SYSTEM_PROMPT = (
     "You are a scientific translator. Translate Chinese academic keywords into "
@@ -47,31 +57,60 @@ def translate_terms(chinese_terms: list[str]) -> list[str]:
     if not llm_configured():
         return results
 
-    # Build numbered list for reliable parsing
-    numbered = "\n".join(f"{j+1}. {t}" for j, t in enumerate(to_translate))
+    client = get_client(task="translation")
+    if not client or not client.is_available:
+        return results
+    identity = (type(client).__name__, getattr(client, "provider", ""),
+                getattr(client, "base_url", ""), getattr(client, "model", ""))
+    try:
+        ttl = max(0, min(86400, float((load_config().get("search") or {}).get(
+            "translation_cache_ttl_seconds", 3600))))
+    except (TypeError, ValueError):
+        ttl = 3600
+    pending = OrderedDict()
+    now = time.monotonic()
+    with _cache_lock:
+        for term, index in zip(to_translate, indices):
+            key = identity + (term,)
+            cached = _cache.get(key)
+            if cached and ttl > 0 and now - cached[0] < ttl:
+                results[index] = cached[1]
+                _cache.move_to_end(key)
+                count("translation_cache_hit")
+            else:
+                _cache.pop(key, None)
+                pending.setdefault(term, []).append(index)
+    if not pending:
+        return results
+    # One translation per unique item, preserving all original group positions.
+    numbered = "\n".join(f"{j+1}. {t}" for j, t in enumerate(pending))
     user_msg = (
         "Translate these Chinese academic keywords to English. "
         "Output one translation per line in the format: number. English term\n\n"
         f"{numbered}"
     )
 
-    client = get_client(task="translation")
-    if not client or not client.is_available:
-        return results
-
+    checkpoint()
+    count("translation_request")
     content = client.chat(
         [
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": user_msg},
         ],
-        temperature=0.1, max_tokens=len(to_translate) * 50,
+        temperature=0.1, max_tokens=max(256, sum(max(50, len(t) * 2) for t in pending)),
         timeout=30, thinking=False,
     ).content
-    translations = _parse_batch_response(content, len(to_translate))
-
-    for j, translation in enumerate(translations):
-        if translation:
-            results[indices[j]] = translation
+    checkpoint()
+    translations = _parse_batch_response(content, len(pending))
+    with _cache_lock:
+        for term, translation in zip(pending, translations):
+            if translation:
+                for index in pending[term]:
+                    results[index] = translation
+                if ttl > 0:
+                    _cache[identity + (term,)] = (time.monotonic(), translation)
+        while len(_cache) > _CACHE_LIMIT:
+            _cache.popitem(last=False)
 
     return results
 
@@ -114,49 +153,10 @@ def translate_all_terms(*term_lists: list[str]) -> list[list[str]]:
     Returns:
         与输入一一对应的英文术语列表（每组对应一个输入 list）
     """
-    all_terms: list[str] = []
-    mapping: list[tuple[int, int]] = []  # (src_idx, term_idx)
-    results: list[list[str]] = [[] for _ in term_lists]
-
-    for src_idx, terms in enumerate(term_lists):
-        results[src_idx] = [""] * len(terms)
-        for term_idx, term in enumerate(terms):
-            stripped = term.strip()
-            if not stripped:
-                continue
-            if all(ord(c) < 128 for c in stripped):
-                results[src_idx][term_idx] = stripped
-                continue
-            all_terms.append(stripped)
-            mapping.append((src_idx, term_idx))
-
-    if not all_terms:
-        return results
-
-    numbered = "\n".join(f"{j+1}. {t}" for j, t in enumerate(all_terms))
-    user_msg = (
-        "Translate these Chinese academic keywords to English. "
-        "Output one translation per line in the format: number. English term\n\n"
-        f"{numbered}"
-    )
-
-    client = get_client(task="translation")
-    if not client or not client.is_available:
-        return results
-
-    content = client.chat(
-        [
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user", "content": user_msg},
-        ],
-        temperature=0.1, max_tokens=len(all_terms) * 50,
-        timeout=30, thinking=False,
-    ).content
-    translations = _parse_batch_response(content, len(all_terms))
-
-    for j, translation in enumerate(translations):
-        if translation and j < len(mapping):
-            src_idx, term_idx = mapping[j]
-            results[src_idx][term_idx] = translation
-
+    flat = [term for terms in term_lists for term in terms]
+    translated = translate_terms(flat)
+    results, offset = [], 0
+    for terms in term_lists:
+        results.append(translated[offset:offset + len(terms)])
+        offset += len(terms)
     return results

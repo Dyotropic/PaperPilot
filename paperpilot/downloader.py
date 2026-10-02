@@ -34,7 +34,6 @@ _ARXIV_PDF = "https://arxiv.org/pdf/{}.pdf"
 _ARXIV_HTML = "https://arxiv.org/html/{}"
 _NATURE_PDF = "https://www.nature.com/articles/{}.pdf"
 _SPRINGER_PDF = "https://link.springer.com/content/pdf/{}.pdf"
-_ARXIV_ID_RE = re.compile(r"(\d{4}\.\d{4,5})(?:v\d+)?")
 
 DEFAULT_CACHE_DIR = Path.home() / ".paperpilot_pdf_cache"
 MAX_CACHE_MB = 512
@@ -43,6 +42,26 @@ UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
+
+
+def _arxiv_id_from_paper(paper: dict) -> str | None:
+    """Resolve both ID formats using the exact-search normalization contract."""
+    from paperpilot.exact_search import normalize_arxiv_id
+
+    # An arXiv URL remains usable when the record also has a publisher DOI.
+    for value in (paper.get("url"), paper.get("doi")):
+        text = str(value or "").strip()
+        text = re.sub(r"^(?:https?://(?:dx\.)?doi\.org/)?10\.48550/arxiv\.",
+                      "", text, flags=re.IGNORECASE)
+        text = re.sub(r"^(https?://(?:www\.)?arxiv\.org/)html/", r"\1abs/",
+                      text, flags=re.IGNORECASE)
+        try:
+            identifier = normalize_arxiv_id(text)
+        except ValueError:
+            continue
+        # Keep the existing latest-version download behavior; metadata is intact.
+        return re.sub(r"v\d+$", "", identifier, flags=re.IGNORECASE)
+    return None
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -146,10 +165,7 @@ def _direct_download_with(paper: dict, session, impersonate: str) -> bytes | Non
     }
 
     # ① arXiv（服务端渲染，无需预热）
-    arxiv_id = None
-    m = _ARXIV_ID_RE.search(doi or url or "")
-    if m:
-        arxiv_id = m.group(1)
+    arxiv_id = _arxiv_id_from_paper(paper)
     if arxiv_id:
         try:
             resp = _get(_ARXIV_PDF.format(arxiv_id), timeout=15)
@@ -390,12 +406,7 @@ def _fetch_arxiv_html(paper: dict) -> str | None:
     Returns:
         缓存 HTML 文件路径，或 None
     """
-    doi = paper.get("doi", "") or ""
-    url = paper.get("url", "") or ""
-    arxiv_id = None
-    m = _ARXIV_ID_RE.search(doi or url)
-    if m:
-        arxiv_id = m.group(1)
+    arxiv_id = _arxiv_id_from_paper(paper)
     if not arxiv_id:
         return None
 
@@ -471,7 +482,7 @@ def fetch_full_text(paper: dict) -> str | None:
         return str(cache_path)
 
     # arXiv HTTP 快速路径（服务端渲染，无需浏览器）
-    if _ARXIV_ID_RE.search(doi or url):
+    if _arxiv_id_from_paper(paper):
         return _fetch_arxiv_html(paper)
 
     # 其他来源暂不支持 HTML 提取

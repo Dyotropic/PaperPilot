@@ -18,8 +18,43 @@
 """
 
 from pathlib import Path
+from contextlib import contextmanager
+from contextvars import ContextVar
+import requests
 
 from paperpilot.config import config
+from paperpilot.agent_runtime import checkpoint
+from paperpilot.search_metrics import timed_stage, count
+
+_http = ContextVar("paperpilot_source_http", default=None)
+
+
+@contextmanager
+def source_http_scope(source):
+    """One source owns one pooled connection session; never shared across threads."""
+    with requests.Session() as session:
+        token = _http.set((source, session))
+        try:
+            yield
+        finally:
+            _http.reset(token)
+
+
+def source_get(url, **kwargs):
+    context = _http.get()
+    source, session = context if context else ("", None)
+    checkpoint()
+    count("http_requests", source=source)
+    with timed_stage("http", source=source):
+        response = session.get(url, **kwargs) if session else requests.get(url, **kwargs)
+    checkpoint()
+    if getattr(response, "status_code", 0) == 429:
+        count("rate_limited", source=source)
+    return response
+
+
+def source_http_active():
+    return _http.get() is not None
 
 try:
     from diskcache import Cache as _Cache

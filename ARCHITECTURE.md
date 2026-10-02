@@ -26,7 +26,7 @@ PaperPilot 面向学生及科研人员的课题研究，以 Python + Flet 桌面
 | 应用装配 | `app.py` 初始化配置、数据库、窗口及页面回调，启动回收站清理 |
 | 页面 | `pages/search_page.py`、`library_page.py`、`settings_page.py`、`sidebar.py`；`agent_panel.py` 管理聊天、会话、命令、用量及运行状态 |
 | UI 共享 | `pages/context.py` 集中设计令牌、主题、AppState/AppContext 与回调注册；`components.py` 提供复用控件 |
-| 检索 | `keywords.py`、`mt_translator.py` 提取和翻译；`fetcher.py` 级联召回；`sources/` 适配三源；`search_filters.py`、`exact_search.py` 管理严格筛选和精确匹配 |
+| 检索 | `keywords.py`、`mt_translator.py` 提取和翻译；`search_service.py` 调度多源，`search_metrics.py` 记录阶段耗时；`fetcher.py` 级联召回；`sources/` 适配三源；`search_filters.py`、`exact_search.py` 管理严格筛选和精确匹配 |
 | 排序与归档 | `indexer.py` 精排；`library.py`、`models.py` 管理 SQLite；`repo_manager.py` 管理课题目录、PDF、缓存与回收站；`local_import.py`、`export.py` 导入导出 |
 | 模型与 Agent | `llm_client.py` 适配服务商；`ai_service.py` 编排精读、评分及聊天；`agent_team.py` 管理并行只读子 Agent；`agent_sessions.py` 管理独立会话；`conversation.py` 管理事件、历史和压缩；`context_budget.py` 管理预算；`agent_runtime.py` 管理运行及取消；`llm_usage.py` 记录计数 |
 | 原文与图谱 | `downloader.py` 获取 PDF/HTML；`pdf_viewer.py` 通过 pywebview + PDF.js 阅读；`graph_service.py` 构图；`graph_window.py` 通过 ECharts 展示 |
@@ -39,17 +39,29 @@ PaperPilot 面向学生及科研人员的课题研究，以 Python + Flet 桌面
 
 - 关键词分为主、副、普通三层。LLM 提取失败或未配置时，中文回退到 jieba TF-IDF，MiniLM 可选增强；英文回退依赖 KeyBERT 及其模型。
 - arXiv、OpenAlex、Europe PMC 按启用情况参与召回。多主词分别召回并合并；级联策略在不放宽用户筛选的前提下调整关键词组合。
+- 课题检索默认在不同源之间并行（最多三个源任务），单源内的级联、主词查询、描述召回、游标分页和摘要补齐仍顺序执行。全部源完成后按 arXiv → OpenAlex → Europe PMC 汇总、去重并精排一次，不按线程完成次序选择重复项。线程复制运行/取消、用量与计时上下文，各源拥有独立错误列表及 HTTP Session；已有请求排空后才结束取消中的源任务。精确查找路径不因这次优化改变调度方式。
+- 描述召回策略保持原语义：无元数据筛选时，关键词与描述两路各自使用 `max_results`，总候选可能超过滑块数字；筛选时仅在该源数量不足目标时补取描述结果。未削减召回数量、CE 候选或排序权重。去重保留原 0.9 阈值、比较方向及首次保留规则，用 `SequenceMatcher.quick_ratio()` 上界预筛和第二序列索引复用减少计算。
+- 中文描述与三组关键词合并翻译，重复术语只翻译一次。仅成功结果进入有界内存缓存（最多 512 项），按服务商、端点、模型与原文隔离，缺省有效期一小时；配置未就绪及失败不缓存。长描述按长度预留翻译输出预算。
+- OpenAlex 普通检索分页每页最多 100 条。该源各路召回结束后，摘要按唯一 W-ID、每批最多 100 个从 `api.openalex.org/works` 补查，复用源会话并携带已配置的 API Key。旧正摘要缓存仍可读；明确返回 `abstract_inverted_index: null` 时短期缓存缺失（缺省一小时），网络/限流、漏返回 ID、漏字段及畸形数据不缓存为缺失。摘要缺失不等于论文不存在，补查失败保留已召回论文并提示。
+- arXiv 继续使用成熟的 `arxiv` SDK 解析和顺序分页，400 条用单页完成。课题检索的实际 HTTP 请求共用进程级、可取消的 3 秒频控锁，跨同时检索也不绕过限制；源任务内复用连接。取消 SDK 默认等待与外层重复重试，仅由 SDK 对失败页重试一次；HTTP 403 直接结束。逐条收集保留分页失败前的结果，失败/取消/畸形 feed 不写查询缓存。仅成功非空查询按数量和严格筛选条件隔离缓存，TTL 沿用 `cache.ttl_hours`；空结果不作为长期缺失缓存。[分页与频率依据](https://info.arxiv.org/help/api/user-manual.html#3112-start-and-max_results-paging)
+- Europe PMC 400 条仍为一次 `resultType=core` 请求，保留完整摘要与被引排序。成功普通查询缓存已解析的公共记录，省去未使用的作者机构等大字段，兼容读取旧原始列表缓存。原生严格筛选游标分页保持独立。普通查询遵循 `search.request_timeout`；403 不重试、429/网络失败最多三次尝试且最后一次不再空等；失败及无效响应不缓存，并通知编排层停止该源后续级联/描述召回。OpenAlex 普通查询也遵循传入超时。
 - 年份区间、单个作者姓名短语、完整期刊名按 AND 组合，尽量下推到各源原生查询，并在返回结果上核验；缺失元数据不能当作满足筛选。分页、超时与候选上限控制请求，数量不足须显示原因。
 - 当前排序为 **API 分数粗筛 → Cross-Encoder 精排 → 关键词加分 → 短摘要降权**，主流程不使用 FAISS。CE 模型是 `mixedbread-ai/mxbai-rerank-base-v2`，优先本地缓存，加载或预测失败时退回 API 分数基础排序，后续修正仍生效。
+- CE 继续使用 CPU/float32/512 tokens，缺省空闲 300 秒后释放；搜索与文献库排序可复用同一模型。加载只启动一个 future，等待加载不长期持有模型状态锁，因此另一排序任务能共享加载并及时响应取消。推理串行并持有使用计数，取消/超时后仍运行的预测结束前不会卸载。`release_cross_encoder()` 安排空闲释放，`unload_cross_encoder()` 保持立即请求释放的兼容入口，遇到在途预测则延迟到其结束。
+- `[SearchTiming]` 按 run ID 记录翻译、各源召回/摘要、HTTP、去重、CE 加载/预测、排序及 UI 提交刷新边界，并统计请求与缓存命中；不记录查询、URL 或凭据。源耗时可能重叠，不得求和当作总耗时；`ui_submitted` 表示调用 Flet 更新完成，不表示已测量屏幕像素绘制。
+
+实现依据：[OpenAlex 分页](https://help.openalex.org/api/paging)、[批量 ID 查询](https://help.openalex.org/how-to/api-recipes)、[Requests Session](https://requests.readthedocs.io/en/latest/user/advanced/#session-objects)、[SequenceMatcher 的缓存与上界](https://docs.python.org/3/library/difflib.html#sequencematcher-objects)。实际数据源行为与计时以本次验证记录为准。
 - API 分、CE/关键词排序分及 AI 四维评分不是同一尺度，不应混写为同一种“相关性分”。AI 评分基于摘要，独立保存；不得无需求改动权重。
 
 ### 精确查找与文献身份
 
 精确查找支持 DOI、arXiv ID（含明确版本）和完整标题，不支持 ISBN。标题只进行既定 Unicode、空白和末尾句号规范化后比较；不以模糊相似度冒充精确匹配。该路径不调用 CE，内部占位分数在 UI 显示为“精确”。
 
-去重与入库优先使用 DOI、arXiv ID、OpenAlex ID、稳定 URL，再考虑标题与年份等弱标识。不同 DOI 不得因同名标题合并；明确不同的 arXiv 版本保守区分；弱标识不能把本地 PDF 与不同网络论文误并。相关规则由 `fetcher.py`、`library.py` 和来源适配器共同维护。
+精确查找与文献库入库优先使用 DOI、arXiv ID、OpenAlex ID、稳定 URL，再考虑标题与年份等弱标识；不同 DOI 和明确不同的 arXiv 版本保守区分。课题检索汇总的 `fetcher.deduplicate()` 仍使用既有标题相似度规则（阈值 0.9、保留首次出现），本次只优化计算，不更改身份判重策略。
 
 保存检索结果只保存当前展示的排序结果。`save_papers_to_project(...)` 的两个返回计数分别为新增课题关联数、补填 PDF 路径数，第二项不是下载成功数。后续 PDF 下载独立执行，下载不到不否定元数据已经入库。
+
+下载器复用精确查找的 arXiv 编号规范化，兼容现代及旧式编号；论文带正式出版商 DOI 时仍检查 arXiv URL，PDF/HTML 下载不改写 DOI 或 URL。普通出版商 DOI 中的数字不作为 arXiv 编号。下载延续既有最新版本路径；旧论文能否取得 HTML 仍由 arXiv 的实际可用性决定。
 
 ## AI 服务与调用契约
 

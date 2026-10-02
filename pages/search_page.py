@@ -2,6 +2,10 @@
 import asyncio
 import os
 import threading
+import time
+from paperpilot.config import load_config
+from paperpilot.search_service import collect_sources
+from paperpilot.search_metrics import SearchTrace, trace_scope, timed_stage, count
 from paperpilot.agent_runtime import run_scope, checkpoint, OperationCancelled
 from paperpilot.llm_usage import usage_scope
 from datetime import datetime
@@ -22,7 +26,7 @@ from pages.settings_page import (
     top_k_slider, ce_candidates_slider,
 )
 from paperpilot.keywords import extract_all_keywords, merge_keywords
-from paperpilot.mt_translator import translate_terms
+from paperpilot.mt_translator import translate_all_terms
 from pages.components import is_shift_pressed, safe_update, open_dialog, close_dialog, run_ps_script
 from paperpilot.fetcher import (
     fetch_arxiv, fetch_openalex, fetch_europepmc, fetch_with_cascade,
@@ -30,7 +34,7 @@ from paperpilot.fetcher import (
 )
 from paperpilot.search_filters import SearchFilters
 from paperpilot.exact_search import exact_search
-from paperpilot.indexer import rank_papers, unload_cross_encoder
+from paperpilot.indexer import rank_papers, release_cross_encoder
 from paperpilot import library
 from paperpilot import repo_manager, downloader
 from paperpilot.pdf_viewer import open_full_reader
@@ -142,196 +146,58 @@ def _run_pipeline(max_per: int, year_min: str, year_max: str,
     所有 Flet 控件值由主线程读取后传入，避免跨线程访问控件。
     返回 (papers, scores, src_errors)；src_errors 收集各源限流/错误信息。
     """
-    import time as _time
-    _t0 = _time.time()
-    print(f"[PaperPilot] === 流水线启动 === max_per={max_per}, arxiv={use_arxiv}, "
-          f"openalex={use_openalex}, top_k={top_k}, ce_candidates={ce_candidates}", flush=True)
-
-    papers = []
-    src_errors: list = []
-    if filters is not None:
-        max_per = max(max_per, top_k)
-
-    def _source_stopped(source: str) -> bool:
-        return any(s == source and kind in {
-            "rate_limited", "network", "no_match", "invalid_response"
-        } for s, kind, _ in src_errors)
-
-    # 0. 年份筛选
-    if year_min or year_max:
-        print(f"[PaperPilot] 年份筛选: {year_min or '—'} ~ {year_max or '—'}", flush=True)
-
-    # 1. 翻译课题描述
-    checkpoint()
-    state.status_text = "翻译课题描述..."
-    desc_en_query = None
     context = search_context or {}
-    desc = str(context.get("topic_desc", state.topic_desc)).strip()
-    desc_en_terms = translate_terms([desc])
-    desc_en = [t for t in desc_en_terms if t and not _has_cjk(t)]
-    if desc_en:
-        desc_en_query = desc_en[0]
-        print(f"[PaperPilot] 课题描述翻译: {desc_en_query[:80]}...")
-    elif not _has_cjk(desc):
-        desc_en_query = desc
-        print(f"[PaperPilot] 课题描述原文即英文: {desc_en_query[:80]}...")
-
-    # 2. 翻译三层关键词
-    checkpoint()
-    state.status_text = "翻译关键词..."
-    primary_input = list(context.get("primary_keywords", state.primary_keywords))
-    secondary_input = list(context.get("secondary_keywords", state.secondary_keywords))
-    regular_input = list(context.get("regular_keywords", state.regular_keywords))
-    primary_en_list = [t for t in translate_terms(primary_input)
-                       if t and not _has_cjk(t)]
-    secondary_en = [t for t in translate_terms(secondary_input)
-                    if t and not _has_cjk(t)]
-    regular_en = [t for t in translate_terms(regular_input)
-                  if t and not _has_cjk(t)]
-
-    primary_kw_list = primary_en_list  # 所有主关键词作为 AND 核心
-
-    print(f"\n[PaperPilot] 开始检索")
-    print(f"[PaperPilot] 主关键词: {primary_kw_list}")
-    print(f"[PaperPilot] 副关键词: {secondary_en}")
-    print(f"[PaperPilot] 普通关键词: {regular_en}")
-
-    # 3. arXiv 检索（单次级联，避免多路并发触发限流）
-    if use_arxiv:
-        checkpoint()
-        state.status_text = "arXiv 抓取中..."
-        arxiv_papers = []
+    trace = context.get("_metrics_trace") or SearchTrace()
+    with trace_scope(trace):
         try:
-            arxiv_papers, arxiv_level = fetch_with_cascade(
-                primary_kw=primary_kw_list,
-                secondary_kw=secondary_en,
-                regular_kw=regular_en,
-                source="arxiv",
-                max_results=max_per,
-                min_results=3,
-                year_min=year_min,
-                year_max=year_max,
-                errors=src_errors,
-                filters=filters,
-            )
-            print(f"[PaperPilot] arXiv 返回: {len(arxiv_papers)} 篇 (level={arxiv_level})")
-            papers += arxiv_papers
-        except Exception as e:
-            print(f"[PaperPilot] arXiv 失败: {e}")
-            src_errors.append(("arxiv", "error", "arXiv 检索失败"))
-
-        if (desc_en_query and not _source_stopped("arxiv")
-                and (filters is None or len(arxiv_papers) < max_per)):
-            try:
-                desc_papers = fetch_arxiv([desc_en_query], max_results=max_per, logic="OR",
-                                          year_min=year_min, year_max=year_max,
-                                          filters=filters, errors=src_errors)
-                print(f"[PaperPilot] arXiv（描述）返回: {len(desc_papers)} 篇")
-                papers += desc_papers
-            except SourceRateLimited as e:
-                _add_src_error(src_errors, e)
-            except Exception as e:
-                print(f"[PaperPilot] arXiv（描述）失败: {e}")
-                src_errors.append(("arxiv", "error", "arXiv 描述检索失败"))
-
-    if use_openalex:
-        checkpoint()
-        state.status_text = "OpenAlex 抓取中..."
-        oa_papers = []
-        try:
-            oa_papers = fetch_multi_primary(
-                primary_kw=primary_kw_list,
-                secondary_kw=secondary_en,
-                regular_kw=regular_en,
-                source="openalex",
-                max_results=max_per,
-                min_results=3,
-                year_min=year_min,
-                year_max=year_max,
-                errors=src_errors,
-                filters=filters,
-            )
-            print(f"[PaperPilot] OpenAlex 返回: {len(oa_papers)} 篇 ({len(primary_kw_list)}路主关键词)")
-            papers += oa_papers
-        except Exception as e:
-            print(f"[PaperPilot] OpenAlex 失败: {e}")
-            src_errors.append(("openalex", "error", "OpenAlex 检索失败"))
-
-        if (desc_en_query and not _source_stopped("openalex")
-                and (filters is None or len(oa_papers) < max_per)):
-            try:
-                desc_papers = fetch_openalex([desc_en_query], max_results=max_per, logic="OR",
-                                             year_min=year_min, year_max=year_max,
-                                             filters=filters, errors=src_errors)
-                print(f"[PaperPilot] OpenAlex（描述）返回: {len(desc_papers)} 篇")
-                papers += desc_papers
-            except SourceRateLimited as e:
-                _add_src_error(src_errors, e)
-            except Exception as e:
-                print(f"[PaperPilot] OpenAlex（描述）失败: {e}")
-                src_errors.append(("openalex", "error", "OpenAlex 描述检索失败"))
-
-    if use_europepmc:
-        checkpoint()
-        state.status_text = "Europe PMC 抓取中..."
-        epmc_papers = []
-        try:
-            epmc_papers = fetch_multi_primary(
-                primary_kw=primary_kw_list,
-                secondary_kw=secondary_en,
-                regular_kw=regular_en,
-                source="europepmc",
-                max_results=max_per,
-                min_results=3,
-                year_min=year_min,
-                year_max=year_max,
-                errors=src_errors,
-                filters=filters,
-            )
-            print(f"[PaperPilot] Europe PMC 返回: {len(epmc_papers)} 篇 ({len(primary_kw_list)}路主关键词)")
-            papers += epmc_papers
-        except Exception as e:
-            print(f"[PaperPilot] Europe PMC 失败: {e}")
-            src_errors.append(("europepmc", "error", "Europe PMC 检索失败"))
-
-        if (desc_en_query and not _source_stopped("europepmc")
-                and (filters is None or len(epmc_papers) < max_per)):
-            try:
-                desc_papers = fetch_europepmc([desc_en_query], max_results=max_per, logic="OR",
-                                              year_min=year_min, year_max=year_max,
-                                              filters=filters, errors=src_errors)
-                print(f"[PaperPilot] Europe PMC（描述）返回: {len(desc_papers)} 篇")
-                papers += desc_papers
-            except SourceRateLimited as e:
-                _add_src_error(src_errors, e)
-            except Exception as e:
-                print(f"[PaperPilot] Europe PMC（描述）失败: {e}")
-                src_errors.append(("europepmc", "error", "Europe PMC 描述检索失败"))
-
-    # 4. 去重
-    checkpoint()
-    state.status_text = "去重中..."
-    papers = deduplicate(papers)
-    print(f"[PaperPilot] 去重后: {len(papers)} 篇")
-
-    if not papers:
-        print("[PaperPilot] 未找到论文")
-        return [], [], src_errors
-
-    # 5. 排序打分（首次会加载 942MB 语义模型，约需 10-30 秒）
-    checkpoint()
-    state.status_text = f"语义精排中（{len(papers)} 篇）..."
-    query_for_scoring = desc_en_query if desc_en_query else desc
-    scores = rank_papers(
-        query=query_for_scoring,
-        papers=papers,
-        top_k=top_k,
-        ce_candidates=max(ce_candidates, top_k) if filters is not None else ce_candidates,
-        primary_kw=primary_en_list,
-        secondary_kw=secondary_en,
-        regular_kw=regular_en,
-    )
-    return papers, scores, src_errors
+            checkpoint()
+            if filters is not None:
+                max_per = max(max_per, top_k)
+            desc = str(context.get("topic_desc", state.topic_desc)).strip()
+            state.status_text = "翻译课题与关键词..."
+            with timed_stage("translation"):
+                groups = translate_all_terms(
+                    [desc], list(context.get("primary_keywords", state.primary_keywords)),
+                    list(context.get("secondary_keywords", state.secondary_keywords)),
+                    list(context.get("regular_keywords", state.regular_keywords)))
+                desc_en, primary_en, secondary_en, regular_en = [
+                    [term for term in group if term and not _has_cjk(term)] for group in groups]
+            checkpoint()
+            desc_query = desc_en[0] if desc_en else (desc if not _has_cjk(desc) else None)
+            sources = [source for source, enabled in (
+                ("arxiv", use_arxiv), ("openalex", use_openalex),
+                ("europepmc", use_europepmc)) if enabled]
+            def progress(message):
+                state.status_text = message
+            with timed_stage("retrieval"):
+                papers, errors = collect_sources(
+                    sources=sources, primary_kw=primary_en, secondary_kw=secondary_en,
+                    regular_kw=regular_en, description=desc_query, max_per=max_per,
+                    year_min=year_min, year_max=year_max, filters=filters,
+                    cascade=fetch_with_cascade, multi_primary=fetch_multi_primary,
+                    description_fetchers={"arxiv": fetch_arxiv, "openalex": fetch_openalex,
+                                          "europepmc": fetch_europepmc},
+                    parallel=bool((load_config().get("search") or {}).get("parallel_sources", True)),
+                    on_progress=progress)
+            checkpoint()
+            state.status_text = "去重中..."
+            with timed_stage("deduplication"):
+                papers = deduplicate(papers)
+                count("deduplicated", len(papers))
+            if not papers:
+                return [], [], errors
+            checkpoint()
+            state.status_text = f"语义精排中（{len(papers)} 篇）..."
+            with timed_stage("ranking"):
+                scores = rank_papers(
+                    query=desc_query or desc, papers=papers, top_k=top_k,
+                    ce_candidates=max(ce_candidates, top_k) if filters is not None else ce_candidates,
+                    primary_kw=primary_en, secondary_kw=secondary_en, regular_kw=regular_en)
+            checkpoint()
+            return papers, scores, errors
+        finally:
+            release_cross_encoder()
+            trace.report()
 
 
 # ── 检索结果表头 / 排序 / 渲染 ──
@@ -1623,6 +1489,8 @@ def build_search_page(ctx):
             "secondary_keywords": list(state.secondary_keywords),
             "regular_keywords": list(state.regular_keywords),
         }
+        if mode == "topic":
+            _search_context["_metrics_trace"] = SearchTrace()
         _exact_value = exact_input_field.value.strip()
         _exact_type = exact_type_dd.value or "auto"
 
@@ -1674,6 +1542,7 @@ def build_search_page(ctx):
                     status_text.update()
 
             # 流水线完成，执行一次性 UI 更新
+            display_started = time.perf_counter()
             try:
                 if agent_run and agent_run.token.cancelled:
                     state.papers, state.scores, _ai_scored, _last_mode["value"] = previous
@@ -1734,7 +1603,7 @@ def build_search_page(ctx):
                     summary.value = _summary_text()
                     summary.update()
                 if mode == "topic":
-                    unload_cross_encoder()
+                    release_cross_encoder()
             finally:
                 state.is_searching = False
                 progress_bar.visible = False
@@ -1743,6 +1612,10 @@ def build_search_page(ctx):
                 status_text.value = state.status_text
                 if ctx.page:
                     ctx.page.update()
+                trace = _search_context.get("_metrics_trace")
+                if trace is not None:
+                    trace.record("ui_update", time.perf_counter() - display_started)
+                    trace.report(boundary="ui_submitted")
                 if agent_run:
                     agent_run.finish()
 

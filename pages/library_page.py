@@ -21,7 +21,7 @@ from pages.components import is_shift_pressed, safe_update, open_dialog, close_d
 from paperpilot import library
 from paperpilot import repo_manager
 from paperpilot.local_import import scan_folder, extract_pdfs
-from paperpilot.indexer import rank_papers, unload_cross_encoder
+from paperpilot.indexer import rank_papers, release_cross_encoder
 from paperpilot.pdf_viewer import open_full_reader, is_full_reader_available
 from paperpilot import graph_service as _graph_service
 from paperpilot import graph_window as _graph_window
@@ -577,7 +577,7 @@ def build_library_page(ctx):
                         ap["score_similarity"] = score_map[ap["project_paper_id"]]
             upload_progress.update()
             refresh_paper_list(preloaded_papers=all_papers if score_map else None)
-            unload_cross_encoder()
+            release_cross_encoder()
 
         ctx.page.run_task(_poll_sort)
 

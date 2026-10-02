@@ -1,0 +1,338 @@
+{
+  "native_mouse": true,
+  "entry": "app.main",
+  "dispatch": "production Agent search",
+  "source": "real APIs",
+  "ce": "cached real CPU",
+  "recalled": 399,
+  "displayed": 50,
+  "saved": 3,
+  "ce_calls": [
+    100,
+    3
+  ],
+  "model_loads": 1,
+  "source_counts": {
+    "arxiv": 0,
+    "openalex": 0,
+    "europepmc": 399
+  },
+  "timings": [
+    {
+      "boundary": "pipeline",
+      "run_id": "21516aa3d267",
+      "elapsed_seconds": 91.77195029999712,
+      "stages": [
+        {
+          "stage": "translation",
+          "source": "",
+          "status": "ok",
+          "seconds": 1.9899998733308166e-05
+        },
+        {
+          "stage": "http",
+          "source": "openalex",
+          "status": "error",
+          "seconds": 5.0048986000037985
+        },
+        {
+          "stage": "keyword_recall",
+          "source": "openalex",
+          "status": "ok",
+          "seconds": 5.008311800003867
+        },
+        {
+          "stage": "http",
+          "source": "europepmc",
+          "status": "error",
+          "seconds": 5.006945299996005
+        },
+        {
+          "stage": "http",
+          "source": "arxiv",
+          "status": "error",
+          "seconds": 5.007605700004206
+        },
+        {
+          "stage": "abstracts",
+          "source": "openalex",
+          "status": "ok",
+          "seconds": 0.0022379000001819804
+        },
+        {
+          "stage": "source",
+          "source": "openalex",
+          "status": "ok",
+          "seconds": 5.0106777000037255
+        },
+        {
+          "stage": "http",
+          "source": "arxiv",
+          "status": "error",
+          "seconds": 5.002126400002453
+        },
+        {
+          "stage": "keyword_recall",
+          "source": "arxiv",
+          "status": "ok",
+          "seconds": 10.01322120000259
+        },
+        {
+          "stage": "source",
+          "source": "arxiv",
+          "status": "ok",
+          "seconds": 10.013315500000317
+        },
+        {
+          "stage": "http",
+          "source": "europepmc",
+          "status": "error",
+          "seconds": 5.022519400001329
+        },
+        {
+          "stage": "http",
+          "source": "europepmc",
+          "status": "ok",
+          "seconds": 11.450174700003117
+        },
+        {
+          "stage": "decode",
+          "source": "europepmc",
+          "status": "ok",
+          "seconds": 0.019734800000151154
+        },
+        {
+          "stage": "parse",
+          "source": "europepmc",
+          "status": "ok",
+          "seconds": 0.0027266999968560413
+        },
+        {
+          "stage": "keyword_recall",
+          "source": "europepmc",
+          "status": "ok",
+          "seconds": 24.5151068999985
+        },
+        {
+          "stage": "description_recall",
+          "source": "europepmc",
+          "status": "ok",
+          "seconds": 0.009622399993531872
+        },
+        {
+          "stage": "source",
+          "source": "europepmc",
+          "status": "ok",
+          "seconds": 24.52571010000247
+        },
+        {
+          "stage": "retrieval",
+          "source": "",
+          "status": "ok",
+          "seconds": 24.533345000003465
+        },
+        {
+          "stage": "deduplication",
+          "source": "",
+          "status": "ok",
+          "seconds": 0.29673100000218255
+        },
+        {
+          "stage": "ce_load",
+          "source": "",
+          "status": "ok",
+          "seconds": 1.4931701000023168
+        },
+        {
+          "stage": "ce_predict",
+          "source": "",
+          "status": "ok",
+          "seconds": 65.4320652000024
+        },
+        {
+          "stage": "ranking",
+          "source": "",
+          "status": "ok",
+          "seconds": 66.93427119999978
+        }
+      ],
+      "counters": {
+        "arxiv.http_requests": 2,
+        "openalex.http_requests": 1,
+        "europepmc.http_requests": 3,
+        "openalex.abstract_filled": 0,
+        "openalex.recalled": 0,
+        "arxiv.recalled": 0,
+        "europepmc.query_cache_hits": 1,
+        "europepmc.recalled": 800,
+        "deduplicated": 399,
+        "ce_model_load": 1
+      }
+    },
+    {
+      "boundary": "ui_submitted",
+      "run_id": "21516aa3d267",
+      "elapsed_seconds": 92.22474469999725,
+      "stages": [
+        {
+          "stage": "translation",
+          "source": "",
+          "status": "ok",
+          "seconds": 1.9899998733308166e-05
+        },
+        {
+          "stage": "http",
+          "source": "openalex",
+          "status": "error",
+          "seconds": 5.0048986000037985
+        },
+        {
+          "stage": "keyword_recall",
+          "source": "openalex",
+          "status": "ok",
+          "seconds": 5.008311800003867
+        },
+        {
+          "stage": "http",
+          "source": "europepmc",
+          "status": "error",
+          "seconds": 5.006945299996005
+        },
+        {
+          "stage": "http",
+          "source": "arxiv",
+          "status": "error",
+          "seconds": 5.007605700004206
+        },
+        {
+          "stage": "abstracts",
+          "source": "openalex",
+          "status": "ok",
+          "seconds": 0.0022379000001819804
+        },
+        {
+          "stage": "source",
+          "source": "openalex",
+          "status": "ok",
+          "seconds": 5.0106777000037255
+        },
+        {
+          "stage": "http",
+          "source": "arxiv",
+          "status": "error",
+          "seconds": 5.002126400002453
+        },
+        {
+          "stage": "keyword_recall",
+          "source": "arxiv",
+          "status": "ok",
+          "seconds": 10.01322120000259
+        },
+        {
+          "stage": "source",
+          "source": "arxiv",
+          "status": "ok",
+          "seconds": 10.013315500000317
+        },
+        {
+          "stage": "http",
+          "source": "europepmc",
+          "status": "error",
+          "seconds": 5.022519400001329
+        },
+        {
+          "stage": "http",
+          "source": "europepmc",
+          "status": "ok",
+          "seconds": 11.450174700003117
+        },
+        {
+          "stage": "decode",
+          "source": "europepmc",
+          "status": "ok",
+          "seconds": 0.019734800000151154
+        },
+        {
+          "stage": "parse",
+          "source": "europepmc",
+          "status": "ok",
+          "seconds": 0.0027266999968560413
+        },
+        {
+          "stage": "keyword_recall",
+          "source": "europepmc",
+          "status": "ok",
+          "seconds": 24.5151068999985
+        },
+        {
+          "stage": "description_recall",
+          "source": "europepmc",
+          "status": "ok",
+          "seconds": 0.009622399993531872
+        },
+        {
+          "stage": "source",
+          "source": "europepmc",
+          "status": "ok",
+          "seconds": 24.52571010000247
+        },
+        {
+          "stage": "retrieval",
+          "source": "",
+          "status": "ok",
+          "seconds": 24.533345000003465
+        },
+        {
+          "stage": "deduplication",
+          "source": "",
+          "status": "ok",
+          "seconds": 0.29673100000218255
+        },
+        {
+          "stage": "ce_load",
+          "source": "",
+          "status": "ok",
+          "seconds": 1.4931701000023168
+        },
+        {
+          "stage": "ce_predict",
+          "source": "",
+          "status": "ok",
+          "seconds": 65.4320652000024
+        },
+        {
+          "stage": "ranking",
+          "source": "",
+          "status": "ok",
+          "seconds": 66.93427119999978
+        },
+        {
+          "stage": "ui_update",
+          "source": "",
+          "status": "ok",
+          "seconds": 0.15064530000381637
+        }
+      ],
+      "counters": {
+        "arxiv.http_requests": 2,
+        "openalex.http_requests": 1,
+        "europepmc.http_requests": 3,
+        "openalex.abstract_filled": 0,
+        "openalex.recalled": 0,
+        "arxiv.recalled": 0,
+        "europepmc.query_cache_hits": 1,
+        "europepmc.recalled": 800,
+        "deduplicated": 399,
+        "ce_model_load": 1
+      }
+    }
+  ],
+  "status": "\u5b8c\u6210\uff01\u5171 50 \u7bc7  \u26a0 arXiv \u68c0\u7d22\u4e2d\u65ad\uff0c\u5df2\u4fdd\u7559 0 \u7bc7\u7ed3\u679c\uff1bOpenAlex \u5206\u9875\u7f51\u7edc\u5931\u8d25\uff0c\u5df2\u4fdd\u7559\u68c0\u7d22\u7ed3\u679c",
+  "pages": [
+    "search",
+    "library",
+    "settings",
+    "search"
+  ],
+  "agent_project_id": 1
+}

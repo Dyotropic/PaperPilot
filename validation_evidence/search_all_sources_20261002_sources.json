@@ -1,0 +1,462 @@
+{
+  "count": 400,
+  "cloud_llm": false,
+  "chinese_query_translation": "curated English terms, no LLM",
+  "runs": [
+    {
+      "topic": "自主机器人导航",
+      "source": "arxiv",
+      "cache": "cold",
+      "seconds": 10.247391799995967,
+      "returned": 400,
+      "abstracts": 400,
+      "errors": [],
+      "timing": {
+        "run_id": "b1f22b37b57e",
+        "elapsed_seconds": 10.247456999997667,
+        "stages": [
+          {
+            "stage": "http",
+            "source": "arxiv",
+            "status": "ok",
+            "seconds": 10.217057699999714
+          }
+        ],
+        "counters": {
+          "arxiv.http_requests": 1
+        }
+      }
+    },
+    {
+      "topic": "自主机器人导航",
+      "source": "arxiv",
+      "cache": "cached",
+      "seconds": 0.0067893000014009885,
+      "returned": 400,
+      "abstracts": 400,
+      "errors": [],
+      "timing": {
+        "run_id": "75a5e93f291b",
+        "elapsed_seconds": 0.006833599996753037,
+        "stages": [],
+        "counters": {
+          "arxiv.query_cache_hits": 1
+        }
+      }
+    },
+    {
+      "topic": "自主机器人导航",
+      "source": "openalex",
+      "cache": "cold",
+      "seconds": 11.066466199998104,
+      "returned": 400,
+      "abstracts": 300,
+      "errors": [],
+      "timing": {
+        "run_id": "3b2766a222f4",
+        "elapsed_seconds": 11.066556699996,
+        "stages": [
+          {
+            "stage": "http",
+            "source": "openalex",
+            "status": "ok",
+            "seconds": 5.04116420000355
+          },
+          {
+            "stage": "http",
+            "source": "openalex",
+            "status": "ok",
+            "seconds": 1.7439995000022464
+          },
+          {
+            "stage": "http",
+            "source": "openalex",
+            "status": "ok",
+            "seconds": 1.5670195999991847
+          },
+          {
+            "stage": "http",
+            "source": "openalex",
+            "status": "ok",
+            "seconds": 1.0636503999994602
+          },
+          {
+            "stage": "http",
+            "source": "openalex",
+            "status": "ok",
+            "seconds": 1.1700738999934401
+          }
+        ],
+        "counters": {
+          "openalex.http_requests": 5,
+          "openalex.abstract_batch": 1,
+          "openalex.abstract_confirmed_absent": 100,
+          "openalex.abstract_filled": 0
+        }
+      }
+    },
+    {
+      "topic": "自主机器人导航",
+      "source": "openalex",
+      "cache": "cached",
+      "seconds": 0.044313900005363394,
+      "returned": 400,
+      "abstracts": 300,
+      "errors": [],
+      "timing": {
+        "run_id": "9ac21145a016",
+        "elapsed_seconds": 0.044365299996570684,
+        "stages": [],
+        "counters": {
+          "openalex.page_cache_hit": 4,
+          "openalex.abstract_absent_hit": 100,
+          "openalex.abstract_filled": 0
+        }
+      }
+    },
+    {
+      "topic": "自主机器人导航",
+      "source": "europepmc",
+      "cache": "cold",
+      "seconds": 18.847082899999805,
+      "returned": 400,
+      "abstracts": 398,
+      "errors": [],
+      "timing": {
+        "run_id": "d43b2877052e",
+        "elapsed_seconds": 18.84712839999702,
+        "stages": [
+          {
+            "stage": "http",
+            "source": "europepmc",
+            "status": "ok",
+            "seconds": 18.826443999998446
+          },
+          {
+            "stage": "decode",
+            "source": "europepmc",
+            "status": "ok",
+            "seconds": 0.011104500001238193
+          },
+          {
+            "stage": "parse",
+            "source": "europepmc",
+            "status": "ok",
+            "seconds": 0.002109300003212411
+          }
+        ],
+        "counters": {
+          "europepmc.http_requests": 1
+        }
+      }
+    },
+    {
+      "topic": "自主机器人导航",
+      "source": "europepmc",
+      "cache": "cached",
+      "seconds": 0.0077378999994834885,
+      "returned": 400,
+      "abstracts": 398,
+      "errors": [],
+      "timing": {
+        "run_id": "69c70e7fabf5",
+        "elapsed_seconds": 0.007766700000502169,
+        "stages": [],
+        "counters": {
+          "europepmc.query_cache_hits": 1
+        }
+      }
+    },
+    {
+      "topic": "Cancer immunotherapy",
+      "source": "arxiv",
+      "cache": "cold",
+      "seconds": 7.1111530999987735,
+      "returned": 46,
+      "abstracts": 46,
+      "errors": [],
+      "timing": {
+        "run_id": "8044662a91f2",
+        "elapsed_seconds": 7.111174400000891,
+        "stages": [
+          {
+            "stage": "http",
+            "source": "arxiv",
+            "status": "error",
+            "seconds": 5.603850899999088
+          },
+          {
+            "stage": "http",
+            "source": "arxiv",
+            "status": "ok",
+            "seconds": 1.49729710000247
+          }
+        ],
+        "counters": {
+          "arxiv.http_requests": 2
+        }
+      }
+    },
+    {
+      "topic": "Cancer immunotherapy",
+      "source": "arxiv",
+      "cache": "cached",
+      "seconds": 0.0008528999969712459,
+      "returned": 46,
+      "abstracts": 46,
+      "errors": [],
+      "timing": {
+        "run_id": "8b8e2c2326c3",
+        "elapsed_seconds": 0.0008668000009492971,
+        "stages": [],
+        "counters": {
+          "arxiv.query_cache_hits": 1
+        }
+      }
+    },
+    {
+      "topic": "Cancer immunotherapy",
+      "source": "openalex",
+      "cache": "cold",
+      "seconds": 18.70920109999861,
+      "returned": 400,
+      "abstracts": 254,
+      "errors": [],
+      "timing": {
+        "run_id": "12a7e0529bbd",
+        "elapsed_seconds": 18.70930860000226,
+        "stages": [
+          {
+            "stage": "http",
+            "source": "openalex",
+            "status": "ok",
+            "seconds": 8.027803799996036
+          },
+          {
+            "stage": "http",
+            "source": "openalex",
+            "status": "ok",
+            "seconds": 1.654804099998728
+          },
+          {
+            "stage": "http",
+            "source": "openalex",
+            "status": "ok",
+            "seconds": 2.8120893000013893
+          },
+          {
+            "stage": "http",
+            "source": "openalex",
+            "status": "ok",
+            "seconds": 2.5963618000023416
+          },
+          {
+            "stage": "http",
+            "source": "openalex",
+            "status": "ok",
+            "seconds": 2.265793599995959
+          },
+          {
+            "stage": "http",
+            "source": "openalex",
+            "status": "ok",
+            "seconds": 0.8065274000036879
+          }
+        ],
+        "counters": {
+          "openalex.http_requests": 6,
+          "openalex.abstract_batch": 2,
+          "openalex.abstract_confirmed_absent": 146,
+          "openalex.abstract_filled": 0
+        }
+      }
+    },
+    {
+      "topic": "Cancer immunotherapy",
+      "source": "openalex",
+      "cache": "cached",
+      "seconds": 0.06969180000305641,
+      "returned": 400,
+      "abstracts": 254,
+      "errors": [],
+      "timing": {
+        "run_id": "07d160bd2195",
+        "elapsed_seconds": 0.06973560000187717,
+        "stages": [],
+        "counters": {
+          "openalex.page_cache_hit": 4,
+          "openalex.abstract_absent_hit": 146,
+          "openalex.abstract_filled": 0
+        }
+      }
+    },
+    {
+      "topic": "Cancer immunotherapy",
+      "source": "europepmc",
+      "cache": "cold",
+      "seconds": 20.234104000002844,
+      "returned": 0,
+      "abstracts": 0,
+      "errors": [
+        [
+          "europepmc",
+          "network",
+          "Europe PMC 请求失败，已停止该源后续召回"
+        ]
+      ],
+      "timing": {
+        "run_id": "582498b998b2",
+        "elapsed_seconds": 20.234117599997262,
+        "stages": [
+          {
+            "stage": "http",
+            "source": "europepmc",
+            "status": "error",
+            "seconds": 7.20884169999772
+          },
+          {
+            "stage": "http",
+            "source": "europepmc",
+            "status": "error",
+            "seconds": 5.002732300003117
+          },
+          {
+            "stage": "http",
+            "source": "europepmc",
+            "status": "error",
+            "seconds": 5.020539800003462
+          }
+        ],
+        "counters": {
+          "europepmc.http_requests": 3
+        }
+      }
+    },
+    {
+      "topic": "钙钛矿太阳能电池",
+      "source": "arxiv",
+      "cache": "cold",
+      "seconds": 10.050129800001741,
+      "returned": 0,
+      "abstracts": 0,
+      "errors": [
+        [
+          "arxiv",
+          "network",
+          "arXiv 检索中断，已保留 0 篇结果"
+        ]
+      ],
+      "timing": {
+        "run_id": "73f208e39f8f",
+        "elapsed_seconds": 10.050156099998276,
+        "stages": [
+          {
+            "stage": "http",
+            "source": "arxiv",
+            "status": "error",
+            "seconds": 5.021707600004447
+          },
+          {
+            "stage": "http",
+            "source": "arxiv",
+            "status": "error",
+            "seconds": 5.028027399996063
+          }
+        ],
+        "counters": {
+          "arxiv.http_requests": 2
+        }
+      }
+    },
+    {
+      "topic": "钙钛矿太阳能电池",
+      "source": "openalex",
+      "cache": "cold",
+      "seconds": 5.007988699995622,
+      "returned": 0,
+      "abstracts": 0,
+      "errors": [
+        [
+          "openalex",
+          "network",
+          "OpenAlex 分页网络失败，已保留检索结果"
+        ]
+      ],
+      "timing": {
+        "run_id": "e69706ce1db5",
+        "elapsed_seconds": 5.008012400001462,
+        "stages": [
+          {
+            "stage": "http",
+            "source": "openalex",
+            "status": "error",
+            "seconds": 5.003138200001558
+          }
+        ],
+        "counters": {
+          "openalex.http_requests": 1,
+          "openalex.abstract_filled": 0
+        }
+      }
+    },
+    {
+      "topic": "钙钛矿太阳能电池",
+      "source": "europepmc",
+      "cache": "cold",
+      "seconds": 27.469727599993348,
+      "returned": 400,
+      "abstracts": 395,
+      "errors": [],
+      "timing": {
+        "run_id": "e05e24d5622c",
+        "elapsed_seconds": 27.4697817999986,
+        "stages": [
+          {
+            "stage": "http",
+            "source": "europepmc",
+            "status": "error",
+            "seconds": 5.025443500002439
+          },
+          {
+            "stage": "http",
+            "source": "europepmc",
+            "status": "ok",
+            "seconds": 21.417475000002014
+          },
+          {
+            "stage": "decode",
+            "source": "europepmc",
+            "status": "ok",
+            "seconds": 0.017281000000366475
+          },
+          {
+            "stage": "parse",
+            "source": "europepmc",
+            "status": "ok",
+            "seconds": 0.0028546000030473806
+          }
+        ],
+        "counters": {
+          "europepmc.http_requests": 2
+        }
+      }
+    },
+    {
+      "topic": "钙钛矿太阳能电池",
+      "source": "europepmc",
+      "cache": "cached",
+      "seconds": 0.01057569999829866,
+      "returned": 400,
+      "abstracts": 395,
+      "errors": [],
+      "timing": {
+        "run_id": "88ab9d24c036",
+        "elapsed_seconds": 0.010606299998471513,
+        "stages": [],
+        "counters": {
+          "europepmc.query_cache_hits": 1
+        }
+      }
+    }
+  ]
+}

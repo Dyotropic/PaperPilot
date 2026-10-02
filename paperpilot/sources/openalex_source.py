@@ -1,13 +1,13 @@
 """OpenAlex 数据源（自 fetcher.py 迁入，逻辑不变）。
 
 搜索分页结果与摘要补齐均走 diskcache（TTL 来自 config cache.ttl_hours），
-重复检索几乎瞬时返回；摘要补齐并发 4 路。
+摘要按唯一 work ID 批量补齐；检索流水线可延迟到该源召回结束后补齐。
 """
 
 import math
-import socket
-import time
-from contextvars import copy_context
+import re
+from contextlib import contextmanager
+from contextvars import ContextVar
 from paperpilot.agent_runtime import checkpoint, interruptible_wait
 
 import requests
@@ -15,8 +15,9 @@ import requests
 from paperpilot.config import load_config
 from paperpilot.sources.base import (
     PaperSource, SourceRateLimited, _build_search_query, cache_ttl_seconds,
-    open_cache,
+    open_cache, source_get,
 )
+from paperpilot.search_metrics import count
 from paperpilot.search_filters import (
     SearchFilters, author_matches, coerce_filters, normalize_name, search_limits,
 )
@@ -27,13 +28,23 @@ _CACHE_TTL = cache_ttl_seconds()
 _REFS_TTL = max(_CACHE_TTL, 30 * 24 * 3600)
 
 _oa_cache = open_cache(_OA_CACHE_DIR)
+_defer_abstracts = ContextVar("openalex_defer_abstracts", default=False)
+
+
+@contextmanager
+def defer_abstracts():
+    """Defer enrichment only within this source job, never across searches."""
+    token = _defer_abstracts.set(True)
+    try:
+        yield
+    finally:
+        _defer_abstracts.reset(token)
 
 
 def _get_api_key() -> str:
     """OpenAlex API key（config data_sources.openalex_api_key，留空 = 无 key）。
 
-    OpenAlex 自 2026-02-13 起废除 mailto polite pool 改为 API key 制：
-    无 key 每日仅 100 credits，免费 key 100,000 credits/天。
+    Key 用于账户鉴权/配额；实际可用额度以账户及服务端响应为准。
 
     每次调用现读 config.yaml（不用 import 期冻结的模块单例），
     设置页保存 Key 后立即生效，无需重启。
@@ -84,7 +95,7 @@ def _extract_work_refs_payload(w: dict) -> dict | None:
 
 def _cache_work_refs(w: dict) -> None:
     """检索解析时顺带缓存 work 的引用列表与关键词（图谱第一级数据源，零额外请求）。"""
-    if _oa_cache is None:
+    if _oa_cache is None or not isinstance(w, dict):
         return
     payload = _extract_work_refs_payload(w)
     if payload:
@@ -126,56 +137,51 @@ def get_work_refs(dois: list, errors: list | None = None) -> dict:
     api_key = _get_api_key()
     headers = {"User-Agent": "PaperPilot/1.0 (mailto:paperpilot@example.com)"}
     url = "https://api.openalex.org/works"
-    old_timeout = socket.getdefaulttimeout()
-    socket.setdefaulttimeout(15)
-    try:
-        for i in range(0, len(missing), 50):
-            batch = missing[i:i + 50]
-            params = {
-                "filter": "doi:" + "|".join(batch),
-                "select": "id,doi,referenced_works,keywords",
-                "per_page": 50,
-                "mailto": "paperpilot@example.com",
-            }
-            if api_key:
-                params["api_key"] = api_key
-            try:
+    for i in range(0, len(missing), 50):
+        batch = missing[i:i + 50]
+        params = {
+            "filter": "doi:" + "|".join(batch),
+            "select": "id,doi,referenced_works,keywords",
+            "per_page": 50,
+            "mailto": "paperpilot@example.com",
+        }
+        if api_key:
+            params["api_key"] = api_key
+        try:
+            checkpoint()
+            resp = source_get(url, params=params, headers=headers, timeout=15)
+            # 429 退避 2s/5s/10s（遵循 Retry-After），与检索链路同策略
+            for wait in (2, 5, 10):
+                if resp.status_code != 429:
+                    break
+                retry_after = resp.headers.get("Retry-After", "")
+                try:
+                    interruptible_wait(min(float(retry_after), 30) if retry_after else wait)
+                except ValueError:
+                    interruptible_wait(wait)
                 checkpoint()
-                resp = requests.get(url, params=params, headers=headers, timeout=15)
-                # 429 退避 2s/5s/10s（遵循 Retry-After），与检索链路同策略
-                for wait in (2, 5, 10):
-                    if resp.status_code != 429:
-                        break
-                    retry_after = resp.headers.get("Retry-After", "")
-                    try:
-                        interruptible_wait(min(float(retry_after), 30) if retry_after else wait)
-                    except ValueError:
-                        interruptible_wait(wait)
-                    checkpoint()
-                    resp = requests.get(url, params=params, headers=headers, timeout=15)
-                if resp.status_code == 429:
-                    hint = "OpenAlex 被限流(429)，未能补查部分论文的引用关系"
-                    if errors is not None:
-                        errors.append(("openalex", "rate_limited", hint))
-                        break
-                    raise SourceRateLimited("openalex", 429, hint)
-                resp.raise_for_status()
-                for w in resp.json().get("results", []):
-                    payload = _extract_work_refs_payload(w)
-                    if not payload:
-                        continue
-                    out[payload["doi"]] = payload
-                    if _oa_cache is not None:
-                        _oa_cache.set(f"refs:{payload['doi']}", payload,
-                                      expire=_REFS_TTL)
-                interruptible_wait(0.1)  # 批间礼貌速率
-            except requests.RequestException:
-                # 网络失败：放弃该批继续（图谱降级为仅共现/时间线）
+                resp = source_get(url, params=params, headers=headers, timeout=15)
+            if resp.status_code == 429:
+                hint = "OpenAlex 被限流(429)，未能补查部分论文的引用关系"
                 if errors is not None:
-                    errors.append(("openalex", "network", "OpenAlex 引用补查网络失败"))
-                continue
-    finally:
-        socket.setdefaulttimeout(old_timeout)
+                    errors.append(("openalex", "rate_limited", hint))
+                    break
+                raise SourceRateLimited("openalex", 429, hint)
+            resp.raise_for_status()
+            for w in resp.json().get("results", []):
+                payload = _extract_work_refs_payload(w)
+                if not payload:
+                    continue
+                out[payload["doi"]] = payload
+                if _oa_cache is not None:
+                    _oa_cache.set(f"refs:{payload['doi']}", payload,
+                                  expire=_REFS_TTL)
+            interruptible_wait(0.1)  # 批间礼貌速率
+        except requests.RequestException:
+            # 网络失败：放弃该批继续（图谱降级为仅共现/时间线）
+            if errors is not None:
+                errors.append(("openalex", "network", "OpenAlex 引用补查网络失败"))
+            continue
     return out
 
 
@@ -203,7 +209,10 @@ def _parse_openalex_work(w: dict) -> dict | None:
     abstract = ""
     abstract_inverted = w.get("abstract_inverted_index")
     if abstract_inverted:
-        abstract = _decode_inverted_index(abstract_inverted)
+        try:
+            abstract = _decode_inverted_index(abstract_inverted)
+        except (ValueError, TypeError, IndexError, KeyError):
+            pass  # Keep the paper; enrichment can retry the malformed field.
     # 新增字段
     paper_type = w.get("type")  # "review", "article", "book-chapter", ...
     cited_by = w.get("cited_by_count")
@@ -233,7 +242,13 @@ def _parse_openalex_work(w: dict) -> dict | None:
 
 
 def _decode_inverted_index(inv: dict) -> str:
-    max_pos = max(p[-1] for p in inv.values())
+    if not isinstance(inv, dict) or not inv:
+        raise ValueError("Invalid abstract index")
+    if any(not isinstance(word, str) or not isinstance(positions, list) or not positions
+           or any(not isinstance(pos, int) or pos < 0 or pos > 100000 for pos in positions)
+           for word, positions in inv.items()):
+        raise ValueError("Invalid abstract positions")
+    max_pos = max(max(p) for p in inv.values())
     words = [""] * (max_pos + 1)
     for word, positions in inv.items():
         for pos in positions:
@@ -273,7 +288,7 @@ def _resolve_openalex_entities(kind: str, name: str, *, timeout: float,
         params["api_key"] = api_key
     try:
         checkpoint()
-        response = requests.get(url, params=params,
+        response = source_get(url, params=params,
                                 headers={"User-Agent": "PaperPilot/1.0"}, timeout=timeout)
         if response.status_code in (403, 429):
             _append_error(errors, "rate_limited",
@@ -375,6 +390,7 @@ def _fetch_openalex_filtered(query: str, max_results: int, filters: SearchFilter
         ckey = f"filtered:{query}|{filters.cache_key}|{cursor}|{per_page}"
         cached = _oa_cache.get(ckey) if _oa_cache is not None else None
         if cached is not None:
+            count("page_cache_hit", source="openalex")
             data = cached
             fetched = False
             if not isinstance(data, dict):
@@ -384,7 +400,7 @@ def _fetch_openalex_filtered(query: str, max_results: int, filters: SearchFilter
         else:
             try:
                 checkpoint()
-                response = requests.get(url, params=params, headers=headers, timeout=timeout)
+                response = source_get(url, params=params, headers=headers, timeout=timeout)
                 if response.status_code in (403, 429):
                     if not papers:
                         raise SourceRateLimited("openalex", response.status_code)
@@ -460,7 +476,7 @@ def _fetch_openalex_filtered(query: str, max_results: int, filters: SearchFilter
         _append_error(errors, "incomplete",
                       f"OpenAlex 筛选后得到 {len(papers)}/{max_results} 篇，已耗尽结果或达到分页上限")
     papers = _normalize_api_scores(papers[:max_results])
-    return _fetch_missing_abstracts(papers)
+    return _fetch_missing_abstracts(papers, errors=errors)
 
 
 def _normalize_api_scores(papers: list[dict]) -> list[dict]:
@@ -495,9 +511,12 @@ def _fetch_openalex_raw(query: str, max_results: int = 30,
         return _fetch_openalex_filtered(
             query, max_results, effective_filters, errors=errors,
             max_pages=max_pages, request_timeout=request_timeout)
+    if max_results <= 0:
+        return []
+    _, timeout = search_limits(max_pages, request_timeout)
     url = "https://api.openalex.org/works"
     papers = []
-    per_page = min(50, max_results)
+    per_page = min(100, max_results)
     pages = (max_results + per_page - 1) // per_page
     headers = {"User-Agent": "PaperPilot/1.0 (mailto:paperpilot@example.com)"}
     api_key = _get_api_key()
@@ -509,130 +528,190 @@ def _fetch_openalex_raw(query: str, max_results: int = 30,
         year_filter = f"publication_year:>{int(year_min)-1}"
     elif year_max:
         year_filter = f"publication_year:<{int(year_max)+1}"
-    old_timeout = socket.getdefaulttimeout()
-    socket.setdefaulttimeout(15)
-    try:
-        for page in range(1, pages + 1):
-            params = {
-                "search": query,
-                "per_page": per_page,
-                "page": page,
-                "mailto": "paperpilot@example.com",
-            }
-            if api_key:
-                params["api_key"] = api_key
-            if year_filter:
-                params["filter"] = year_filter
-            ckey = f"page:{query}|{page}|{per_page}|{year_filter or ''}"
-            results = None
-            fetched = False
-            if _oa_cache is not None:
-                results = _oa_cache.get(ckey)
-            if results is None:
-                try:
+    for page in range(1, pages + 1):
+        params = {
+            "search": query,
+            "per_page": per_page,
+            "page": page,
+            "mailto": "paperpilot@example.com",
+        }
+        if api_key:
+            params["api_key"] = api_key
+        if year_filter:
+            params["filter"] = year_filter
+        ckey = f"page:{query}|{page}|{per_page}|{year_filter or ''}"
+        results = None
+        fetched = False
+        if _oa_cache is not None:
+            results = _oa_cache.get(ckey)
+            if results is not None:
+                count("page_cache_hit", source="openalex")
+        if results is None:
+            try:
+                checkpoint()
+                resp = source_get(url, params=params, headers=headers, timeout=timeout)
+                # 429 退避：2s/5s/10s，优先遵循 Retry-After 头；耗尽且一无所获 → 抛限流异常
+                for wait in (2, 5, 10):
+                    if resp.status_code != 429:
+                        break
+                    retry_after = resp.headers.get("Retry-After", "")
+                    try:
+                        interruptible_wait(min(float(retry_after), 30) if retry_after else wait)
+                    except ValueError:
+                        interruptible_wait(wait)
                     checkpoint()
-                    resp = requests.get(url, params=params, headers=headers, timeout=15)
-                    # 429 退避：2s/5s/10s，优先遵循 Retry-After 头；耗尽且一无所获 → 抛限流异常
-                    for wait in (2, 5, 10):
-                        if resp.status_code != 429:
-                            break
-                        retry_after = resp.headers.get("Retry-After", "")
-                        try:
-                            interruptible_wait(min(float(retry_after), 30) if retry_after else wait)
-                        except ValueError:
-                            interruptible_wait(wait)
-                        checkpoint()
-                        resp = requests.get(url, params=params, headers=headers, timeout=15)
-                    if resp.status_code == 429 and not papers:
-                        hint = "请在设置页配置 OpenAlex API Key（2026-02 起无 key 每日仅 100 次额度）"
-                        raise SourceRateLimited("openalex", 429, hint)
-                    resp.raise_for_status()
-                    data = resp.json()
-                    results = data.get("results", [])
-                    fetched = True
-                    if _oa_cache is not None:
-                        _oa_cache.set(ckey, results, expire=_CACHE_TTL)
-                except requests.RequestException:
-                    continue
-            page_total = len(results)
-            for i, w in enumerate(results):
-                if fetched:
-                    _cache_work_refs(w)  # 图谱第一级：检索响应本就带引用/关键词，顺带入库
-                paper = _parse_openalex_work(w)
-                if paper:
-                    api_rel = w.get("relevance_score")
-                    if api_rel is not None:
-                        paper["api_score"] = float(api_rel)
-                    else:
-                        paper["api_score"] = 1.0 - (i / max(page_total, 1))
-                    papers.append(paper)
-            if len(papers) >= max_results:
+                    resp = source_get(url, params=params, headers=headers, timeout=timeout)
+                if resp.status_code in (403, 429) and not papers:
+                    hint = "OpenAlex 请求受限，请检查 API Key 与账户配额，或稍后重试"
+                    raise SourceRateLimited("openalex", resp.status_code, hint)
+                if resp.status_code in (403, 429):
+                    _append_error(errors, "rate_limited", "OpenAlex 分页受限，已保留检索结果")
+                    break
+                resp.raise_for_status()
+                data = resp.json()
+                if not isinstance(data, dict) or not isinstance(data.get("results"), list):
+                    raise ValueError("Invalid results")
+                results = data.get("results", [])
+                fetched = True
+                if _oa_cache is not None:
+                    _oa_cache.set(ckey, results, expire=_CACHE_TTL)
+            except requests.RequestException:
+                _append_error(errors, "network", "OpenAlex 分页网络失败，已保留检索结果")
                 break
+            except (ValueError, TypeError):
+                _append_error(errors, "invalid_response", "OpenAlex 分页响应错误，已保留检索结果")
+                break
+        if not isinstance(results, list):
+            _append_error(errors, "invalid_response", "OpenAlex 分页缓存错误")
+            break
+        if not results:
+            break
+        page_total = len(results)
+        for i, w in enumerate(results):
             if fetched:
-                interruptible_wait(0.1)  # 网络请求后的礼貌速率
-    finally:
-        socket.setdefaulttimeout(old_timeout)
+                _cache_work_refs(w)  # 图谱第一级：检索响应本就带引用/关键词，顺带入库
+            paper = _parse_openalex_work(w)
+            if paper:
+                api_rel = w.get("relevance_score")
+                if api_rel is not None:
+                    paper["api_score"] = float(api_rel)
+                else:
+                    # Preserve the old 50-item fallback score groups when the
+                    # API omits relevance_score, despite 100-item HTTP pages.
+                    paper["api_score"] = 1.0 - ((i % 50) / max(min(50, page_total - (i // 50) * 50), 1))
+                papers.append(paper)
+        if len(papers) >= max_results:
+            break
+        if fetched:
+            interruptible_wait(0.1)  # 网络请求后的礼貌速率
     papers = _normalize_api_scores(papers[:max_results])
-    papers = _fetch_missing_abstracts(papers)
+    papers = _fetch_missing_abstracts(papers, errors=errors)
     return papers
 
 
-def _fetch_missing_abstracts(papers: list[dict]) -> list[dict]:
-    """对缺少摘要的 OpenAlex 论文，并行请求完整摘要（带缓存）。
-
-    OpenAlex 搜索结果常截断摘要，需用 works/{id} 端点获取完整数据。
-    并发 4 路，较原串行 ~10 req/s 更快且更礼貌；重复检索命中缓存。
-    """
-    to_fetch = [
-        p for p in papers
-        if p.get("openalex_id") and not (p.get("abstract") or "").strip()
-    ]
-
-    if not to_fetch:
+def _fetch_missing_abstracts(papers: list[dict], errors: list | None = None) -> list[dict]:
+    if _defer_abstracts.get():
         return papers
+    return enrich_abstracts(papers, errors=errors)
 
-    headers = {"User-Agent": "PaperPilot/1.0 (mailto:paperpilot@example.com)"}
-    old_timeout = socket.getdefaulttimeout()
-    socket.setdefaulttimeout(10)
 
-    def _fetch_one(paper: dict) -> bool:
+def enrich_abstracts(papers: list[dict], errors: list | None = None) -> list[dict]:
+    """Batch unique IDs (100/request); cache confirmed absence, never failures.
+
+    Only an explicit null abstract field confirms absence. Missing IDs, omitted
+    fields, malformed JSON and transport errors remain eligible for a retry.
+    Existing positive ``abs:https://openalex.org/W...`` cache entries stay valid.
+    """
+    groups: dict[str, list[dict]] = {}
+    for paper in papers:
         checkpoint()
-        oa_id = paper["openalex_id"]
-        ckey = f"abs:{oa_id}"
-        if _oa_cache is not None:
-            cached = _oa_cache.get(ckey)
-            if cached:
-                paper["abstract"] = cached
-                return True
-        try:
-            checkpoint()
-            resp = requests.get(oa_id, headers=headers, timeout=10)
-            checkpoint()
-            if resp.status_code == 200:
-                w = resp.json()
-                _cache_work_refs(w)  # 全量 work JSON 顺带缓存引用/关键词
-                inv = w.get("abstract_inverted_index")
-                if inv:
-                    text = _decode_inverted_index(inv)
+        work_id = _norm_oa_id(paper.get("openalex_id"))
+        if re.fullmatch(r"W\d+", work_id):
+            groups.setdefault(work_id, []).append(paper)
+    missing = []
+    filled = 0
+    for work_id, rows in groups.items():
+        existing = next((p.get("abstract") for p in rows
+                         if (p.get("abstract") or "").strip()), "")
+        ckey = f"abs:https://openalex.org/{work_id}"
+        cached = _oa_cache.get(ckey) if _oa_cache is not None else None
+        text = existing or (cached if isinstance(cached, str) else "")
+        if text:
+            for paper in rows:
+                if not (paper.get("abstract") or "").strip():
                     paper["abstract"] = text
-                    if _oa_cache is not None:
-                        _oa_cache.set(ckey, text, expire=_CACHE_TTL)
-                    return True
-        except requests.RequestException:
-            pass
-        return False
-
-    count = 0
+                    filled += 1
+            if not existing:
+                count("abstract_cache_hit", source="openalex")
+        elif isinstance(cached, dict) and cached.get("absent") is True:
+            count("abstract_absent_hit", source="openalex")
+        else:
+            missing.append(work_id)
+    if errors and any(source == "openalex" and kind == "rate_limited"
+                      for source, kind, _ in errors):
+        return papers  # Cached enrichment is safe; do not hit a limited host again.
+    api_key = _get_api_key() if missing else ""
+    # A separate, bounded lifetime allows newly indexed abstracts to appear.
     try:
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-            futures = [executor.submit(copy_context().run, _fetch_one, paper) for paper in to_fetch]
-            count = sum(1 for future in futures if future.result())
-    finally:
-        socket.setdefaulttimeout(old_timeout)
-
-    if count:
-        print(f"[OpenAlex] 补齐 {count} 篇摘要", flush=True)
+        absent_ttl = max(0, min(86400, float((load_config().get("search") or {}).get(
+            "openalex_absent_ttl_seconds", 3600))))
+    except (TypeError, ValueError):
+        absent_ttl = 3600
+    for offset in range(0, len(missing), 100):
+        checkpoint()
+        batch = missing[offset:offset + 100]
+        params = {"filter": "openalex:" + "|".join(batch), "per_page": 100,
+                  "select": "id,doi,abstract_inverted_index,referenced_works,keywords"}
+        if api_key:
+            params["api_key"] = api_key
+        try:
+            count("abstract_batch", source="openalex")
+            response = source_get("https://api.openalex.org/works", params=params,
+                                  headers={"User-Agent": "PaperPilot/1.0"}, timeout=15)
+            if response.status_code in (403, 429):
+                _append_error(errors, "rate_limited", "OpenAlex 摘要补查受限，已保留检索结果")
+                break
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+                raise ValueError("Invalid work list")
+        except requests.RequestException:
+            _append_error(errors, "network", "OpenAlex 摘要补查网络失败，已保留检索结果")
+            continue
+        except (ValueError, TypeError):
+            _append_error(errors, "invalid_response", "OpenAlex 摘要补查响应错误，已保留检索结果")
+            continue
+        for work in payload["results"]:
+            checkpoint()
+            if not isinstance(work, dict):
+                continue
+            work_id = _norm_oa_id(work.get("id"))
+            if work_id not in batch or "abstract_inverted_index" not in work:
+                continue
+            inv = work["abstract_inverted_index"]
+            _cache_work_refs(work)
+            ckey = f"abs:https://openalex.org/{work_id}"
+            if inv is None:
+                if _oa_cache is not None and absent_ttl > 0:
+                    _oa_cache.set(ckey, {"absent": True}, expire=absent_ttl)
+                count("abstract_confirmed_absent", source="openalex")
+                continue
+            try:
+                text = _decode_inverted_index(inv)
+                if not text.strip():
+                    raise ValueError("Empty abstract")
+            except (ValueError, TypeError, IndexError, KeyError):
+                _append_error(errors, "invalid_response", "OpenAlex 摘要数据错误，已保留检索结果")
+                continue
+            checkpoint()
+            for paper in groups[work_id]:
+                if not (paper.get("abstract") or "").strip():
+                    paper["abstract"] = text
+                    filled += 1
+            if _oa_cache is not None:
+                _oa_cache.set(ckey, text, expire=_CACHE_TTL)
+        checkpoint()
+    count("abstract_filled", filled, source="openalex")
     return papers
 
 
@@ -643,7 +722,7 @@ def fetch_openalex(keywords: list[str], max_results: int = 30,
                    errors: list | None = None,
                    max_pages: int | None = None,
                    request_timeout: float | None = None) -> list[dict]:
-    """通过 OpenAlex API 检索论文（免 Key）。"""
+    """通过 OpenAlex API 检索论文，使用已配置的 API Key（若有）。"""
     if not keywords:
         return []
     query = _build_search_query(keywords, logic=logic)

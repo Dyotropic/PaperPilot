@@ -1,0 +1,73 @@
+{
+  "query": "stability of perovskite solar cells",
+  "primary": [
+    "perovskite solar cells"
+  ],
+  "runs": [
+    {
+      "boundary": "cold",
+      "real_api": true,
+      "real_cpu_model": true,
+      "papers": 0,
+      "results": 0,
+      "seconds": 5.011,
+      "errors": [
+        {
+          "source": "openalex",
+          "kind": "network"
+        }
+      ],
+      "counters": {
+        "openalex.http_requests": 1,
+        "openalex.abstract_filled": 0,
+        "openalex.recalled": 0,
+        "deduplicated": 0
+      },
+      "stages": [
+        {
+          "stage": "translation",
+          "source": "",
+          "status": "ok",
+          "seconds": 1.920000067912042e-05
+        },
+        {
+          "stage": "http",
+          "source": "openalex",
+          "status": "error",
+          "seconds": 5.003747399998247
+        },
+        {
+          "stage": "keyword_recall",
+          "source": "openalex",
+          "status": "ok",
+          "seconds": 5.005434200000309
+        },
+        {
+          "stage": "abstracts",
+          "source": "openalex",
+          "status": "ok",
+          "seconds": 0.0019802999959210865
+        },
+        {
+          "stage": "source",
+          "source": "openalex",
+          "status": "ok",
+          "seconds": 5.00754489999963
+        },
+        {
+          "stage": "retrieval",
+          "source": "",
+          "status": "ok",
+          "seconds": 5.0092304999998305
+        },
+        {
+          "stage": "deduplication",
+          "source": "",
+          "status": "ok",
+          "seconds": 2.8400005248840898e-05
+        }
+      ]
+    }
+  ],
+  "dedup_differential": null
+}

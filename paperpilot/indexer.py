@@ -8,6 +8,12 @@ import logging
 import math
 import os
 import threading
+import time
+import concurrent.futures
+from contextvars import copy_context
+from paperpilot.config import load_config
+from paperpilot.agent_runtime import checkpoint
+from paperpilot.search_metrics import timed_stage, count
 from pathlib import Path
 
 os.environ["HF_HUB_OFFLINE"] = "1"
@@ -24,84 +30,90 @@ logger = logging.getLogger(__name__)
 _CE_PATH = str(Path.home() / ".cache/modelscope/mixedbread-ai/mxbai-rerank-base-v2")
 _CE_NAME = "mixedbread-ai/mxbai-rerank-base-v2"
 _CE_MAX_LENGTH = 512  # 截断长文本，防止 O(n²) 注意力爆炸
+_CE_LOAD_TIMEOUT = 180
+_CE_PREDICT_TIMEOUT = 300
 _cross_encoder = None
-_ce_lock = threading.Lock()  # 防止多线程同时加载模型
+_ce_lock = threading.RLock()
+_ce_prediction_lock = threading.Lock()
+_ce_users = 0
+_ce_timer = None
+_ce_epoch = 0
+_ce_unload_pending = False
+_ce_load_future = None
 
 
-# ── Cross-Encoder 重排序 ──
+def _cancel_idle_locked():
+    global _ce_timer, _ce_epoch
+    _ce_epoch += 1
+    if _ce_timer is not None:
+        _ce_timer.cancel()
+        _ce_timer = None
+
 
 def _get_cross_encoder():
-    """加载 cross-encoder 模型（懒加载，线程安全，本地缓存优先）。
-
-    关键参数：
-    - max_length=512：截断长文本，Qwen2 默认 32K 会导致注意力 O(n²) 爆炸
-    - 使用 threading.Lock 防止多线程重复加载
-    - ThreadPoolExecutor 180s 超时保护，超时回退到纯 API 排序
-    """
-    global _cross_encoder
-    if _cross_encoder is not None:
-        return _cross_encoder
-
+    """Reuse one model/load future; loading waits remain cancellable."""
+    global _ce_load_future, _cross_encoder
+    checkpoint()
     with _ce_lock:
+        _cancel_idle_locked()
         if _cross_encoder is not None:
+            count("ce_model_reused")
             return _cross_encoder
-
-        import time as _t
-        import concurrent.futures
-        print("[CE] Loading cross-encoder...", flush=True)
-        _t0 = _t.time()
-
-        if Path(_CE_PATH).exists():
-            print(f"[CE] Loading from cache: {_CE_PATH}", flush=True)
-
-            def _load():
-                # CPU 上强制 float32：Qwen2 系默认 bf16 在 CPU 推理慢 ~9 倍，
-                # float32 既提速又更高精度（见 library-pdf 分支 9d8fa34）
-                return CrossEncoder(
-                    _CE_PATH,
-                    max_length=_CE_MAX_LENGTH,
-                    device="cpu",
-                    model_kwargs={"torch_dtype": torch.float32},
-                )
-
-            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        if _ce_load_future is None:
+            def load():
+                with timed_stage("ce_load"):
+                    path = _CE_PATH if Path(_CE_PATH).exists() else _CE_NAME
+                    old_hf = old_tr = None
+                    if path == _CE_NAME:
+                        old_hf = os.environ.pop("HF_HUB_OFFLINE", None)
+                        old_tr = os.environ.pop("TRANSFORMERS_OFFLINE", None)
+                    try:
+                        return CrossEncoder(path, max_length=_CE_MAX_LENGTH, device="cpu",
+                                            model_kwargs={"torch_dtype": torch.float32})
+                    finally:
+                        if old_hf is not None:
+                            os.environ["HF_HUB_OFFLINE"] = old_hf
+                        if old_tr is not None:
+                            os.environ["TRANSFORMERS_OFFLINE"] = old_tr
+            pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            _ce_load_future = pool.submit(copy_context().run, load)
+            def loaded(done):
+                # A cancelled/timed-out caller must not leave a completed model
+                # resident in an abandoned future indefinitely.
+                with _ce_lock:
+                    if _ce_load_future is done:
+                        release_cross_encoder()
+            _ce_load_future.add_done_callback(loaded)
+            pool.shutdown(wait=False)
+            count("ce_model_load")
+        future = _ce_load_future
+    deadline = time.monotonic() + _CE_LOAD_TIMEOUT
+    try:
+        while True:
+            checkpoint()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                count("ce_load_timeout")
+                return None  # Retain the in-flight load; never start a duplicate.
             try:
-                future = executor.submit(_load)
-                _cross_encoder = future.result(timeout=180)
-                print(f"[CE] Loaded in {_t.time()-_t0:.1f}s", flush=True)
-                return _cross_encoder
+                model = future.result(timeout=min(.1, remaining))
+                break
             except concurrent.futures.TimeoutError:
-                print(f"[CE] 加载超时(180s)，将使用纯 API 排序", flush=True)
-                _cross_encoder = None
-                return None
-            except Exception as e:
-                logger.warning(f"Cross-encoder load failed: {e}")
-                _cross_encoder = None
-                return None
-            finally:
-                # wait=False：超时后不等待阻塞线程（否则超时保护形同虚设）
-                executor.shutdown(wait=False)
-
-        # 本地无缓存，尝试在线下载
-        logger.info("Cross-encoder not cached, attempting download...")
-        old_hf = os.environ.pop("HF_HUB_OFFLINE", None)
-        old_tr = os.environ.pop("TRANSFORMERS_OFFLINE", None)
-        try:
-            _cross_encoder = CrossEncoder(
-                _CE_NAME,
-                max_length=_CE_MAX_LENGTH,
-                device="cpu",
-                model_kwargs={"torch_dtype": torch.float32},
-            )
-        except Exception as e:
-            logger.warning(f"Cross-encoder download failed: {e}")
-            _cross_encoder = None
-        if old_hf is not None:
-            os.environ["HF_HUB_OFFLINE"] = old_hf
-        if old_tr is not None:
-            os.environ["TRANSFORMERS_OFFLINE"] = old_tr
-
-        return _cross_encoder
+                if future.done():
+                    raise  # The worker itself failed with TimeoutError.
+                continue
+        checkpoint()
+        with _ce_lock:
+            if _ce_load_future is future:
+                _cross_encoder = model
+                _ce_load_future = None
+            return model
+    except Exception:
+        with _ce_lock:
+            if _ce_load_future is future and future.done():
+                _ce_load_future = None
+        logger.warning("Cross-encoder load failed; using API scores")
+        return None
 
 
 def _api_score(value) -> float:
@@ -128,8 +140,21 @@ def rerank_with_cross_encoder(
     if not results:
         return []
     results = [(paper, _api_score(score)) for paper, score in results]
-    ce = _get_cross_encoder()
+    global _ce_users
+    checkpoint()
+    with _ce_lock:
+        _ce_users += 1
+    try:
+        ce = _get_cross_encoder()
+    except BaseException:
+        with _ce_lock:
+            _ce_users -= 1
+        release_cross_encoder()
+        raise
     if ce is None:
+        with _ce_lock:
+            _ce_users -= 1
+        release_cross_encoder()
         scores_arr = np.array([s for _, s in results])
         min_s, max_s = scores_arr.min(), scores_arr.max()
         if max_s > min_s:
@@ -145,27 +170,74 @@ def rerank_with_cross_encoder(
         abstract = (p.get("abstract") or "").strip()[:2500]
         return f"{title}. {abstract}" if title else abstract
 
-    pairs = [(query[:2000], _paper_text(p)) for p, _ in results]
+    try:
+        pairs = [(query[:2000], _paper_text(p)) for p, _ in results]
+    except BaseException:
+        with _ce_lock:
+            _ce_users -= 1
+        release_cross_encoder()
+        raise
 
     import concurrent.futures
 
     def _predict():
-        return ce.predict(pairs, show_progress_bar=False)
+        global _ce_users
+        try:
+            # Serialize model inference from simultaneous search/library calls.
+            while not _ce_prediction_lock.acquire(timeout=.1):
+                checkpoint()
+            try:
+                checkpoint()
+                with timed_stage("ce_predict"):
+                    value = ce.predict(pairs, show_progress_bar=False)
+                checkpoint()
+                return value
+            finally:
+                _ce_prediction_lock.release()
+        finally:
+            with _ce_lock:
+                _ce_users -= 1
+            release_cross_encoder()
 
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     try:
-        future = executor.submit(_predict)
-        scores = future.result(timeout=300)
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    except BaseException:
+        with _ce_lock:
+            _ce_users -= 1
+        release_cross_encoder()
+        raise
+    submitted = False
+    try:
+        future = executor.submit(copy_context().run, _predict)
+        submitted = True
+        deadline = time.monotonic() + _CE_PREDICT_TIMEOUT
+        while True:
+            checkpoint()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise concurrent.futures.TimeoutError()
+            try:
+                scores = future.result(timeout=min(.1, remaining))
+                break
+            except concurrent.futures.TimeoutError:
+                if future.done():
+                    raise
+                continue
+        checkpoint()
     except concurrent.futures.TimeoutError:
-        print("[CE] predict 超时(300s)，回退到 API 分数排序", flush=True)
-        results.sort(key=lambda x: -(x[1] if x[1] is not None else 0))
+        count("ce_predict_timeout")
+        results.sort(key=lambda x: -x[1])
         return results[:top_k]
-    except Exception as e:
-        logger.warning(f"Cross-encoder prediction failed: {e}")
-        results.sort(key=lambda x: -(x[1] if x[1] is not None else 0))
+    except Exception:
+        logger.warning("Cross-encoder prediction failed; using API scores")
+        results.sort(key=lambda x: -x[1])
         return results[:top_k]
     finally:
-        # wait=False：超时后不等待阻塞线程（否则 300s 超时被 with 块抵消）
+        if not submitted:
+            with _ce_lock:
+                _ce_users -= 1
+            release_cross_encoder()
+        # The worker retains its model lease even after cancellation/timeout.
         executor.shutdown(wait=False)
 
     # Sigmoid normalization: preserves score differentiation
@@ -288,16 +360,50 @@ def rank_papers(
     return final[:top_k]
 
 
-def unload_cross_encoder():
-    """释放 cross-encoder 模型内存（~942MB）。
+def _drop_model_locked():
+    global _cross_encoder, _ce_unload_pending, _ce_load_future
+    _cross_encoder = None
+    if _ce_load_future is not None and _ce_load_future.done():
+        _ce_load_future = None
+    _ce_unload_pending = False
+    import gc
+    gc.collect()
+    count("ce_model_released")
 
-    模型文件不会被删除，下次调用 rank_papers 时自动重新加载。
-    检索完成后调用此函数，可释放近 1GB 内存。
-    """
-    global _cross_encoder
-    if _cross_encoder is not None:
-        print("[CE] Unloading cross-encoder to free memory...", flush=True)
-        _cross_encoder = None
-        import gc
-        gc.collect()
-        print("[CE] Unloaded (~942MB freed).", flush=True)
+
+def release_cross_encoder():
+    """Release after configured idle time; never evict an active prediction."""
+    global _ce_timer
+    try:
+        seconds = max(0, min(3600, float((load_config().get("search") or {}).get(
+            "ce_idle_seconds", 300))))
+    except (TypeError, ValueError):
+        seconds = 300
+    with _ce_lock:
+        _cancel_idle_locked()
+        if _ce_users:
+            return
+        if _ce_unload_pending or seconds == 0:
+            _drop_model_locked()
+            return
+        if _cross_encoder is None and _ce_load_future is None:
+            return
+        epoch = _ce_epoch
+        def expire():
+            with _ce_lock:
+                if epoch == _ce_epoch and not _ce_users:
+                    _drop_model_locked()
+        _ce_timer = threading.Timer(seconds, expire)
+        _ce_timer.daemon = True
+        _ce_timer.start()
+
+
+def unload_cross_encoder():
+    """Request immediate release (deferred until active predictions finish)."""
+    global _ce_unload_pending
+    with _ce_lock:
+        _cancel_idle_locked()
+        if _ce_users:
+            _ce_unload_pending = True
+        else:
+            _drop_model_locked()

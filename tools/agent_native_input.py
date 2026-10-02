@@ -20,7 +20,7 @@ u.SetActiveWindow.restype = w.HWND
 u.SetThreadDpiAwarenessContext.argtypes = [ctypes.c_void_p]
 u.SetThreadDpiAwarenessContext(ctypes.c_void_p(-4))
 title = sys.argv[2] if len(sys.argv) > 2 else "PaperPilot Native Input 20261001"
-assert re.fullmatch(r"PaperPilot Native (?:Input 20261001|Stop \d+|Context \d+|Attachments \d+|Team \d+)", title), "Unexpected validation window"
+assert re.fullmatch(r"PaperPilot Native (?:Input 20261001|Stop \d+|Context \d+|Attachments \d+|Team \d+|Search \d+)", title), "Unexpected validation window"
 hwnd = u.FindWindowW(None, title)
 assert hwnd
 actions = json.loads(sys.argv[1])

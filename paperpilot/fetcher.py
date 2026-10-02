@@ -212,7 +212,10 @@ def fetch_with_cascade(
         if not query:
             continue
         try:
-            if effective_filters is None:
+            # Built-in adapters accept diagnostics even without metadata filters.
+            # Keep legacy third-party/fake adapters' original call signature.
+            if effective_filters is None and fetch_raw not in (
+                    _fetch_arxiv_raw, _fetch_openalex_raw, _fetch_europepmc_raw):
                 papers = fetch_raw(query, max_results, year_min=year_min, year_max=year_max)
             else:
                 papers = fetch_raw(
@@ -223,6 +226,10 @@ def fetch_with_cascade(
             # 同源后续策略必然同样限流，记录后直接终止该源降级（保持"单源失败不拖垮整体"）
             _record_source_error(errors, e.source, "rate_limited", e.message)
             break
+        fatal = {"rate_limited", "network", "no_match", "invalid_response"}
+        if effective_filters is None and errors and any(
+                s == source and kind in fatal for s, kind, _ in errors):
+            return papers, level
         if effective_filters is not None:
             last_level = level
             for paper in papers:
@@ -429,26 +436,35 @@ def deduplicate(papers: list[dict]) -> list[dict]:
     归一化每篇只做一次；相同标题走集合 O(1) 判重；
     SequenceMatcher 前按数学界预筛：ratio = 2·min/(l1+l2) ≥ 0.9
     要求 hi ≤ (11/9)·lo，违反者不可能达阈值，直接跳过。
+    再用 quick_ratio 上界预筛，复用每个已保留标题的 seq2 索引；
+    比较方向、autojunk 和最终阈值保持不变。
     """
     seen: list[dict] = []
-    seen_norms: list[str] = []
+    seen_matchers: list[tuple[str, SequenceMatcher]] = []
     seen_set: set[str] = set()
     for paper in papers:
+        checkpoint()
         t1 = _normalize_title(paper["title"])
         if t1 in seen_set:
             continue
         lo = len(t1)
         dup = False
-        for t2 in seen_norms:
+        for t2, matcher in seen_matchers:
             hi = len(t2)
             a, b = (lo, hi) if lo <= hi else (hi, lo)
             if b * 9 > a * 11:  # 长度比超过 11:9 ⇒ ratio 上界 < 0.9
                 continue
-            if t1 == t2 or SequenceMatcher(None, t1, t2).ratio() >= 0.9:
+            # quick_ratio is an upper bound, so this cannot reject a match.
+            # Reuse seq2's character index; keep argument order and autojunk
+            # identical to the original asymmetric SequenceMatcher call.
+            matcher.set_seq1(t1)
+            if matcher.quick_ratio() < 0.9:
+                continue
+            if matcher.ratio() >= 0.9:
                 dup = True
                 break
         if not dup:
             seen.append(paper)
-            seen_norms.append(t1)
+            seen_matchers.append((t1, SequenceMatcher(None, "", t1)))
             seen_set.add(t1)
     return seen
