@@ -16,6 +16,8 @@ venv/
 # Testing
 *.db
 *.sqlite3
+# Local validation reports and screenshots; never commit
+/validation_evidence/
 
 # Cache
 cache/

@@ -14,7 +14,7 @@
 
 - `tools/` 包含隔离 runner、Agent 行为/原生输入验证与显式开启的真实 DeepSeek 探针。
 - 项目根目录的 `test_*.py` 是本机保留的测试资产，当前 `.gitignore` 忽略这些文件；新克隆不能假设全部存在。运行前确认目标脚本，勿把缺文件当产品故障。
-- `validation_evidence/` 保存计数、验收 JSON 和截图。文件名日期标明快照，不表示当前代码重新验证；截图中的固定模拟缓存率不作服务商实测。
+- `validation_evidence/` 只在本地保存计数、验收 JSON 和截图，已列入 `.gitignore`，不得提交或推送；新克隆不包含这些历史资料。文件名日期标明快照，不表示当前代码重新验证；截图中的固定模拟缓存率不作服务商实测。
 
 ## 无真实模型凭据的隔离检查
 
@@ -82,7 +82,7 @@ $env:PAPERPILOT_VALIDATION_SCRATCH = '.validation-search-my-run'
 
 `validate_search_graph_native.py` 从实际 SQLite 文献库及受控引用缓存调用生产构图服务，打开原生 ECharts 窗口，核对三节点、两引用边、三共现边、三视图、详情关闭与最小化恢复。使用现有引擎缓存，不联网下载；视图/详情通过原生页面 JS 事件调用，并非真实鼠标点击节点。旧窗口回归的单节点样本仅证明窗口与恢复行为，不能代替非空边的显示检查。
 
-本次验收说明见 [三源优化与流程验证](validation_evidence/search_all_sources_20261002.md)，逐次证据见 `validation_evidence/search_performance_20261002*.json/png` 与 `search_all_sources_20261002*.json/png`。未做付费云端中文翻译、AI 服务质量或所有服务商的完整验收；真实网络、本地受控 SDK、真实本地模型和原生替身界面须分别列明，不降低召回或 CE 候选换取更短数字。
+本机本次验收说明保存在 `validation_evidence/search_all_sources_20261002.md`，逐次证据保存在该本地目录的 `search_performance_20261002*.json/png` 与 `search_all_sources_20261002*.json/png`，不随仓库发布。未做付费云端中文翻译、AI 服务质量或所有服务商的完整验收；真实网络、本地受控 SDK、真实本地模型和原生替身界面须分别列明，不降低召回或 CE 候选换取更短数字。
 
 ## 桌面与原生输入验证
 

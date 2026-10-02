@@ -110,6 +110,7 @@ def main():
         evidence['cases'].append(case)
         print(json.dumps(case,ensure_ascii=False,indent=2),flush=True)
     out=ROOT/'validation_evidence'/('agent_team_20261002_numeric_live.json' if args.case=='numeric' else 'agent_team_20261002_live.json')
+    out.parent.mkdir(parents=True,exist_ok=True)
     out.write_text(json.dumps(evidence,ensure_ascii=False,indent=2),encoding='utf-8')
     if not all(c['success'] for c in evidence['cases']):raise SystemExit('Live team acceptance incomplete; evidence retained, no rerun.')
 
