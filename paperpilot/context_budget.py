@@ -4,6 +4,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 import math
 import logging
+import json
 
 from paperpilot.conversation import _estimate_tokens
 
@@ -17,8 +18,19 @@ _KNOWN_WINDOWS = {("deepseek", m): 1_000_000 for m in (
 
 
 def estimate_request_tokens(messages):
-    """Count only the transmitted text plus estimated message framing."""
-    return 3 + sum(4 + _estimate_tokens(m.get("content", "")) for m in messages)
+    """Text/framing plus a conservative image allowance, never base64 characters.
+
+    Images use 4096 tokens as a cross-provider estimate; actual provider usage
+    calibrates the main-chat meter after the request.
+    """
+    def content_size(content):
+        if isinstance(content, str):
+            return _estimate_tokens(content)
+        return sum(_estimate_tokens(p.get("text", "")) if p.get("type") == "text"
+                   else 4096 if p.get("type") in {"image_url", "image"} else 0 for p in content or [])
+    return 3 + sum(4 + content_size(m.get("content", ""))
+        + (_estimate_tokens(json.dumps(m["tool_calls"], ensure_ascii=False)) if m.get("tool_calls") else 0)
+        + _estimate_tokens(m.get("reasoning_content", "")) for m in messages)
 
 
 @dataclass(frozen=True)
@@ -91,7 +103,7 @@ def _canonical_model(provider, model):
 def context_status(cm, system_prompt, draft="", model=None):
     policy = context_policy(model)
     with cm.lock:
-        messages = cm.build_api_messages(system_prompt)
+        messages = cm.build_api_messages(system_prompt, load_images=False)
         sample = dict(cm._meta.get("context_sample", {}))
         revision = len(cm.compressed_summaries)
     estimated = estimate_request_tokens(messages)

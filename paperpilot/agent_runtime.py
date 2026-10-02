@@ -126,11 +126,12 @@ def publish_reply(text):
 
 class AgentRun:
     """Jobs reserve ownership before scheduling; idle follows the final job."""
-    def __init__(self, cm, project_id, goal, operation="chat", on_done=None, on_partial=None):
+    def __init__(self, cm, project_id, goal, operation="chat", on_done=None, on_partial=None, *, attachments=None):
         self.id = uuid.uuid4().hex
         self.cm = cm
         self.identity = (project_id, cm.session_id)
         self.user_message, self.operation = goal, operation
+        self.attachments = copy.deepcopy(attachments or [])
         self.maintenance = operation == "compression"
         previous = copy.deepcopy(cm._meta.get("last_run", {}))
         continuing = goal.strip().strip("。.!！").casefold() in {
@@ -161,6 +162,8 @@ class AgentRun:
         save = self.cm.set_maintenance_state if self.maintenance else self.cm.set_run_state
         save(dict(run_id=self.id, state=self._state,
             goal=self.goal, operation=self.operation, phase=self._phase,
+            submitted_attachments=self.attachments,
+            submitted_message=self.user_message, resume_context=self.resume_context,
             completed_steps=list(self._completed), started_at=self._started,
             pending_steps=list(self._pending),
             updated_at=datetime.now().isoformat()))
@@ -237,18 +240,20 @@ class AgentRun:
                             else "已停止压缩，原上下文与研究目标保留。")
                 self._save()
                 return note
+            self.cm.finish_pending_tools()
             if self.token.cancelled:
                 # Record the goal even when interrupted during pre-request compaction.
                 if not self.user_recorded:
-                    self.cm.add_user_message(self.resume_context + self.user_message,
-                                             display_content=self.user_message)
+                    from paperpilot.agent_attachments import format_attachment_material
+                    self.cm.add_user_message(format_attachment_material(self.attachments) + self.resume_context + self.user_message,
+                                             display_content=self.user_message, attachments=self.attachments)
                 note = "本轮已由用户停止。保留此前记录和已完成结果；后续动作未执行。"
                 if self._completed:
                     note += "\n已完成：" + "；".join(self._completed)
                 if self.partial and not self.reply_recorded:
                     # Never dispatch or replay incomplete machine-action proposals.
                     import re
-                    partial = re.split(r"\[(?:ACTION:|PROJECT_UPDATE)", self.partial, maxsplit=1)[0].rstrip()
+                    partial = re.split(r"\[(?:ACTION:|PROJECT_UPDATE|TEAM)", self.partial, maxsplit=1)[0].rstrip()
                     if partial:
                         note = partial + "\n\n[回复未完成]\n" + note
                 note += "\n可以发送新消息继续；需重新核对中断步骤的实际结果。"

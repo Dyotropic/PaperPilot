@@ -27,6 +27,10 @@ from pages.context import (
     seed_color, app_bg, surface, surface_hi,
 )
 from pages.components import clamp_width, make_resize_handle, open_dialog, close_dialog
+from pages.agent_attachments_ui import AttachmentComposer, history_attachments
+from pages.agent_team_ui import AgentTeamView
+from paperpilot.agent_attachments import (persist_attachments,
+    format_attachment_material, ensure_image_support)
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +63,8 @@ _slash_index = 0
 _thinking_active: bool = False
 _active_run: AgentRun | None = None
 _agent_send_button: ft.IconButton | None = None
+_attachment_composer: AttachmentComposer | None = None
+_team_view: AgentTeamView | None = None
 
 
 def _refresh_run_button():
@@ -69,14 +75,16 @@ def _refresh_run_button():
     _agent_send_button.icon = ft.Icons.STOP if busy else ft.Icons.ARROW_UPWARD
     _agent_send_button.tooltip = ("正在停止，等待当前步骤退出" if stopping else
                                    "停止当前轮（保留记录）" if busy else "发送消息（Enter）")
-    _agent_send_button.disabled = bool(stopping)
+    _agent_send_button.disabled = bool(stopping or (not busy and _attachment_composer and _attachment_composer.loading))
+    if _attachment_composer:
+        _attachment_composer.refresh()
     try:
         _agent_send_button.update()
     except RuntimeError:
         pass
 
 
-def begin_agent_run(cm, pid, goal, operation="chat", on_partial=None):
+def begin_agent_run(cm, pid, goal, operation="chat", on_partial=None, *, attachments=None):
     """Shared owner for chat and library tasks; finish only after all child jobs."""
     global _active_run, _thinking_active
     if _active_run is not None:
@@ -92,7 +100,7 @@ def begin_agent_run(cm, pid, goal, operation="chat", on_partial=None):
         _refresh_run_button()
         refresh_agent_usage()
         _refresh_command_menu()
-    _active_run = AgentRun(cm, pid, goal, operation, on_done=done, on_partial=on_partial)
+    _active_run = AgentRun(cm, pid, goal, operation, on_done=done, on_partial=on_partial, attachments=attachments)
     _thinking_active = True
     _refresh_run_button()
     _refresh_command_menu()
@@ -309,7 +317,7 @@ def _table_to_list(header: list[str], rows: list[list[str]]) -> str:
     return '\n'.join(lines)
 
 
-def _make_bubble(text: str, role: str = "user") -> ft.Container:
+def _make_bubble(text: str, role: str = "user", *, attachments=None, attachment_directory=None) -> ft.Container:
     """构建一条消息；助手回复按正文排版，用户和状态消息使用轻底。"""
     colors = _agent_theme_colors()
     if role == "agent":
@@ -356,6 +364,8 @@ def _make_bubble(text: str, role: str = "user") -> ft.Container:
         padding = ft.padding.Padding(left=SP_MD, top=SP_SM,
                                     right=SP_MD, bottom=SP_SM)
 
+    if role == "user" and attachments:
+        content.controls.append(history_attachments(attachment_directory, attachments))
     return ft.Container(
         content=content,
         bgcolor=bg,
@@ -366,12 +376,12 @@ def _make_bubble(text: str, role: str = "user") -> ft.Container:
     )
 
 
-def send_agent_message(text: str, role: str = "user"):
+def send_agent_message(text: str, role: str = "user", *, attachments=None, attachment_directory=None):
     """向 Agent 对话面板发送一条消息（高频路径：只刷新消息列表子树）。"""
     global _agent_msg_list
     if _agent_msg_list is None:
         return
-    bubble = _make_bubble(text, role)
+    bubble = _make_bubble(text, role, attachments=attachments, attachment_directory=attachment_directory)
     _agent_msg_list.controls.append(bubble)
     if len(_agent_msg_list.controls) > 200:
         _agent_msg_list.controls.pop(0)
@@ -461,6 +471,11 @@ def refresh_agent_panel_theme() -> None:
         for row in _command_rows.values():
             row.content.controls[0].color = text_primary()
             row.content.controls[1].color = text_secondary()
+    if _attachment_composer:
+        _attachment_composer.refresh()
+
+    if _team_view:
+        _team_view.refresh()
 
     for message in _agent_msg_list.controls:
         role = message.data
@@ -475,7 +490,7 @@ def refresh_agent_panel_theme() -> None:
                 body.color = colors["agent_text"]
         elif role in {"user", "system"}:
             message.bgcolor = colors["user_bubble"]
-            label, body = message.content.controls
+            label, body = message.content.controls[:2]
             label.color = colors["muted_text"]
             if isinstance(body, ft.Markdown):
                 body.md_style_sheet = _agent_markdown_styles(FS_MD)
@@ -522,7 +537,7 @@ def _scroll_agent_to_bottom():
 def _trigger_agent_chat(message: str, papers: list | None = None,
                         thinking_enabled: bool = False,
                         display_message: str = "", *, include_library_context: bool = False,
-                        operation: str = "chat"):
+                        operation: str = "chat", attachments=None):
     """统一的 Agent 对话入口：思考动画 + 后台调用 chat() + 原地显示回复。"""
     global _agent_project_id, _agent_project_name, _agent_topic_desc, _ai_service
     if _thinking_active:
@@ -587,13 +602,13 @@ def _trigger_agent_chat(message: str, papers: list | None = None,
         last_partial_update = now
         thinking_stop.set()
         # Do not expose a half-written action payload as executable UI.
-        content_text.value = re.split(r"\[(?:ACTION:|PROJECT_UPDATE)", text, maxsplit=1)[0]
+        content_text.value = re.split(r"\[(?:ACTION:|PROJECT_UPDATE|TEAM)", text, maxsplit=1)[0]
         try:
             content_text.update()
         except RuntimeError:
             pass
     cm = _ai_service.get_conversation(identity[0], project_name, topic_desc, identity[1])
-    run = begin_agent_run(cm, identity[0], display_message or message, operation, show_partial)
+    run = begin_agent_run(cm, identity[0], display_message or message, operation, show_partial, attachments=attachments)
     if run is None:
         thinking_stop.set()
         return
@@ -610,6 +625,10 @@ def _trigger_agent_chat(message: str, papers: list | None = None,
 
     def _save_error(text):
         try:
+            if not run.user_recorded:
+                cm.add_user_message(format_attachment_material(run.attachments) + run.resume_context + message,
+                                    display_content=display_message or message, attachments=run.attachments)
+                run.user_recorded = True
             _ai_service.log_message(identity[0], project_name, "assistant",
                                     text, topic_desc, session_id=identity[1])
         except (ValueError, OSError):
@@ -619,6 +638,7 @@ def _trigger_agent_chat(message: str, papers: list | None = None,
         try:
             with run_scope(run):
                 run.phase("模型回复")
+                attachment_kwargs = dict(attachments=attachments) if attachments else {}
                 result = _ai_service.chat(
                     project_id=identity[0],
                     project_name=project_name,
@@ -631,6 +651,8 @@ def _trigger_agent_chat(message: str, papers: list | None = None,
                     session_id=identity[1],
                     include_library_context=include_library_context,
                     operation=operation,
+                    on_team_change=_team_view.notify if _team_view else None,
+                    **attachment_kwargs,
                 )
                 checkpoint()
             reply = result.get("reply", "抱歉，AI 服务暂时无法回复。")
@@ -727,6 +749,7 @@ def _trigger_agent_chat(message: str, papers: list | None = None,
             run.finish()
 
     threading.Thread(target=_bg_chat, daemon=True).start()
+    return run
 
 
 def _trigger_compare_papers(papers: list, source: str = "search"):
@@ -775,6 +798,10 @@ def load_agent_conversation():
         except RuntimeError:
             pass
     refresh_agent_usage()
+    if _attachment_composer:
+        _attachment_composer.refresh()
+    if _team_view:
+        _team_view.refresh(recover=True)
     if _agent_msg_list is None:
         return
     clear_agent_messages()
@@ -788,7 +815,8 @@ def load_agent_conversation():
         else:
             msg = item["message"]
             role = "user" if msg["role"] == "user" else "agent"
-            bubbles.append(_make_bubble(msg["content"], role=role))
+            bubbles.append(_make_bubble(msg["content"], role=role, attachments=msg.get("attachments"),
+                                        attachment_directory=cm.storage_directory))
     maintenance = cm._meta.get("maintenance", {})
     if maintenance.get("state") in {"interrupted", "failed", "cancelled"}:
         text = {"interrupted": "上次压缩未正常结束；已提交的摘要与原始对话保留。",
@@ -892,8 +920,14 @@ def refresh_agent_context():
         _context_bar.value = min(1, status["ratio"]) if status["ratio"] is not None else 0
         _context_bar.color = ft.Colors.ERROR if (status["ratio"] or 0) >= .9 else seed_color()
         detail = "最近聊天输入用量 + 后续内容估算" if status["anchored"] else "当前发送上下文估算"
+        attachment_tokens = 0
+        if _attachment_composer:
+            from paperpilot.conversation import _estimate_tokens
+            for item in _attachment_composer.pending:
+                attachment_tokens += _estimate_tokens(item.excerpt) + 4096 * len(item.images)
         _context_text.tooltip = (f"{status['model'] or '模型未配置'}；{detail}。不是累计账单用量。"
-            f"草稿约 {status['draft_tokens']:,} token；自动压缩阈值 {status['compact_threshold']:,}。点击查看详情与配置容量。")
+            f"草稿约 {status['draft_tokens']:,} token，待发附件另约 {attachment_tokens:,} token；"
+            f"自动压缩阈值 {status['compact_threshold']:,}。点击查看详情与配置容量。")
         _context_text.update()
         _context_bar.update()
     except RuntimeError:
@@ -1609,9 +1643,19 @@ def build_agent_panel() -> tuple[ft.Container, ft.GestureDetector]:
     """
     global _agent_msg_list, _agent_input, _agent_panel_ref, _session_selector, _usage_text, _agent_send_button
     global _context_text, _context_bar, _command_menu, _command_rows, _slash_dismissed, _slash_index
+    global _attachment_composer, _team_view
     _slash_dismissed, _slash_index = False, 0
     ctx.refresh_agent_usage = refresh_agent_usage
     ctx.begin_agent_run = begin_agent_run
+    def attachments_changed():
+        _refresh_run_button()
+        refresh_agent_context()
+    _attachment_composer = AttachmentComposer(lambda: (_agent_project_id or 0, _agent_session_id),
+        attachments_changed, lambda: _thinking_active)
+    _team_view = AgentTeamView(
+        lambda: _ai_service.get_conversation(_agent_project_id or 0, _agent_project_name or "通用",
+                                             _agent_topic_desc, _agent_session_id),
+        lambda: (_agent_project_id or 0, _agent_session_id), refresh_agent_usage)
 
     _agent_input = ft.TextField(
         key=ft.ValueKey("agent-composer-input"),
@@ -1631,10 +1675,11 @@ def build_agent_panel() -> tuple[ft.Container, ft.GestureDetector]:
     )
 
     def _on_agent_send(e):
-        if _thinking_active:
+        if _thinking_active or _attachment_composer.loading:
             return
-        text = _agent_input.value.strip()
-        if not text:
+        text = (_agent_input.value or "").strip()
+        items = list(_attachment_composer.pending)
+        if not text and not items:
             return
         query = _slash_filter(_agent_input.value or "")
         if query is not None:
@@ -1644,11 +1689,35 @@ def build_agent_panel() -> tuple[ft.Container, ft.GestureDetector]:
             else:
                 send_agent_message("未识别的命令。输入 / 可查看可用选项。", role="system")
             return
-        send_agent_message(text, role="user")
+        text = text or "请分析所附资料。"
+        identity = (_agent_project_id or 0, _agent_session_id)
+        cm = _ai_service.get_conversation(identity[0], _agent_project_name or "通用", _agent_topic_desc, identity[1])
+        try:
+            if any(item.images for item in items):
+                from paperpilot.context_budget import context_policy
+                from paperpilot.llm_client import get_task_model_override
+                policy = context_policy(_ai_service._resolve_task_model("chat"))
+                ensure_image_support(policy.provider, policy.model)
+                reasoning = get_task_model_override("reasoning")
+                if reasoning:
+                    ensure_image_support(policy.provider, reasoning)
+            attachments = persist_attachments(cm.storage_directory, items)
+        except (ValueError, OSError) as exc:
+            send_agent_message(f"附件未发送：{exc}", role="system")
+            return
+        send_agent_message(text, role="user", attachments=attachments, attachment_directory=cm.storage_directory)
+        bubble = _agent_msg_list.controls[-1]
+        run = _trigger_agent_chat(text, attachments=attachments)
+        if run is None:
+            if bubble in _agent_msg_list.controls:
+                _agent_msg_list.controls.remove(bubble)
+                _agent_msg_list.update()
+            return
         _agent_input.value = ""
         _agent_input.update()
+        _attachment_composer.clear(identity)
         _refresh_command_menu()
-        _trigger_agent_chat(text)
+        refresh_agent_context()
 
     _agent_input.on_submit = _on_agent_send
     async def composer_change(e):
@@ -1826,14 +1895,17 @@ def build_agent_panel() -> tuple[ft.Container, ft.GestureDetector]:
             ft.Row([_usage_text,
                     ft.IconButton(icon=ft.Icons.QUERY_STATS, icon_size=FS_XL,
                                   tooltip="用量详情", on_click=_show_usage_details)], spacing=SP_XS),
+            _team_view.host,
             _agent_msg_list,
             ft.Divider(height=1, color=border_color()),
             context_meter,
+            _attachment_composer.host,
             # Keep a composer sibling mounted even when the menu is hidden.
             # Flutter must not reuse its TextField state for a different child
             # when visible controls are filtered out of a Column.
             ft.Container(content=_command_menu, key=ft.ValueKey("agent-command-host")),
             ft.Row([
+                _attachment_composer.button,
                 _preset_menu,
                 _agent_input,
                 _agent_send_button,

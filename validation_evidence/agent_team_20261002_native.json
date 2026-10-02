@@ -1,0 +1,11 @@
+{
+  "synthetic_model": true,
+  "native_pointer_keyboard": true,
+  "live_status": true,
+  "full_child_conversation": true,
+  "child_only_stop": true,
+  "main_review": true,
+  "chat_isolation": true,
+  "narrow_light": true,
+  "requests": 7
+}

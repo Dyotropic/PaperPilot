@@ -54,11 +54,23 @@ def _estimate_messages_tokens(messages: list[dict]) -> int:
         content = m.get("content", "")
         if isinstance(content, str):
             total += _estimate_tokens(content)
+        total += 4096 * sum(len(a.get("images", [])) for a in m.get("attachments", []))
         # 附加论文
         papers = m.get("attached_papers", [])
         if papers:
             total += _estimate_tokens("\n".join(papers))
     return total
+
+
+def pending_tool_calls(messages):
+    """Unanswered calls in the latest assistant exchange, before a new turn."""
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if message.get("role") != "assistant":
+            continue
+        answered = {m.get("tool_call_id") for m in messages[index + 1:] if m.get("role") == "tool"}
+        return [c for c in message.get("tool_calls", []) if c.get("id") not in answered]
+    return []
 
 
 def _conversation_path(project_name: str) -> Path:
@@ -82,6 +94,10 @@ class ConversationManager:
         self._messages: list[dict] = data["messages"]
         self._history: list[dict] = data.get("history", copy.deepcopy(self._messages))
         self._compressed: list[dict] = data.get("compressed", [])
+
+    @property
+    def storage_directory(self):
+        return self._path.parent
 
     # ── 加载 / 保存 ──
 
@@ -114,7 +130,7 @@ class ConversationManager:
                     data["_meta"]["history_complete"] = True
                 else:
                     raise ValueError("会话日志包含未知事件；原文件已保留")
-            data["_meta"]["total_rounds"] = sum(m["role"] == "user" for m in data["messages"])
+            data["_meta"]["total_rounds"] = sum(m["role"] == "user" and not m.get("internal") for m in data["messages"])
             data["_meta"]["estimated_tokens"] = _estimate_messages_tokens(data["messages"])
             data["_meta"]["compressed_count"] = len(data.get("compressed", []))
             return data
@@ -190,7 +206,7 @@ class ConversationManager:
         if self.session_id and not self._path.with_name("events.jsonl").exists():
             raise ValueError("会话目录已移除；未重新创建课题目录")
         self._meta["updated_at"] = datetime.now().isoformat()
-        self._meta["total_rounds"] = sum(1 for m in self._messages if m["role"] == "user")
+        self._meta["total_rounds"] = sum(1 for m in self._messages if m["role"] == "user" and not m.get("internal"))
         self._meta["estimated_tokens"] = _estimate_messages_tokens(self._messages)
         self._meta["compressed_count"] = len(self._compressed)
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -227,6 +243,7 @@ class ConversationManager:
     def recover_interrupted_run(self):
         """Called on load only when this process has no live owner for this chat."""
         with self.lock:
+            self.finish_pending_tools()
             maintenance = self._meta.get("maintenance", {})
             if maintenance.get("state") in {"running", "stopping"}:
                 self.set_maintenance_state({**maintenance, "state": "interrupted"})
@@ -234,11 +251,15 @@ class ConversationManager:
             if state.get("state") not in {"running", "stopping"}:
                 return
             goal = state.get("goal", "")
-            if goal and not any(m.get("role") == "user" and
+            submission = state.get("submitted_message", goal)
+            if goal and not any(m.get("role") == "user" and not m.get("internal") and
                                 m.get("timestamp", "") >= state.get("started_at", "") and
-                                m.get("display_content", m.get("content")) == goal
+                                m.get("display_content", m.get("content")) == submission
                                 for m in self._messages):
-                self.add_user_message(goal)
+                from paperpilot.agent_attachments import format_attachment_material
+                attachments = state.get("submitted_attachments", [])
+                self.add_user_message(format_attachment_material(attachments) + state.get("resume_context", "") + submission,
+                                      display_content=submission, attachments=attachments)
             self.add_assistant_message("上次工作在应用退出时中断；已保存的记录与结果保留。"
                                        "请重新核对未完成步骤，可以发送新消息继续。")
             self.set_run_state({**state, "state": "interrupted"})
@@ -246,7 +267,8 @@ class ConversationManager:
     def add_user_message(self, content: str,
                          attached_papers: list[str] | None = None,
                          paper_details: list[dict] | None = None,
-                         display_content: str = "", *, library_context_hash: str = "") -> None:
+                         display_content: str = "", *, library_context_hash: str = "",
+                         attachments: list[dict] | None = None) -> None:
         """添加用户消息。
 
         Args:
@@ -263,6 +285,8 @@ class ConversationManager:
         }
         if attached_papers:
             msg["attached_papers"] = attached_papers
+        if attachments:
+            msg["attachments"] = copy.deepcopy(attachments)
         if library_context_hash:
             msg["library_context_hash"] = library_context_hash
         if paper_details:
@@ -289,6 +313,34 @@ class ConversationManager:
             self._history.append(msg)
             self._save()
 
+    def add_internal_message(self, role: str, content: str, *, team_id: str, **tool_fields) -> None:
+        """Durable main-agent tool exchange, hidden from ordinary chat bubbles."""
+        if role not in {"user", "assistant", "tool"}:
+            raise ValueError("内部消息角色无效")
+        msg = dict(role=role, content=content, internal=True, team_id=team_id,
+                   timestamp=datetime.now().isoformat())
+        allowed = {"tool_calls", "tool_call_id", "reasoning_content", "provider_blocks"}
+        if not set(tool_fields) <= allowed:
+            raise ValueError("内部工具消息字段无效")
+        msg.update(copy.deepcopy(tool_fields))
+        with self.lock:
+            self._append_event("message", message=msg)
+            self._messages.append(msg)
+            self._history.append(msg)
+            self._save()
+
+    def finish_pending_tools(self):
+        """A stopped/crashed request must not leave an invalid native tool chain."""
+        with self.lock:
+            calls = pending_tool_calls(self._messages)
+            if not calls:
+                return
+            team_id = next((m.get("team_id", "interrupted") for m in reversed(self._messages)
+                            if m.get("role") == "assistant"), "interrupted")
+            for call in calls:
+                self.add_internal_message("tool", "[系统] 调用在中断或失败时未完成；没有可引用的执行结果。",
+                                          team_id=team_id, tool_call_id=call["id"])
+
     # ── 查询 ──
 
     @property
@@ -299,7 +351,9 @@ class ConversationManager:
         避免 UI 显示注入的论文详情。
         """
         msgs = []
-        for m in self._history[-(_DISPLAY_ROUNDS * 2):]:
+        for m in self._history[self._visible_start(_DISPLAY_ROUNDS * 2):]:
+            if m.get("internal"):
+                continue
             copy = dict(m)
             if m.get("display_content"):
                 copy["content"] = m["display_content"]
@@ -309,15 +363,19 @@ class ConversationManager:
     @property
     def has_more_history(self) -> bool:
         """是否有更早的对话可加载。"""
-        return len(self._history) > _DISPLAY_ROUNDS * 2
+        return sum(not m.get("internal") for m in self._history) > _DISPLAY_ROUNDS * 2
+
+    def _visible_start(self, count):
+        visible = [i for i, m in enumerate(self._history) if not m.get("internal")]
+        return visible[-count] if count and len(visible) > count else 0
 
     def load_more_history(self, rounds: int = _DISPLAY_ROUNDS) -> list[dict]:
         """加载更早的对话（往前多取 rounds 轮）。"""
         previous = getattr(self, "_visible_count", _DISPLAY_ROUNDS * 2)
         self._visible_count = previous + max(0, rounds) * 2
-        end = max(0, len(self._history) - previous)
-        start = max(0, len(self._history) - self._visible_count)
-        return copy.deepcopy(self._history[start:end])
+        end = self._visible_start(previous)
+        start = self._visible_start(self._visible_count)
+        return copy.deepcopy([m for m in self._history[start:end] if not m.get("internal")])
 
     @property
     def compressed_summaries(self) -> list[dict]:
@@ -333,7 +391,7 @@ class ConversationManager:
 
     def display_timeline(self):
         with self.lock:
-            start = max(0, len(self._history) - _DISPLAY_ROUNDS * 2)
+            start = self._visible_start(_DISPLAY_ROUNDS * 2)
             markers = {}
             for record in self._compressed:
                 boundary = max(start, record.get("history_boundary", start))
@@ -341,7 +399,7 @@ class ConversationManager:
             timeline = []
             for i in range(start, len(self._history) + 1):
                 timeline.extend(dict(kind="compression", record=r) for r in markers.get(i, []))
-                if i < len(self._history):
+                if i < len(self._history) and not self._history[i].get("internal"):
                     m = dict(self._history[i])
                     m["content"] = m.get("display_content") or m["content"]
                     timeline.append(dict(kind="message", message=m))
@@ -380,7 +438,8 @@ class ConversationManager:
     # ── API 消息构建 ──
 
     def build_api_messages(self, system_prompt: str,
-                           paper_catalog: list[str] | None = None) -> list[dict]:
+                           paper_catalog: list[str] | None = None, *, load_images=True,
+                           message_count=None) -> list[dict]:
         """构建发给 API 的消息列表。
 
         结构：
@@ -406,7 +465,11 @@ class ConversationManager:
             messages.append({"role": "user", "content": "此前对话摘要（作为历史背景）：\n" + "\n\n".join(summaries)})
 
         # 2. 未压缩的消息
-        messages.extend({"role": m["role"], "content": m["content"]} for m in self._messages)
+        from paperpilot.agent_attachments import api_message, ensure_request_size
+        retained = self._messages if message_count is None else self._messages[:message_count]
+        if load_images:
+            ensure_request_size(messages + retained)
+        messages.extend(api_message(self.storage_directory, m, load_images=load_images) for m in retained)
 
         return messages
 
@@ -417,7 +480,9 @@ class ConversationManager:
         count = min(batch_rounds * 2, len(self._messages) // 3)
         # Do not leave a reply detached from its question after the cut.
         while count >= 2 and (self._messages[count - 1]["role"] != "assistant"
-                              or self._messages[count]["role"] != "user"):
+                              or self._messages[count - 1].get("internal")
+                              or self._messages[count]["role"] != "user"
+                              or self._messages[count].get("internal")):
             count -= 1
         if count < 2:
             return None
@@ -428,7 +493,7 @@ class ConversationManager:
         """将一批对话替换为摘要。"""
         if self._messages[:len(batch)] != batch:
             raise ValueError("待压缩上下文已变化，原记录保留；请重试")
-        original_rounds = sum(1 for m in batch if m["role"] == "user")
+        original_rounds = sum(1 for m in batch if m["role"] == "user" and not m.get("internal"))
         record = {
             "rounds_summary": summary,
             "original_rounds": original_rounds,
@@ -444,8 +509,9 @@ class ConversationManager:
         """Snapshot a complete prefix, keeping recent question/answer turns verbatim."""
         with self.lock:
             boundaries = [i + 1 for i, m in enumerate(self._messages)
-                          if m["role"] == "assistant"
-                          and (i + 1 == len(self._messages) or self._messages[i + 1]["role"] == "user")]
+                          if m["role"] == "assistant" and not m.get("internal")
+                          and (i + 1 == len(self._messages) or
+                               (self._messages[i + 1]["role"] == "user" and not self._messages[i + 1].get("internal")))]
             if not boundaries:
                 return None
             if not manual and len(boundaries) <= keep_rounds:
@@ -456,11 +522,25 @@ class ConversationManager:
             # An unanswered trailing user message always remains verbatim.
             if manual and len(boundaries) <= keep_rounds:
                 count = boundaries[-1]
+            from paperpilot.agent_attachments import estimated_request_bytes, MAX_REQUEST_BYTES
+            # Choose complete, bounded prefixes before materializing binary data.
+            # The remaining recent images need not be decoded for this request.
+            head = self.build_api_messages(system_prompt, load_images=False, message_count=0)
+            running, fitting = estimated_request_bytes(head), []
+            allowed = set(n for n in boundaries if n <= count)
+            for n, message in enumerate(self._messages[:count], 1):
+                running += estimated_request_bytes([message])
+                if running > MAX_REQUEST_BYTES - 16_384:
+                    break
+                if n in allowed:
+                    fitting.append(n)
+            if not fitting:
+                raise ValueError("单轮图片或历史摘要超过压缩请求预算，原记录保留；请减少图片或使用新会话。")
+            count = fitting[-1]
             batch = copy.deepcopy(self._messages[:count])
-            api = self.build_api_messages(system_prompt)
-            prefix_count = len(api) - len(self._messages)
+            api = self.build_api_messages(system_prompt, message_count=count)
             return dict(batch=batch, summaries=copy.deepcopy(self._active_summaries()),
-                        api_messages=api[:prefix_count + count], system_prompt=system_prompt)
+                        api_messages=api, system_prompt=system_prompt)
 
     def commit_compaction(self, summary, plan, *, mode, provider, model):
         from paperpilot.context_budget import estimate_request_tokens
@@ -470,9 +550,9 @@ class ConversationManager:
             batch = plan["batch"]
             if self._messages[:len(batch)] != batch or self._active_summaries() != plan["summaries"]:
                 raise ValueError("待压缩上下文已变化，原记录保留；请重试")
-            before = estimate_request_tokens(self.build_api_messages(plan["system_prompt"]))
+            before = estimate_request_tokens(self.build_api_messages(plan["system_prompt"], load_images=False))
             prior_rounds = sum(c.get("original_rounds", 0) for c in plan["summaries"])
-            rounds = prior_rounds + sum(m["role"] == "user" for m in batch)
+            rounds = prior_rounds + sum(m["role"] == "user" and not m.get("internal") for m in batch)
             record = dict(rounds_summary=summary, original_rounds=rounds,
                           compressed_at=datetime.now().isoformat(), consolidated=True,
                           mode=mode, provider=provider, model=model,
@@ -480,7 +560,8 @@ class ConversationManager:
                           messages_compacted=len(batch), before_tokens=before)
             after_messages = [dict(role="system", content=plan["system_prompt"]),
                 dict(role="user", content=f"此前对话摘要（作为历史背景）：\n[历史摘要：涵盖 {rounds} 轮对话]\n{summary}")]
-            after_messages.extend(dict(role=m["role"], content=m["content"]) for m in self._messages[len(batch):])
+            from paperpilot.agent_attachments import api_message
+            after_messages.extend(api_message(self.storage_directory, m, load_images=False) for m in self._messages[len(batch):])
             after = estimate_request_tokens(after_messages)
             if after >= before:
                 return None

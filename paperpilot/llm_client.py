@@ -33,7 +33,10 @@ thinking 参数三态归一（跨家翻译）：
 
 import logging
 from time import perf_counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from contextlib import contextmanager
+from contextvars import ContextVar
+import json
 from typing import Iterator
 
 from paperpilot.config import load_config
@@ -41,6 +44,17 @@ from paperpilot.llm_usage import TokenUsage, normalize_usage, record_request, us
 from paperpilot.agent_runtime import current_run, checkpoint, publish_reply, OperationCancelled
 
 logger = logging.getLogger(__name__)
+_tool_options = ContextVar("paperpilot_llm_tools", default={})
+
+
+@contextmanager
+def tools_scope(tools=None, tool_choice=None):
+    """Request-local tool definitions for independently running agents."""
+    token = _tool_options.set(dict(tools=tools, tool_choice=tool_choice))
+    try:
+        yield
+    finally:
+        _tool_options.reset(token)
 
 
 @dataclass
@@ -56,6 +70,8 @@ class ChatResult:
     elapsed_ms: int | None = None
     first_token_ms: int | None = None
     finish_reason: str | None = None
+    tool_calls: list[dict] = field(default_factory=list)
+    provider_blocks: list[dict] = field(default_factory=list)
 
 
 # ── Provider 注册表 ──
@@ -296,7 +312,10 @@ class LLMClient:
         result.model = result.model if isinstance(result.model, str) and result.model else use_model
         result.request_id = result.request_id if isinstance(result.request_id, str) else None
         self.last_result = result
-        record_request(result, messages, task=self.task, status=status,
+        definitions = _tool_options.get().get("tools")
+        fingerprint_messages = ([dict(role="system", content=json.dumps(definitions, sort_keys=True))] + messages
+                                if definitions else messages)
+        record_request(result, fingerprint_messages, task=self.task, status=status,
                        provider=result.provider, model=result.model, thinking=thinking)
 
     @property
@@ -433,6 +452,13 @@ class OpenAICompatClient(LLMClient):
     def _request_kwargs(self, messages, model, max_tokens, thinking) -> dict:
         fields = ("role", "content", "name", "tool_calls", "tool_call_id", "reasoning_content", "prefix")
         kwargs = {"messages": [{k: m[k] for k in fields if k in m} for m in messages], "model": model}
+        options = _tool_options.get()
+        if options.get("tools"):
+            kwargs["tools"] = options["tools"]
+            if options.get("tool_choice"):
+                kwargs["tool_choice"] = options["tool_choice"]
+            if self.provider in {"openai", "deepseek"}:
+                kwargs["parallel_tool_calls"] = False
         if self.provider == "openai":
             kwargs["max_completion_tokens"] = max_tokens
             if model in ("gpt-6-astra", "gpt-6-sol", "gpt-6-luna"):
@@ -462,6 +488,7 @@ class OpenAICompatClient(LLMClient):
             content = msg.content or ""
             reasoning = getattr(msg, "reasoning_content", "") or ""
         return ChatResult(content=content, reasoning=reasoning,
+                          tool_calls=[t.model_dump(exclude_none=True) for t in getattr(msg, "tool_calls", []) or []] if resp.choices else [],
                           finish_reason=getattr(resp.choices[0], "finish_reason", None) if resp.choices else None,
                           usage=normalize_usage(getattr(resp, "usage", None), self.provider),
                           model=getattr(resp, "model", None) or model,
@@ -502,6 +529,7 @@ class OpenAICompatClient(LLMClient):
         if self.provider in {"openai", "deepseek"}:
             kwargs["stream_options"] = {"include_usage": True}
         result = self.last_result = ChatResult(model=model)
+        calls = {}
         async def request():
             async with openai.AsyncOpenAI(api_key=self.api_key or "ollama",
                     base_url=self.base_url or None, timeout=timeout, max_retries=0) as client:
@@ -517,6 +545,16 @@ class OpenAICompatClient(LLMClient):
                             result.finish_reason = getattr(chunk.choices[0], "finish_reason", None) or result.finish_reason
                             delta = chunk.choices[0].delta
                             result.reasoning += getattr(delta, "reasoning_content", "") or ""
+                            for change in getattr(delta, "tool_calls", []) or []:
+                                row = calls.setdefault(change.index, dict(id="", type="function", function=dict(name="", arguments="")))
+                                if change.id:
+                                    row["id"] = change.id
+                                if change.function:
+                                    if change.function.name:
+                                        row["function"]["name"] += change.function.name
+                                    if change.function.arguments:
+                                        row["function"]["arguments"] += change.function.arguments
+                            result.tool_calls = [calls[i] for i in sorted(calls)]
                             if delta.content:
                                 result.content += delta.content
                                 publish_reply(result.content)
@@ -577,23 +615,54 @@ class AnthropicClient(LLMClient):
 
     def _split_messages(self, messages: list[dict]) -> tuple[str, list[dict]]:
         """OpenAI messages → (system_text, non_system_messages)。"""
+        from paperpilot.agent_attachments import anthropic_content
         system_parts = []
         rest = []
         for m in messages:
             if m.get("role") == "system":
                 system_parts.append(m.get("content", ""))
+            elif m.get("role") == "tool":
+                rest.append(dict(role="user", content=[dict(type="tool_result",
+                    tool_use_id=m["tool_call_id"], content=anthropic_content(m.get("content", "")))]))
+            elif m.get("role") == "assistant" and m.get("provider_blocks"):
+                rest.append(dict(role="assistant", content=m["provider_blocks"]))
             else:
                 role = "assistant" if m.get("role") == "assistant" else "user"
-                rest.append({"role": role, "content": m.get("content", "")})
+                content = anthropic_content(m.get("content", ""))
+                if m.get("tool_calls"):
+                    content = [dict(type="text", text=content)] if isinstance(content, str) and content else content or []
+                    for call in m["tool_calls"]:
+                        content.append(dict(type="tool_use", id=call["id"], name=call["function"]["name"],
+                            input=json.loads(call["function"]["arguments"])))
+                rest.append({"role": role, "content": content})
         if not rest:
             rest = [{"role": "user", "content": ""}]
         return "\n\n".join(p for p in system_parts if p), rest
+
+    def _tool_kwargs(self):
+        options = _tool_options.get()
+        tools = options.get("tools")
+        if not tools:
+            return {}
+        result = dict(tools=[dict(name=t["function"]["name"],
+            description=t["function"].get("description", ""),
+            input_schema=t["function"]["parameters"]) for t in tools])
+        choice = options.get("tool_choice") or "auto"
+        result["tool_choice"] = dict(type=choice)
+        if choice != "none":
+            result["tool_choice"]["disable_parallel_tool_use"] = True
+        return result
+
+    @staticmethod
+    def _native_calls(blocks):
+        return [dict(id=b.id, type="function", function=dict(name=b.name,
+            arguments=json.dumps(b.input, ensure_ascii=False))) for b in blocks if b.type == "tool_use"]
 
     def _do_cancellable(self, messages, temperature, max_tokens, timeout, model, thinking, token):
         import anthropic
         system, rest = self._split_messages(messages)
         tkw, use_max = self._thinking_kwargs(thinking, max_tokens, model)
-        kwargs = dict(model=model, messages=rest, max_tokens=use_max, **tkw)
+        kwargs = dict(model=model, messages=rest, max_tokens=use_max, **tkw, **self._tool_kwargs())
         if system:
             kwargs["system"] = system
         options = dict(api_key=self.api_key, timeout=timeout, max_retries=0)
@@ -614,6 +683,8 @@ class AnthropicClient(LLMClient):
                     result.request_id, result.model = final.id, final.model
                     result.finish_reason = final.stop_reason
                     result.usage = normalize_usage(final.usage, "anthropic")
+                    result.tool_calls = self._native_calls(final.content)
+                    result.provider_blocks = [b.model_dump(exclude_none=True) for b in final.content]
             return result
         try:
             return token.run_async(request)
@@ -658,6 +729,7 @@ class AnthropicClient(LLMClient):
         }
         if system:
             kwargs["system"] = system
+        kwargs.update(self._tool_kwargs())
         client = self._get_client(timeout)
         resp = client.messages.create(**kwargs)
         content_parts = []
@@ -670,6 +742,8 @@ class AnthropicClient(LLMClient):
                 reasoning_parts.append(getattr(block, "thinking", "")
                                        or getattr(block, "text", ""))
         return ChatResult(content="".join(content_parts),
+                          tool_calls=self._native_calls(resp.content or []),
+                          provider_blocks=[b.model_dump(exclude_none=True) for b in resp.content or []],
                           finish_reason=getattr(resp, "stop_reason", None),
                           reasoning="\n".join(p for p in reasoning_parts if p),
                           usage=normalize_usage(getattr(resp, "usage", None), "anthropic"),

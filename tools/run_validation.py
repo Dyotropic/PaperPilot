@@ -163,5 +163,5 @@ def guard(event, args):
 sys.addaudithook(guard)
 os.chdir(work)
 print(f"ISOLATED TEST {target.name}", flush=True)
-sys.argv = [str(target)]
+sys.argv = [str(target), *sys.argv[2:]]
 runpy.run_path(str(target), run_name="__main__")

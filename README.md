@@ -12,7 +12,8 @@
 - **精确查找**：按论文 DOI、arXiv ID（可指定版本）或完整标题严格查找；不接受 ISBN，匹配结果以“精确”标识显示，不把占位分数当作 CE 得分
 - **多模型 AI 服务**：统一 LLM 抽象层，支持 DeepSeek / OpenAI / Anthropic(Claude) / GLM / Kimi / 通义千问 / Ollama(本地) 等多服务商，设置页一键切换 Provider、Key 与模型；内置模型名是配置候选，实际可用性以服务商账户和连接测试为准
 - **AI 精读**：基于 RLM 三层阅读策略，对论文全文进行结构化分析（核心贡献 / 研究方法 / 关键证据 / 创新亮点 / 局限不足 / 三维评分）
-- **AI 对话助手（StudyCopilot）**：课题上下文感知的学术对话助手，支持 Markdown、论文引用、对比及应用功能调用；同一课题可建立独立会话，Enter 发送、Shift+Enter 换行，工作中可停止当前轮并保留记录继续；显示用量、缓存率及上下文占用，输入 `/` 可手动压缩上下文
+- **AI 对话助手（StudyCopilot）**：课题上下文感知的学术对话助手，支持 Markdown、论文引用、对比及应用功能调用；同一课题可建立独立会话，Enter 发送、Shift+Enter 换行，工作中可停止当前轮并保留记录继续；显示用量、缓存率及上下文占用，输入 `/` 可手动压缩上下文；左下角 `+` 添加文件、照片或文件夹，发送前预览/移除，支持文档摘录与原生图片输入（需支持图片的模型）
+- **科研 Agent Team**：主 Agent 派发独立子 Agent 并行阅读、分析及核验，再审查凝练结论；子 Agent 只读，修改统一由主 Agent 执行。右侧名单显示状态，点击查看完整子对话，支持停止单个成员或整个轮次；默认并行三名，需支持原生工具调用的模型
 - **文献管理**：课题/论文 CRUD、阅读状态追踪、本地 PDF 导入（自动提取标题/作者/摘要）、回收站、BibTeX/CSV 导出；检索页与文献页勾选支持 Shift+点击范围选择（勾选两篇之间所有论文）
 - **知识图谱**：按课题生成可交互文献关系图谱（独立窗口），提供引用关系、关键词共现、时间线三种视图，支持节点拖拽/缩放、点击查看详情与直接打开 PDF；引用数据离线优先（检索时自动缓存，必要时按 DOI 批量补查）
 - **PDF 阅读器**：内置 PDF.js，独立窗口渲染，支持文字选择、页码导航、夜间模式
@@ -37,6 +38,6 @@ if (!(Test-Path -LiteralPath config.yaml)) { Copy-Item config.example.yaml confi
 
 检索页可在“课题检索”和“精确查找”之间切换。课题检索的多个筛选字段按 AND 组合；若严格筛选后不足目标数量，界面显示实际数量和数据源警告，不会放宽条件凑数。网络控制默认值为 `search.max_pages: 5`、`search.request_timeout: 15` 秒，精确查找默认最多显示 `search.exact_max_results: 25` 条，可在 `config.yaml` 调整。
 
-**主要依赖**：Flet、SQLAlchemy、sentence-transformers、KeyBERT、arxiv、PyMuPDF、pywebview、jieba、PyYAML、openai、anthropic
+**主要依赖**：Flet、SQLAlchemy、sentence-transformers、KeyBERT、arxiv、PyMuPDF、pywebview、jieba、PyYAML、openai、anthropic；附件解析另使用 Pillow、python-docx、python-pptx、openpyxl。
 
 详细使用指南见 [USER_GUIDE.md](USER_GUIDE.md)。

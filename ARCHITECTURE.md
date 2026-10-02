@@ -28,7 +28,7 @@ PaperPilot 面向学生及科研人员的课题研究，以 Python + Flet 桌面
 | UI 共享 | `pages/context.py` 集中设计令牌、主题、AppState/AppContext 与回调注册；`components.py` 提供复用控件 |
 | 检索 | `keywords.py`、`mt_translator.py` 提取和翻译；`fetcher.py` 级联召回；`sources/` 适配三源；`search_filters.py`、`exact_search.py` 管理严格筛选和精确匹配 |
 | 排序与归档 | `indexer.py` 精排；`library.py`、`models.py` 管理 SQLite；`repo_manager.py` 管理课题目录、PDF、缓存与回收站；`local_import.py`、`export.py` 导入导出 |
-| 模型与 Agent | `llm_client.py` 适配服务商；`ai_service.py` 编排精读、评分及聊天；`agent_sessions.py` 管理独立会话；`conversation.py` 管理事件、历史和压缩；`context_budget.py` 管理预算；`agent_runtime.py` 管理运行及取消；`llm_usage.py` 记录计数 |
+| 模型与 Agent | `llm_client.py` 适配服务商；`ai_service.py` 编排精读、评分及聊天；`agent_team.py` 管理并行只读子 Agent；`agent_sessions.py` 管理独立会话；`conversation.py` 管理事件、历史和压缩；`context_budget.py` 管理预算；`agent_runtime.py` 管理运行及取消；`llm_usage.py` 记录计数 |
 | 原文与图谱 | `downloader.py` 获取 PDF/HTML；`pdf_viewer.py` 通过 pywebview + PDF.js 阅读；`graph_service.py` 构图；`graph_window.py` 通过 ECharts 展示 |
 
 页面通过 `pages.context.ctx` 使用共享状态和注入回调，不反向导入 `app.py`。业务层保留同步公共接口，耗时工作由页面调度到后台；运行状态随任务链延续，避免模型输出结束后工具仍在执行而界面误判为空闲。
@@ -59,7 +59,9 @@ PaperPilot 面向学生及科研人员的课题研究，以 Python + Flet 桌面
 
 `get_client(task=None)` 每次调用读取配置并解析任务模型。`score_model`、`chat_model` 是同一 provider 下的覆盖；非空 `reasoning_model` 启用先推理再回答的聊天流程。关键词提取、翻译及未覆盖任务使用主模型。`thinking=None` 表示不显式传参、采用模型默认值；`True/False` 经适配层转换，不能把“默认”当作关闭推理。运行中的请求继续使用创建时的 client，新配置作用于后续调用。
 
-`ChatResult` 包含 `content`、`reasoning`、`usage`、`provider`、`model`、`request_id`、`elapsed_ms`、`first_token_ms`、`finish_reason`。字段可能为空；推理 token 若已计入服务商输出计数，不再重复相加。`LLMClient.chat(...)` 返回该对象，`chat_stream(...)` 逐段返回正文。
+`ChatResult` 包含 `content`、`reasoning`、`usage`、`provider`、`model`、`request_id`、`elapsed_ms`、`first_token_ms`、`finish_reason`，新增 `tool_calls/provider_blocks` 保存原生工具及供应商连续性字段。字段可能为空；推理 token 若已计入服务商输出计数，不再重复相加。`LLMClient.chat(...)` 返回该对象，`chat_stream(...)` 逐段返回正文。Agent 使用 `chat` 的可取消传输；独立 `chat_stream` 接口不承担团队工具编排。
+
+`tools_scope(...)` 通过 ContextVar 限定当前请求工具，不修改共享 client 或原有公开调用签名。OpenAI 兼容请求传入 function tools，SSE 拼接各 index 的工具参数；Anthropic 转换 `tool_use/tool_result`，保留返回块及思考签名。指纹包含工具定义但只存摘要。团队需要端点支持原生函数调用，可通过 `agent.team.enabled: false` 关闭；协议适配不等于所有服务商均已实测。
 
 ### 精读与评分
 
@@ -76,14 +78,14 @@ AI 精细打分以课题描述和论文摘要为依据，分批请求，返回�
 | `fetcher.py` | `fetch_with_cascade(primary_kw, secondary_kw, regular_kw, source=..., ...)`；`fetch_multi_primary(...)`；`filters/max_pages/request_timeout` 为关键字参数 |
 | `indexer.py` | `rank_papers(query, papers, top_k=50, ce_candidates=100, ...)` 返回 `(paper, score)` 列表；函数缺省值与 UI/示例配置值分别管理 |
 | `library.py` | `create_project(name, description, push_interval_days=7)`、`get_all_projects()`、`get_project_papers(project_id, status_filter=None)`、`save_papers_to_project(project_id, papers, scores=None)`、`update_project(...)` |
-| `ai_service.py` | `AIService.deep_read(paper, full_text=None)`；`score_papers(topic_desc, papers, max_papers=50)`；`chat(project_id, project_name, message, ..., session_id=..., include_library_context=..., operation=...)` 返回 `reply/compressed/session_id` |
+| `ai_service.py` | `AIService.deep_read(paper, full_text=None)`；`score_papers(topic_desc, papers, max_papers=50)`；`chat(project_id, project_name, message, ..., session_id=..., include_library_context=..., operation=..., attachments=..., on_team_change=...)` 返回 `reply/compressed/session_id` |
 | `ai_service.py` | `create_session(...)`、`select_session(...)`、`get_conversation(..., session_id=...)`；`get_context_status(..., session_id=..., draft=...)`；`compact_context(..., session_id=...)` 返回完成、未变化或失败状态 |
 | `graph_service.py` | `build_graph_data(project_id, papers, on_progress=None)` 为图谱窗口提供节点与关系 |
 | `pages/agent_panel.py` | `send_agent_message(text, role='user')`、`set_agent_project(project_id, project_name='', topic_desc='')`、`begin_agent_run(...)`、`stop_agent_run(...)` |
 
 ## Agent 会话、停止与恢复
 
-StudyCopilot 是课题感知聊天与已有应用功能编排器。当前通过回复中的动作标记及面板解析调度检索、保存、评分、精读与课题更新等功能；不能描述为已经具备通用代码执行沙箱、任意工具协议或多代理运行平台。
+StudyCopilot 是课题感知聊天、只读科研 Agent Team 与已有应用功能编排器。通过最终主回复中的动作标记及面板解析调度检索、保存、评分、精读与课题更新等功能；团队工具不授予通用代码执行或任意外部工具权限。
 
 ### 独立会话与资料注入
 
@@ -93,7 +95,48 @@ StudyCopilot 是课题感知聊天与已有应用功能编排器。当前通过�
 
 会话及课题身份在任务开始时固定，迟到结果仍归属原会话。UI 不将迟到回复错误展示到新切换的聊天。
 
-### 停止当前轮
+### 本地附件
+
+`pages/agent_attachments_ui.py` 管理加号菜单、原生 `FilePicker`、预览及按会话隔离的内存草稿；`paperpilot/agent_attachments.py` 负责限额、成熟文档解析器、不可变资产及模型消息投影。选择时快照文件字节，发送前不调用模型；发送时先原子保存到 `sessions/{id}/attachments/{sha256}`，再记录运行与消息事件。JSON/日志只保存相对资产引用、元数据和文本摘录，不保存 base64 或依赖原文件路径。
+
+文本、PDF、DOCX、PPTX、XLSX 读取有界摘录；扫描 PDF 只渲染前 3 页，限制写入消息并在预览中显示。文件夹不跟随符号链接/目录联接，跳过隐藏、构建及缓存目录，只读取显式选择目录内支持的资料；批次超限或读取失败不部分替换草稿。每消息最多 20 个文件、原文件合计 40 MiB、单文件 20 MiB；图片最多 8 张、单张 8 MiB、合计 12 MiB。请求消息 JSON 限制 32 MiB，超限提示压缩、减量或新会话，不静默删除附件。
+
+图片只在 user 消息中投影为 OpenAI `image_url` 数据 URL；Anthropic 适配器转换为 `image/source`，请求时校验资产摘要、字节数、格式和尺寸。DeepSeek Flash 的图片能力已按官方文档内置，其他模型通过 `agent.image_support` 明确声明；两步推理的两个模型均须支持图片。估算不计算 base64 字符，采用每图 4096 token 的保守跨服务商预留，收到真实 usage 后校准仪表。附件内提示和操作标记视为研究资料，不能扩大用户授权。
+
+停止或重启恢复发生在消息落盘前时，从运行元数据恢复已接收附件；压缩仅改变有效模型历史，原事件及资产继续归档，历史气泡仍可预览。重命名移动整个课题目录，引用随会话目录保持有效。删除课题沿用原回收站机制；备份必须包含附件目录。未发送附件只在内存中保留，退出后不恢复。
+
+### 科研 Agent Team：派发、权限与审查
+
+`agent_team.py` 提供独立模型循环，`pages/agent_team_ui.py` 在右侧展示团队状态、历史及完整子对话。`_active_run` 仍限制同时活动的主轮次；子 Agent 不获取主聊天 `request_lock`，使用独立历史、client、取消令牌和 usage 作用域，通过有界 ThreadPoolExecutor 同时工作。
+
+1. `MAIN_TEAM_PROMPT` 要求只拆可并行的任务，明确目标、资料范围及验收要求。`team_dispatch({tasks: [...]})` 派发，或以 `agent_id` 同轮追问；多个原生派发合为一批，整体校验再执行。可选空标识规范化，不接受未知字段、重复任务或跨团队目标。完整 `[TEAM]...[/TEAM]` 仅作旧文本响应兼容，不解析正文中引用的示例。
+2. `WORKER_PROMPT` 限定只读、禁止递归派发和项目修改。子上下文含角色、资料目录及任务；资料是主聊天当前有效上下文的快照，目录展示最近24项及限制，不复制其它子 Agent 推断。`read_source` 每次最多6000字符，每项任务最多四次，图片按需提供。仅有摘要时必须说明未读全文，不能声称联网。
+3. 主子均提供受限 AST `calculate`：无 eval、变量、属性、任意代码或文件权限；子每次任务最多六次计算，主每轮十二次。保存表达式及值，验证算术，不证明统计假设、因果或研究结论。模型可能忽略单次工具调用偏好，因此支持有界多调用并逐 ID 返回结果；图片资料在全部工具结果之后提供。
+4. 每批观察返回真实状态、读取位置、计算记录、错误及每名最多5000字符结果；超出标注截断，完整回复继续保存。主模型对照原问题核验证据、冲突、数字及缺口，必要时追问，再凝练输出。失败/停止不算完成，两名 Agent 一致不等于事实正确。只有最终主回复进入 ACTION/PROJECT_UPDATE 路由，子操作标记仅为数据；主修改沿用原有确认机制。
+
+缺省同时三名、本轮六名、最多三批（含追问），每项任务总超时180秒。任务排队可见，超时从开始执行时计。子模型继承聊天模型，读取/审查阶段显式关闭附加思考。当前不提供跨服务商路由、子间通信、共享任务板或递归团队。简单问答直接回答，团队会增加请求、token及延迟；缓存率不是团队质量验收标准。
+
+### 团队保存、停止、回收与 UI
+
+`sessions/{session_id}/teams/{parent_run_id}/team.json` 原子保存目标、父子身份、状态、任务、完整文本对话、读取/计算记录、结果、错误及回收标记。子日志使用图片占位和工具 ID，不存 base64；已发送图片仍由主会话不可变附件保存。主事件日志保留内部工具交换及观察，普通气泡隐藏这些中间消息，轮次与压缩边界按实际用户问答计。
+
+子状态有 queued/running/stopping/completed/failed/timed_out/cancelled/interrupted，主另有 reviewing。右侧名单显示各自状态；点击查看完整只读子对话，可仅停止一个子 Agent。输入框停止按钮取消整个当前轮并传播到所有子任务。网络关闭及检查点阻止后续动作，未回答的原生工具 ID 补入明确的中断结果，避免继续时留下无效工具链；已完成结果与未完成片段分别保留。
+
+主审查结束或当前轮失败/停止后关闭线程池、解除取消订阅、移除 live 注册表，保留原始团队记录。回收和完成是不同状态。同轮追问复用子历史；跨轮旧标识不可投递，发送“继续”携带主目标及记录，需要时新建同职责子 Agent。重启将无 live 所有者的未结束团队标记 interrupted，不自动重执行；压缩不删除团队原始记录，压缩请求单独关闭团队工具。历史入口加载最近30个团队，较早记录仍在会话目录中。SQLite无新增业务字段，旧会话无团队记录仍可使用。
+
+### 实读源码和报告的设计依据（2026-10-02）
+
+按科研只读业务化用，不声称复刻完整平台或读取未公开的 Codex 桌面 UI 源码。
+
+| 来源与快照 | 研读入口及机制 | 本项目采用 |
+| --- | --- | --- |
+| [Codex，14a477ea](https://github.com/openai/codex/tree/14a477ea89712071944244022e8a10142845456e) | `codex-rs/core/src/tools/handlers/multi_agents_spec.rs`、`agent/control/spawn.rs`、`interrupt.rs`、`templates/collab/experimental_prompt.md`：派发、独立/分叉上下文、父子所有权、追问、停止及关闭 | 独立子历史、父轮归属、结果审查、停止保留记录及资源回收；[官方文档](https://developers.openai.com/codex/multi-agent) 补充操作原则 |
+| [DeepSeek Harness，639ed015](https://github.com/deepseek-ai/deepseek-harness/tree/639ed015397290b3745d163aafe02ffee4aa3f84) | `packages/experimental/tool-agent-team/src/index.ts`、`agent-team/src/lifecycle.ts`、`mailbox.ts`、`client-ui-agent-team/src/client/TeamAction.tsx`：lead-only派发、活动/任务状态分离、持久邮箱、取消和释放、子会话入口 | 主统一修改、终态与释放分开、持久身份、右端名单及子对话；本项目同轮批次汇合无需完整共享任务板/点对点邮箱 |
+| [ZCode，29628c9a](https://github.com/zai-org/ZCode/tree/29628c9acdb81b703bbd4080c207a0e7ce5e276e) | `apps/zcode-cli/packages/core/src/subagent/system-prompt.ts`、`runner.ts`、`packages/ui/src/app-shell/SubagentSessionSidePane.tsx`：子角色、独立会话、父信号/看门狗、终态通知、只读侧栏 | 分离角色提示、超时取消、完整只读子对话入口及主审查 |
+
+[Anthropic 的多 Agent 研究系统报告](https://www.anthropic.com/engineering/multi-agent-research-system) 强调分工、明确来源/输出、适度并行及成本；[Towards a Science of Scaling Agent Systems，v3](https://arxiv.org/html/2512.08296v3) 分析可分解任务收益、协调开销与集中验证；[Why Do Multi-Agent LLM Systems Fail?，v3](https://arxiv.org/html/2503.13657v3) 区分系统设计、Agent间对齐及任务验证失败。这些结果支持有界分工和主审查，不证明任何科研任务一定受益。实测曾发现主 Agent 沿用子算术错误，故增加计算工具；该风险不能仅靠提示词或人数消除，验证边界见 [TESTING.md](TESTING.md)。
+
+### 停止与恢复
 
 空闲时为发送箭头，工作中为停止方块；停止语义是结束当前轮，保留已落盘历史及已完成成果。`AgentRun`、取消令牌与运行作用域贯穿模型、动作和并发子任务，检查点阻止尚未开始的后续操作。
 
@@ -111,7 +154,7 @@ StudyCopilot 是课题感知聊天与已有应用功能编排器。当前通过�
 | 累计用量 | 服务商返回的每次输入、输出计数之和；重复发送历史会重复计费 |
 | 缓存命中率 | 有缓存计数的请求中，命中的输入 token 占已报告缓存输入 token 的比例 |
 
-占用按字符和消息封装估算，最近主聊天的实际输入用量可作为基准，后续消息按估算增量修正；始终显示 `≈`，不是 tokenizer 精确计数。压缩提交或更换模型使旧基准失效，压缩请求的输入计数不作为压缩后聊天占用。
+占用按字符、消息封装及图片预留估算，最近主聊天的实际输入用量可作为基准，后续消息按估算增量修正；始终显示 `≈`，不是 tokenizer 精确计数。压缩提交或更换模型使旧基准失效，压缩请求的输入计数不作为压缩后聊天占用。草稿与待发附件另列，图片预留不是服务商账单计数。
 
 `context_budget.py` 按 provider/model 查容量。内置 DeepSeek V4 Flash/Pro 相关 ID 使用保守十进制 1,000,000 token，其他模型未知时显示“未配置”。用户可在上下文详情保存该模型容量覆盖值，或配置 `agent.context_windows`；代理端点限制可能不同，应按实际限制填写。
 
@@ -152,7 +195,7 @@ StudyCopilot 是课题感知聊天与已有应用功能编排器。当前通过�
 | 用户主目录 `.paperpilot_*` | PDF/HTML 下载、PDF.js、ECharts 和图谱窗口数据缓存，具体用途见用户指南 |
 | 用户主目录 `.cache/` | CE/关键词等模型缓存，可能与其他应用共享 |
 
-完整备份在关闭应用及其他写入进程后复制数据库、`repository/`、`outputs/` 和 `config.yaml`，妥善保护凭据。运行中的 SQLite 应使用备份接口，不能只复制主文件。不要只备份会话投影而漏掉 `events.jsonl` 和索引。课题重命名须同步数据库、目录与会话绑定；目录移动失败时保留记录并提示。
+完整备份在关闭应用及其他写入进程后复制数据库、`repository/`、`outputs/` 和 `config.yaml`，妥善保护凭据。运行中的 SQLite 应使用备份接口，不能只复制主文件。不要只备份会话投影而漏掉 `events.jsonl`、索引和会话 `attachments/`。课题重命名须同步数据库、目录与会话绑定；目录移动失败时保留记录并提示。
 
 新增 ORM 字段考虑旧 SQLite 的增量迁移与回滚，禁止以清空用户库解决不兼容。新增配置同步示例及用户说明，提供合理缺省值。旧 `deepseek:` 在未配置 `llm.provider` 时仍兼容；设置页保存各家 Key 到 `llm.api_keys`，不是加密保险库。
 
@@ -184,5 +227,6 @@ PDF 阅读器通过 pywebview 独立窗口加载 PDF.js；图谱通过 ECharts�
 - [Codex 压缩实现](https://github.com/openai/codex/blob/8d44977aa2fb9ae1b128660668dc5b36966613fa/codex-rs/core/src/compact.rs)、[压缩检查点](https://github.com/openai/codex/blob/8d44977aa2fb9ae1b128660668dc5b36966613fa/codex-rs/history/src/compaction_checkpoint.rs)、[slash 输入](https://github.com/openai/codex/blob/8d44977aa2fb9ae1b128660668dc5b36966613fa/codex-rs/tui/src/bottom_pane/chat_composer/slash_input.rs)。
 - [DeepSeek Harness 压缩子系统](https://github.com/deepseek-ai/deepseek-harness/blob/639ed015397290b3745d163aafe02ffee4aa3f84/docs/subsystems/compaction.md)、[摘要器](https://github.com/deepseek-ai/deepseek-harness/blob/639ed015397290b3745d163aafe02ffee4aa3f84/packages/compaction/compaction-basic/src/summarizer.ts)、[折叠记录](https://github.com/deepseek-ai/deepseek-harness/blob/639ed015397290b3745d163aafe02ffee4aa3f84/packages/client/ui-chat/src/client/chat/CompactionItem.tsx)。
 - [DeepSeek 缓存说明](https://api-docs.deepseek.com/guides/kv_cache)、[上下文容量来源](https://api-docs.deepseek.com/quick_start/pricing)。服务商的实时限制与政策仍须按当前账户和响应确认。
+- 附件借鉴 [Codex 存储接口](https://github.com/openai/codex/blob/a75987455a2879ca151cea5e118fa307be868583/codex-rs/attachment-store/src/lib.rs)、[DeepSeek Harness 附件子系统](https://github.com/deepseek-ai/deepseek-harness/blob/639ed015397290b3745d163aafe02ffee4aa3f84/docs/subsystems/attachment.md)及[不可变文件存储](https://github.com/deepseek-ai/deepseek-harness/blob/639ed015397290b3745d163aafe02ffee4aa3f84/packages/attachment/attachment-local/src/file-store.ts)。图片协议与 Flash 能力见 [DeepSeek 官方视觉文档](https://api-docs.deepseek.com/guides/vision)。
 
 自动化、原生 UI 和付费实测各有独立范围，入口见 [TESTING.md](TESTING.md)。历史 evidence 仅证明当时脚本覆盖的场景，不替代当前代码复验或全供应商验收。

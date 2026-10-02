@@ -6,6 +6,7 @@
 
 - PaperPilot 是 Python + Flet 桌面文献工作流，含检索、精排、文献库、AI 精读/打分/对话等模块。改动前先看实际调用链和当前源码，不照搬旧阶段文档中的文件位置或函数签名。
 - 文献库公共入口见 `paperpilot/library.py`；AI 服务入口见 `paperpilot/ai_service.py`；Agent 面板入口见 `pages/agent_panel.py`。已有调用方依赖的参数、返回字段和语义应保持兼容；确需变更时同步调用方、文档并说明迁移方式。
+- Agent 附件入口见 `paperpilot/agent_attachments.py` 与 `pages/agent_attachments_ui.py`，科研团队入口见 `paperpilot/agent_team.py` 与 `pages/agent_team_ui.py`。当前权限约定为子 Agent 只读分析、主 Agent 审查并统一执行修改；扩展工具时保持会话归属、取消传播及原始记录保存契约。
 - 修改 `paperpilot/models.py` 要考虑已有 SQLite 数据的迁移与回滚，不直接删改旧字段；新增配置同步更新 `config.example.yaml`，提供缺省值，密钥不得入库、入日志或硬编码。
 - 核心打分、排序策略先核对业务目标与已有算法，不擅自改权重或把历史规划当作当前实现。
 
