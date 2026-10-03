@@ -814,7 +814,7 @@ class AIService:
                                           task="chat", operation=operation):
             checkpoint()
             if not self.is_available:
-                reply = "AI 服务未配置。请在设置中配置模型服务与 API Key。"
+                reply = "AI 服务未配置。请在设置中配置 API Key 或完成 Codex 订阅登录。"
                 cm.add_user_message(format_attachment_material(attachments) + message, paper_details=papers,
                                     display_content=display_message or message, attachments=attachments)
                 cm.add_assistant_message(reply)

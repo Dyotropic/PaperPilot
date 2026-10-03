@@ -161,7 +161,7 @@ AI 精读、打分及 StudyCopilot 对话需要可用的 **LLM 服务**；关键
 ```yaml
 llm:
   provider: deepseek       # 服务商名，见下表
-  api_key: sk-xxxxxxxxxxxx  # 该服务商的 API Key（Ollama 可留空）
+  api_key: sk-xxxxxxxxxxxx  # 该服务商的 API Key（Ollama 本地/私有端点按其鉴权要求填写）
   api_keys: {}              # 可选：设置页按服务商保存密钥，切换时自动回填
   base_url: ""              # 留空用内置默认地址，一般不用填
   model: deepseek-flash  # 主模型（DeepSeek V4.1 Flash）
@@ -174,32 +174,80 @@ llm:
 
 **推荐：直接在界面上配置**。打开软件 →「设置」页 →「AI 模型服务」卡片：
 
-1. **Provider（服务商）**：下拉选择你要用哪一家（共 7 家，见下表）。
+1. **Provider（服务商）**：下拉选择接入方式（共 9 项，见下表），Codex 订阅与 OpenAI API 分别配置。
 2. **模型**：下拉选择该家的模型；列表里没有的可选「自定义…」并手动输入模型名。
-3. **API Key**：粘贴对应服务商的密钥（见下表如何获取）。密钥以明文保存在本地 config.yaml；调用时作为凭据发送给配置的服务端。未实现 keyring/加密。
+3. **凭据**：API 服务粘贴对应密钥；Codex 订阅使用下方 ChatGPT 登录区。API 密钥以明文保存在本地 config.yaml；调用时作为凭据发送给配置的服务端。未实现 keyring/加密。
 4. 点 **「测试」** 验证连通性 → 点 **「保存」** 生效（下次 AI 调用时应用）。
 
-> 切换 Provider 时，设置页会记住当前会话里各家的 Key 和模型；保存后各家 Key 留在本机 `llm.api_keys` 中。新服务商仍需填写自己的 Key。空 Key 无法保存为远程服务商配置。
+> 切换 Provider 时，设置页会记住当前会话里各家的 Key 和模型；保存后各家 Key 留在本机 `llm.api_keys` 中。API 服务商仍需填写自己的 Key。Codex 使用独立登录目录，可先保存配置再登录；未登录时 AI 服务不可用。
 
 **服务商入口与内置模型候选：**
 
-下表记录项目设置页的候选值，不代表账户已开通或服务商完整的当前模型列表。模型名以实际端点支持为准，可选择「自定义…」输入并测试。
+下表的文本模型预设于 **2026-10-03** 按官方目录核对，不代表账户已开通或服务商完整的当前模型列表。模型名以实际端点支持为准，可选择「自定义…」输入并测试。更新预设不会替换本机已保存的模型或密钥；旧型号仍可作为自定义值读取。
 
 | Provider              | 服务商入口 / 获取 Key                                             | Key 提示       | 内置模型候选                                      |
 | --------------------- | --------------------------------------------------------- | -------------- | ------------------------------------------------- |
 | **DeepSeek**          | https://platform.deepseek.com → 注册 → 「API Keys」→ 创建 | `sk-` 开头     | deepseek-flash（V4.1 Flash）/ deepseek-v4-pro               |
-| **OpenAI**            | https://platform.openai.com → 「API keys」→ 创建          | `sk-` 开头     | gpt-6-astra、gpt-6-sol、gpt-6-luna（保留 GPT-5.6 等旧选项） |
-| **Anthropic(Claude)** | https://console.anthropic.com →「API Keys」→ 创建         | `sk-ant-` 开头 | claude-fable-5-1、claude-opus-5-5、claude-sonnet-5、claude-haiku-4-5 |
-| **智谱 GLM**          | https://open.bigmodel.cn → 注册 →「API 密钥」→ 新建       | 长字符串       | glm-5.3、glm-5.2                                  |
-| **Kimi(Moonshot)**    | https://platform.moonshot.cn → 注册 →「API 密钥」         | `sk-` 开头     | kimi-k3                                           |
-| **通义千问(Qwen)**    | https://dashscope.console.aliyun.com →「API-KEY」         | `sk-` 开头     | qwen-plus、qwen-turbo、qwen-max                   |
-| **Ollama（本地）**    | 本地安装 Ollama 后**无需 Key，留空即可**                  | 无需           | qwen2.5:7b（可自选本地已拉取的模型）              |
+| **OpenAI**            | https://platform.openai.com → 「API keys」→ 创建          | `sk-` 开头     | gpt-6.1-sol、gpt-6-astra、gpt-6-luna（保留 GPT-6 Sol / GPT-5.6 等） |
+| **Codex（订阅）**      | [官方 Codex CLI](https://developers.openai.com/codex/cli/)与 ChatGPT 登录 | 不填 API Key | 账号默认；登录后从账号模型目录刷新，不套用 API 型号权限 |
+| **Anthropic(Claude)** | https://console.anthropic.com →「API Keys」→ 创建         | `sk-ant-` 开头 | claude-fable-5-1、claude-opus-5-5、claude-sonnet-5-5、claude-haiku-4-5 |
+| **Gemini**            | https://aistudio.google.com/api-keys → 创建 Gemini API Key | Google Key | gemini-3.8-flash、gemini-3.5-flash-lite、gemini-3.1-pro-preview（及部分旧版 Gemini 3 文本模型） |
+| **智谱 GLM**          | https://open.bigmodel.cn → 注册 →「API 密钥」→ 新建       | 长字符串       | glm-5.3、glm-5.3-flash、glm-5.3-flashx、glm-5.2 |
+| **Kimi(Moonshot)**    | https://platform.moonshot.cn → 注册 →「API 密钥」         | `sk-` 开头     | kimi-k3、kimi-k2.7-code、kimi-k2.7-code-highspeed、kimi-k2.6 |
+| **通义千问(Qwen)**    | https://dashscope.console.aliyun.com →「API-KEY」         | `sk-` 开头     | qwen3.8-max、qwen3.7-plus、qwen3.8-flash（保留旧 Plus / Turbo / Max） |
+| **Ollama**            | 本地安装 Ollama；云端在 https://ollama.com/settings/keys 创建 Key | 本地免 Key；官方云端必填 | Gemma 4 E4B / 12B / 31B、Qwen 3.8 Flash Next 预览、qwen2.5:7b |
+
+官方目录：[OpenAI](https://developers.openai.com/api/docs/models)、[Claude](https://platform.claude.com/docs/en/about-claude/models/overview)、[Gemini](https://ai.google.dev/gemini-api/docs/models)、[DeepSeek](https://api-docs.deepseek.com/quick_start/pricing)、[GLM](https://docs.bigmodel.cn/cn/guide/models)、[Kimi](https://platform.moonshot.cn/docs/guide/models)、[Qwen](https://help.aliyun.com/zh/model-studio/models)、[Ollama](https://ollama.com/library?sort=newest)。预设只包含本项目文本/工具工作流使用的模型，不把语音、视频生成或图像生成模型放入聊天模型列表。Ollama 不会自动拉取模型；Qwen 3.8 Flash Next 预览的所列量化版需约 120 GB，先核对本机资源。
+
+**Gemini 配置示例：**
+
+```yaml
+llm:
+  provider: gemini
+  api_key: "你的 Gemini API Key"
+  base_url: ""  # 默认 https://generativelanguage.googleapis.com/v1beta/openai/
+  model: gemini-3.8-flash
+  score_model: ""
+  chat_model: ""
+  reasoning_model: ""
+```
+
+Gemini 复用 [Google 官方 OpenAI 兼容端点](https://ai.google.dev/gemini-api/docs/openai)，支持流式返回、函数工具和已确认型号的图片输入。Gemini 3 无法关闭思考，普通/连接测试请求用 `low`，深度推理请求用 `high`。GPT-6 系列走 [Responses API](https://developers.openai.com/api/docs/models/gpt-6.1-sol)，代理端点也须支持 `/responses`；GPT-6.1 Sol 不支持 `none`，普通请求用 `low`。GLM-5.3/Flash/FlashX 与 Kimi K3 同样使用高/低思考强度；Claude Sonnet 5.5 支持 adaptive thinking。音视频/原生 PDF 输入和 Gemini 内置搜索未接入本项目。
+
+[OpenAI](https://developers.openai.com/api/docs/guides/reasoning) 与 [Gemini](https://ai.google.dev/gemini-api/docs/thinking) 的输出上限包含思考 token，关键词提取原先的 30/80 token 上限可能在正文生成前耗尽。对不可关闭思考的 GPT-6.1 Sol/Astra、Gemini 3、GLM-5.3 系列和 Kimi K3，项目在调用方上限之外追加 `llm.reasoning_output_reserve`（默认 4096，允许 0–32768）。这是工程预留量，不保证所有任务都不截断；仍按实际生成计费，可能增加耗时和费用。设为 `0` 可保留调用方的严格总上限。
+
+**订阅套餐可以导入吗？**
+
+**Codex 订阅的使用步骤：**
+
+1. 安装 [官方 Codex CLI](https://developers.openai.com/codex/cli/)，要求版本 **0.159.2 或更新**；它是独立依赖，PaperPilot 不自动下载安装。网络须能访问官方 Codex 服务。
+2. 设置中选择 **Codex（订阅）**，点击 **ChatGPT 登录**，在官方页面完成授权。完成后会刷新登录状态与模型目录，也可点击 **刷新登录与模型**。
+3. 已在本机 Codex 登录的用户可选 **复用本机 Codex 登录**。这采用[官方文档允许的登录缓存复制](https://developers.openai.com/codex/auth)，仅在本机存在 `auth.json` 时可用；仅存在系统凭据库登录时使用正常登录入口。复制会检查账号类型，API Key 登录不会作为订阅接受。
+4. 选择账号默认或账号目录中的型号，点 **测试**，再点 **保存**。关键词、翻译、AI 精读、评分、对话及 Agent 工具都通过该后端；测试会使用少量订阅额度。任务模型覆盖也须填写该账号目录中的 ID。
+
+**登录路径选项** 可指定 CLI 和独立登录目录；留空分别自动查找 CLI、使用 `cache.dir/codex-subscription`。OAuth 和凭据刷新由官方 CLI 管理，不将令牌写入 `config.yaml`。该目录包含凭据和 CLI 状态，须保持私密并排除 Git；项目内的自定义目录会检查忽略规则，推荐使用 `cache`。**退出项目登录** 操作项目使用的登录目录；不要把独立目录设为其他 Codex 客户端正在使用的目录。取消登录、正在运行的任务停止和退出登录分别处理；有任务运行时不能更改该目录的登录。
+
+订阅模型及用量限制由账号与官方服务决定；不自动回退到付费 API。Codex app server 当前未提供与 API 等同的 `temperature` 和硬性输出 token 上限：PaperPilot 的 `max_tokens` 在该后端仅作为回复长度指导，不能保证截断或额度上限。图片能力从账号模型目录读取；上下文窗口由真实响应提供，收到前采用既有保守预算。用户显式容量和图片能力覆盖仍有效。
+
+2026-10-03 验证：原生设置回调、隔离协议和科研/Agent 业务链路已通过，本机官方 CLI 的只读沙箱及历史注入已通过。真实登录缓存可读、账号模型目录可获取，但 GPT-6.1 Sol 与 GPT-6 Luna 的实际生成均超时，CLI 日志记录 `request timed out`；**真实订阅生成、真实浏览器 OAuth 全流程及真实图片理解尚未通过验收**，不将模型目录可读视为生成可用。
+
+PaperPilot 支持模型 API 和独立的 Codex 订阅后端。套餐登录、产品内额度与 API 计费权益分别处理，不能把浏览器 Cookie、OAuth token 或会员账号当作通用 API Key。核对日期为 2026-10-03：
+
+| 套餐 | 官方提供的路径 | PaperPilot 当前接入范围 |
+| --- | --- | --- |
+| ChatGPT / Codex | [Codex 官方登录](https://developers.openai.com/codex/auth)支持 ChatGPT 订阅；[官方 app server](https://developers.openai.com/codex/app-server)供自定义客户端集成 | 已实现独立 Codex 后端，登录、账号模型目录、线程、工具回传、取消均经官方 CLI。Platform API Key 仍走独立 API 后端；不自动改走 API 计费 |
+| Claude Pro / Max 等 | [Anthropic 官方凭据规则](https://code.claude.com/docs/en/legal-and-compliance)不允许第三方应用提供 Claude.ai 登录或使用个人订阅凭据路由请求 | 本项目使用 Claude API Key；不提供订阅登录导入 |
+| Google AI Pro / Ultra | [Gemini CLI 官方登录](https://geminicli.com/docs/get-started/authentication/)可使用订阅账号；[套餐页面](https://one.google.com/intl/en/about/google-ai-plans/)另列 AI Studio、Cloud credits 权益 | Gemini API 使用 AI Studio Key 与[项目计费](https://ai.google.dev/gemini-api/docs/billing)。适用的 Cloud credits 须按官方规则领取/绑定；不把 Gemini 网页额度直接转换成 API 额度。CLI 后端目前未实现 |
+| GLM / Kimi / Qwen 编程套餐 | [GLM](https://docs.bigmodel.cn/cn/coding-plan/faq)、[Kimi Code](https://www.kimi.com/code/docs/)、[Qwen Coding Plan](https://help.aliyun.com/zh/model-studio/coding-plan)对指定工具、编程用途或自建应用设有使用限制 | 不把 PaperPilot 伪装成获准客户端；科研应用使用各家标准 API 服务 |
+| Ollama 云端套餐 | [官方云端 API](https://docs.ollama.com/api/openai-compatibility)使用 Ollama Key，额度遵循[账户套餐/credits](https://ollama.com/pricing) | 已可配置：Provider 选 Ollama，Base URL 填 `https://ollama.com/v1`，填云端 Key，模型填云端模型列表返回的 ID，例如 `gemma4:31b`。这仍是官方 Key 接入，无需导入账号登录凭据 |
+
+官方 CLI 集成会把完整 Agent 的线程、工具权限和执行生命周期引入项目，不能作为现有 API Key 字段的替代值。当前未接入上述 CLI，也未验证其在 PaperPilot 中的完整业务行为。
 
 > 连接测试会发起一次模型请求，可能产生少量费用；成功只说明该次请求可用，不代表所有任务与思考模式均可用。
 
 ---
 
-未配置可用 LLM 时，本地文献管理仍可使用。中文关键词先用 jieba TF-IDF 生成候选，有多语言 MiniLM 时再做语义筛选，缺少该模型时仍保留 jieba 候选；英文回退需要 KeyBERT 模型。Ollama 无需 Key，但仍需本地服务和模型就绪。学术检索需要网络。
+未配置可用 LLM 时，本地文献管理仍可使用。中文关键词先用 jieba TF-IDF 生成候选，有多语言 MiniLM 时再做语义筛选，缺少该模型时仍保留 jieba 候选；英文回退需要 KeyBERT 模型。本地 Ollama 无需 Key，但仍需本地服务和模型就绪；Ollama 官方云端必须配置 Key，局域网/自定义端点保留可选 Key，是否鉴权以服务器要求为准。学术检索需要网络。
 
 ### 3.5 高级选项字段说明
 
@@ -420,7 +468,7 @@ agent:
 2. 待发列表显示文件名和图片缩略图。点击条目查看摘录/图片及读取限制，点右侧 `×` 移除；确认资料后输入问题，按 Enter 或发送箭头。仅附带资料而不输入文字时，默认请求「请分析所附资料」。预设课题讨论不会自动消费待发附件。
 3. 支持 PNG/JPEG/GIF/WebP、常见文本/代码/CSV/JSON、PDF、DOCX、PPTX、XLSX。文档只提取文本/表格，不分析嵌入图片、批注、音视频；Excel 公式按原式提供，不执行。扫描 PDF 提供前 3 页图片，其他页未读取。文本每文件最多 20,000 字符，超出部分在预览及模型消息中明确标注。旧 `.doc/.ppt/.xls`、压缩包和任意二进制不受支持，请先转换。
 4. 每条消息最多 20 个文件，单文件 ≤20 MiB，原文件合计 ≤40 MiB；图片（含扫描页）最多 8 张、单张 ≤8 MiB、合计 ≤12 MiB、边长 ≤8192 像素。目录超过 2000 条目或 20 个可读文件会拒绝本次添加，请选择子目录；隐藏、缓存/构建目录和链接不会读取。失败不部分替换已有草稿。消息请求超过 32 MiB 时需压缩旧轮次、减少图片或新建会话。
-5. 图片需要支持视觉输入的模型。DeepSeek Flash 已内置支持，DeepSeek Pro 不支持；其他服务商/自定义端点需核实模型支持后，在 `agent.image_support` 按服务商和模型名配置 `true`，例如 `{openai: {my-vision-model: true}}`。启用两步推理时两个模型都须支持图片。协议兼容不表示已实测所有服务商。
+5. 图片需要支持视觉输入的模型。DeepSeek Flash、当前 GPT-6 / Claude、Gemini 的主要预设、GLM-5.3 Flash/FlashX、Kimi K3/K2.6/K2.7 Code 等已按官方资料登记；DeepSeek Pro 和 GLM-5.3 不支持。其他服务商/自定义端点需核实模型支持后，在 `agent.image_support` 按服务商和模型名配置 `true`，例如 `{openai: {my-vision-model: true}}`；显式 `false` 可关闭内置能力。启用两步推理时两个模型都须支持图片。官方能力声明和本地协议验证不表示已实测所有服务商的视觉回答质量。
 
 选择时资料只保存在内存，发送前不调用模型；发送后由所配置模型服务处理文件摘录及图片。每个聊天的待发附件独立，切换聊天可回到原草稿，退出后未发送资料不恢复。发送后快照保存在会话 `attachments/` 目录，原文件移动/删除不影响历史附件；停止、重启和压缩保留已接收资料。压缩后模型主要使用摘要，保存原附件不表示每轮都会重新读取它；历史条目可预览。备份时需复制整个会话目录，包括索引、事件与附件。
 
@@ -448,7 +496,7 @@ agent:
 
 输入框上方显示「上下文 ≈已用 / 总容量 token」及比例。它反映当前可发送的聊天背景，区别于反复发送历史产生的累计用量；最近主聊天的实际输入计数可校准估算，压缩或更换模型后重新估算。字符及图片估算不是精确 tokenizer 计数，所以始终标注 `≈`；悬停提示另列草稿与待发附件占用。
 
-点击上下文文字查看模型、容量来源、输出预留、压缩阈值及最近实际输入计数，也可为当前服务商/模型保存容量覆盖。项目内置 DeepSeek V4 Flash/Pro 相关模型映射为保守十进制 1,000,000 token；未识别模型显示「未配置」。容量应按当前模型或代理端点实际限制填写，不能给其他模型套用 DeepSeek 的值。
+点击上下文文字查看模型、容量来源、输出预留、压缩阈值及最近实际输入计数，也可为当前服务商/模型保存容量覆盖。项目登记了 DeepSeek、GPT-6、当前 Claude、主要 Gemini 预设、GLM-5.3 和 Kimi 等已核实型号的窗口与官方来源；未登记型号显示「未配置」。Ollama 窗口由本机或云端实际配置决定，不直接套用模型发布的最大值。容量应按当前模型或代理端点实际限制填写，用户配置优先。
 
 高级配置示例（仅添加所需字段，保留已有配置）：
 
@@ -517,7 +565,7 @@ agent:
 
 | 设置项            | 说明                                                                                                                                                      |
 | ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **AI 模型服务**   | 选择 Provider、填 API Key、选/输模型名，可「测试」「保存」；底部「高级选项」含 Base URL、任务专用模型。**各家 Key 怎么拿 + 高级字段填法详见 §3.4 / §3.5** |
+| **AI 模型服务**   | 选择 Provider、配置 API Key 或 Codex 订阅登录、选/输模型名，可「测试」「保存」；「高级选项」含 Base URL、任务专用模型。**各家 Key、Codex 登录及高级字段详见 §3.4 / §3.5** |
 | **数据源**        | 开关 arXiv / OpenAlex / Europe PMC 检索；**OpenAlex API Key** 输入框（密文，建议配置，申请步骤见 §3.6）                                                   |
 | **检索数量**      | 每个来源的最大检索结果数（100–500 篇，示例配置 100，配置缺省时 250） |
 | **显示/精排数量** | 最终显示论文数（10–200）和送入精排的候选数（10–200）                                                                                                      |

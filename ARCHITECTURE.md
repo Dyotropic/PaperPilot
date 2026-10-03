@@ -1,6 +1,6 @@
 # PaperPilot 架构与工程说明
 
-> 核对日期：2026-10-02。描述当前工作区实现；功能存在不等于所有环境、模型和外部服务均已验收。接口变更仍须核对源码与调用方。
+> 核对日期：2026-10-03。描述当前工作区实现；功能存在不等于所有环境、模型和外部服务均已验收。接口变更仍须核对源码与调用方。
 
 ## 文档分工
 
@@ -67,11 +67,25 @@ PaperPilot 面向学生及科研人员的课题研究，以 Python + Flet 桌面
 
 ### 统一模型适配
 
-支持 `deepseek / openai / anthropic / glm / kimi / qwen / ollama`。除 Anthropic SDK 外，其余走 OpenAI 兼容 SDK；支持不等于每家最新模型、思考参数及代理端点均已实测。
+支持 `deepseek / openai / codex / anthropic / gemini / glm / kimi / qwen / ollama`。Codex 经官方 CLI app server，Anthropic 经其 SDK，其他 API 服务复用 OpenAI SDK；Gemini 使用 Google 官方兼容端点。GPT-6 系列由 `openai_responses.py` 使用 Responses API，旧 OpenAI 模型及其他兼容服务继续使用 Chat Completions。公开 `get_client/chat/chat_stream` 签名保持兼容，按每次调用的实际模型选择协议，任务覆盖不被主模型的协议固定。新配置 OpenAI 默认 `gpt-6.1-sol`、Gemini 默认 `gemini-3.8-flash`、Qwen 默认 `qwen3.7-plus`；既有配置的模型不自动替换。
+
+API 服务的 `MODEL_CATALOG` 是按官方目录核对的候选，不自动探测账号权限；Codex 的目录经账号 `model/list` 动态获取。`MODEL_CATALOG_SOURCES` 与 `MODEL_CAPABILITIES` 记录来源及核实的窗口、视觉能力。用户容量及图片能力覆盖仍优先，未知模型不猜能力，Ollama 不套用发布模型最大窗口。各家订阅边界见 [USER_GUIDE.md §3.4](USER_GUIDE.md#34-配置-ai-模型服务api-key)。Ollama 官方云端通过 Key/Base URL 使用额度，`ollama.com` 强制 Key，本地/局域网/自定义服务器保留可选 Key 契约，实际鉴权以端点要求为准。
+
+`codex_transport.py` 管理隐藏的 stdio app server、JSON-RPC、ChatGPT 官方登录/取消/退出、官方允许的登录缓存复制和动态模型目录。要求 CLI >=0.159.2，隔离 `CODEX_HOME` 默认位于忽略的 cache；清除 API Key/自定义 OpenAI 地址环境变量并强制 ChatGPT 登录，不读令牌字段、不实现私有登录请求或内部 `chatgptAuthTokens`。登录变更拒绝正在运行的任务，复制失败还原项目凭据，原始登录文件不改写。设置入口为 `pages/codex_settings.py`。
+
+`codex_client.py` 保持 `LLMClient` 契约：每个新请求建立 ephemeral 线程，经公开 `thread/inject_items` 重建 PaperPilot 历史。关闭宿主环境、内置 shell/编辑依赖、联网搜索、插件/应用与 Codex 子代理，线程及轮次显式 `environments=[]`、只读沙箱、从不批准额外权限。仅导出当前 `tools_scope()` 的 `paperpilot` 命名空间工具；动态请求转成原有 `ChatResult.tool_calls`，由既有 Agent 权限与调度器执行。透明继续标识保存在 `provider_blocks`，校验项目/会话、运行实例、取消令牌及历史前缀，再向同一暂停轮提交结果；主对话转入团队审查的用量标签变化不改变归属。停止、超时、连接中断、生成器关闭和未续接工具过期回收自己的线程；停止发生于启动回复前时，晚到回复也执行回收。重启后从 PaperPilot 历史重建，不重执行旧工具结果。
+
+Codex token 通知采用 SDK 原始计数，每个独立线程仅一轮；工具暂停前已报告的累计数从后续累计数中扣除，避免重复计费，缺失计数保持未知。正文以 final_answer 为最终结果，推理只保存官方提供的摘要。图片能力按账号目录，窗口按真实通知，并将账号默认别名映射到实际模型；不套用 OpenAI API 容量。app server 不接受 API 的温度或硬输出上限，输出预算仅传入长度指导。CLI 自身的上游重试仍由 CLI 管理，PaperPilot 不重复推理请求、不改走 API；服务错误与超时保留失败状态。
 
 `get_client(task=None)` 每次调用读取配置并解析任务模型。`score_model`、`chat_model` 是同一 provider 下的覆盖；非空 `reasoning_model` 启用先推理再回答的聊天流程。关键词提取、翻译及未覆盖任务使用主模型。`thinking=None` 表示不显式传参、采用模型默认值；`True/False` 经适配层转换，不能把“默认”当作关闭推理。运行中的请求继续使用创建时的 client，新配置作用于后续调用。
 
+对不可关闭思考的 GPT-6.1 Sol/Astra、Gemini 3、GLM-5.3 系列及 Kimi K3，适配层在调用方输出上限之外追加 `llm.reasoning_output_reserve`（默认 4096，0–32768；0 不追加），避免 30/80 token 的关键词请求在正文前截断。这个工程预留量仍可能不足，实际生成、费用和时延以服务商为准；其他型号沿用原有预算。
+
 `ChatResult` 包含 `content`、`reasoning`、`usage`、`provider`、`model`、`request_id`、`elapsed_ms`、`first_token_ms`、`finish_reason`，新增 `tool_calls/provider_blocks` 保存原生工具及供应商连续性字段。字段可能为空；推理 token 若已计入服务商输出计数，不再重复相加。`LLMClient.chat(...)` 返回该对象，`chat_stream(...)` 逐段返回正文。Agent 使用 `chat` 的可取消传输；独立 `chat_stream` 接口不承担团队工具编排。
+
+Responses 请求为 `store: false`，保存返回的原生 reasoning/message/function_call 项到已有工具记录，在后续请求恢复加密推理及工具上下文；`call_id` 转换为统一工具 ID，工具结果转为 `function_call_output`。沿用现有非严格函数 schema 和串行工具约定，不增加模型自行执行的宿主工具。Responses usage 的 input/output/details 与 Chat Completions 的 prompt/completion 字段分别归一，截断状态转换为 `length` 供已有流程处理。Gemini SSE 组装保留工具调用扩展（含签名），不只拼接函数参数；共享受控 SSE 迭代器在异步循环结束前关闭。中途取消不重试，不把未到达的最终用量记为零。
+
+思考参数按模型处理：GPT-6.1 Sol/Astra、Gemini 3、GLM-5.3/Flash/FlashX、Kimi K3 的普通请求使用 `low`，显式推理使用 `high`；不传参数仍表示采用服务商默认。Qwen 当前型号使用 `enable_thinking`，Claude Sonnet 5.5 支持 adaptive/disabled，Fable/Opus 保持 always-on adaptive。端点也必须支持这些参数；协议适配不代表实际模型质量或所有账户均已验收。
 
 `tools_scope(...)` 通过 ContextVar 限定当前请求工具，不修改共享 client 或原有公开调用签名。OpenAI 兼容请求传入 function tools，SSE 拼接各 index 的工具参数；Anthropic 转换 `tool_use/tool_result`，保留返回块及思考签名。指纹包含工具定义但只存摘要。团队需要端点支持原生函数调用，可通过 `agent.team.enabled: false` 关闭；协议适配不等于所有服务商均已实测。
 

@@ -1,9 +1,10 @@
 """多模型 LLM 统一抽象层（PHASE3_PLAN 功能三）。
 
-支持 provider：deepseek / openai / anthropic / glm / kimi / qwen / ollama。
-- OpenAI 兼容系（deepseek/openai/glm/kimi/qwen/ollama）经 openai SDK，
-  仅 base_url 不同。
+支持 provider：deepseek / openai / codex / anthropic / gemini / glm / kimi / qwen / ollama。
+- OpenAI 兼容系经 openai SDK；GPT-6 系列使用 Responses API，其余使用
+  Chat Completions。Gemini 使用 Google 官方兼容端点。
 - Anthropic 经 anthropic SDK。
+- Codex 订阅经官方 CLI app server；账号模型目录、OAuth 与刷新由 CLI 管理。
 
 统一接口：
     get_client(task=None) -> LLMClient | None   # 每次现读 config，task 解析任务级模型覆盖
@@ -13,8 +14,9 @@
 
 thinking 参数三态归一（跨家翻译）：
     None  = 调用方不关心，不传该参数（采用模型默认值）
-    True  = 请求推理（DeepSeek: enabled；GPT-6: high；Claude 新模型: adaptive/high）
-    False = 尽量减少推理（DeepSeek: disabled；GPT-6 Sol/Luna: none；
+    True  = 请求推理（DeepSeek: enabled；GPT-6/Gemini/GLM/Kimi: high；Claude: adaptive/high）
+    False = 尽量减少推理（DeepSeek: disabled；GPT-6.1 Sol/Astra/Gemini 3/GLM/Kimi: low；
+            GPT-6 Sol/Luna: none；
             Claude Fable 5.1/Opus 5.5 不支持关闭，改用 adaptive/low）
 
 配置（config.yaml llm 节，缺失键回退默认，不报错）：
@@ -38,6 +40,8 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 import json
 from typing import Iterator
+from urllib.parse import urlparse
+import copy
 
 from paperpilot.config import load_config
 from paperpilot.llm_usage import TokenUsage, normalize_usage, record_request, usage_scope
@@ -55,6 +59,33 @@ def tools_scope(tools=None, tool_choice=None):
         yield
     finally:
         _tool_options.reset(token)
+
+
+def _managed_async_stream(item_type):
+    """Close the SDK's nested SSE iterators before the request loop shuts down."""
+    import openai
+    from contextlib import aclosing
+    class ManagedStream(openai.AsyncStream[item_type]):
+        def _iter_events(self):
+            self._managed_events = self._read_events()
+            return self._managed_events
+
+        async def _read_events(self):
+            async with aclosing(self.response.aiter_bytes()) as chunks:
+                async with aclosing(self._decoder.aiter_bytes(chunks)) as events:
+                    async for event in events:
+                        yield event
+
+        async def __stream__(self):
+            async with aclosing(super().__stream__()) as chunks:
+                try:
+                    async for chunk in chunks:
+                        yield chunk
+                finally:
+                    events = getattr(self, "_managed_events", None)
+                    if events is not None:
+                        await events.aclose()
+    return ManagedStream
 
 
 @dataclass
@@ -77,6 +108,10 @@ class ChatResult:
 # ── Provider 注册表 ──
 
 PROVIDERS: dict[str, dict] = {
+    "codex": {
+        "label": "Codex（订阅）", "base_url": "", "default_model": "codex-default",
+        "key_hint": "使用 ChatGPT 登录，模型与额度由 Codex 账号提供",
+    },
     "deepseek": {
         "label": "DeepSeek",
         "base_url": "https://api.deepseek.com/v1",
@@ -86,7 +121,7 @@ PROVIDERS: dict[str, dict] = {
     "openai": {
         "label": "OpenAI / ChatGPT",
         "base_url": "https://api.openai.com/v1",
-        "default_model": "gpt-6-sol",
+        "default_model": "gpt-6.1-sol",
         "key_hint": "platform.openai.com 获取，sk- 开头",
     },
     "anthropic": {
@@ -94,6 +129,12 @@ PROVIDERS: dict[str, dict] = {
         "base_url": "",  # SDK 默认
         "default_model": "claude-opus-5-5",
         "key_hint": "console.anthropic.com 获取，sk-ant- 开头",
+    },
+    "gemini": {
+        "label": "Google / Gemini",
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+        "default_model": "gemini-3.8-flash",
+        "key_hint": "aistudio.google.com/api-keys 获取 Gemini API Key",
     },
     "glm": {
         "label": "智谱 GLM",
@@ -110,25 +151,27 @@ PROVIDERS: dict[str, dict] = {
     "qwen": {
         "label": "阿里通义千问",
         "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "default_model": "qwen-plus",
+        "default_model": "qwen3.7-plus",
         "key_hint": "dashscope.console.aliyun.com 获取，sk- 开头",
     },
     "ollama": {
-        "label": "Ollama（本地）",
+        "label": "Ollama（本地 / 云端）",
         "base_url": "http://localhost:11434/v1",
         "default_model": "qwen2.5:7b",
-        "key_hint": "本地运行无需 Key，留空即可",
+        "key_hint": "本地免 Key；云端在 ollama.com/settings/keys 获取",
     },
 }
 
 # 每家内置模型清单：(model_id, 显示名)；下拉框额外提供"自定义…"手输
 MODEL_CATALOG: dict[str, list[tuple[str, str]]] = {
+    "codex": [("codex-default", "账号默认（登录后刷新）")],
     "deepseek": [
         ("deepseek-flash", "DeepSeek V4.1 Flash（当前）"),
         ("deepseek-v4-flash", "旧 ID（暂时转发至 V4.1 Flash）"),
         ("deepseek-v4-pro", "DeepSeek V4 Pro（深度推理）"),
     ],
     "openai": [
+        ("gpt-6.1-sol", "GPT-6.1 Sol（当前）"),
         ("gpt-6-astra", "GPT-6 Astra"),
         ("gpt-6-sol", "GPT-6 Sol"),
         ("gpt-6-luna", "GPT-6 Luna"),
@@ -140,25 +183,115 @@ MODEL_CATALOG: dict[str, list[tuple[str, str]]] = {
     "anthropic": [
         ("claude-fable-5-1", "Claude Fable 5.1"),
         ("claude-opus-5-5", "Claude Opus 5.5"),
-        ("claude-sonnet-5", "Claude Sonnet 5"),
+        ("claude-sonnet-5-5", "Claude Sonnet 5.5（当前）"),
+        ("claude-sonnet-5", "Claude Sonnet 5（旧版）"),
         ("claude-haiku-4-5", "Claude Haiku 4.5"),
+    ],
+    "gemini": [
+        ("gemini-3.8-flash", "Gemini 3.8 Flash（当前）"),
+        ("gemini-3.5-flash-lite", "Gemini 3.5 Flash-Lite"),
+        ("gemini-3.1-pro-preview", "Gemini 3.1 Pro（预览）"),
+        ("gemini-3.7-flash", "Gemini 3.7 Flash"),
+        ("gemini-3.6-flash", "Gemini 3.6 Flash"),
+        ("gemini-3.5-flash", "Gemini 3.5 Flash"),
+        ("gemini-3.1-flash-lite", "Gemini 3.1 Flash-Lite"),
     ],
     "glm": [
         ("glm-5.3", "GLM-5.3"),
+        ("glm-5.3-flash", "GLM-5.3 Flash"),
+        ("glm-5.3-flashx", "GLM-5.3 FlashX（高速）"),
         ("glm-5.2", "GLM-5.2"),
     ],
     "kimi": [
         ("kimi-k3", "Kimi K3"),
+        ("kimi-k2.7-code", "Kimi K2.7 Code"),
+        ("kimi-k2.7-code-highspeed", "Kimi K2.7 Code Highspeed"),
+        ("kimi-k2.6", "Kimi K2.6"),
     ],
     "qwen": [
+        ("qwen3.8-max", "Qwen 3.8 Max（当前旗舰）"),
+        ("qwen3.7-plus", "Qwen 3.7 Plus"),
+        ("qwen3.8-flash", "Qwen 3.8 Flash"),
         ("qwen-plus", "Qwen Plus"),
         ("qwen-turbo", "Qwen Turbo"),
         ("qwen-max", "Qwen Max"),
     ],
     "ollama": [
+        ("gemma4:e4b", "Gemma 4 E4B（本地）"),
+        ("gemma4:12b", "Gemma 4 12B（本地）"),
+        ("gemma4:31b", "Gemma 4 31B（本地 / 云端）"),
+        ("qwen3.8-flash-next:125b-a6b-q4_K_M", "Qwen 3.8 Flash Next（预览，需约 120 GB）"),
         ("qwen2.5:7b", "qwen2.5:7b"),
     ],
 }
+
+# Official catalogues checked 2026-10-03; presets are not account entitlements.
+MODEL_CATALOG_SOURCES = {
+    "codex": "https://developers.openai.com/codex/app-server",
+    "deepseek": "https://api-docs.deepseek.com/quick_start/pricing",
+    "openai": "https://developers.openai.com/api/docs/models",
+    "anthropic": "https://platform.claude.com/docs/en/about-claude/models/overview",
+    "gemini": "https://ai.google.dev/gemini-api/docs/models",
+    "glm": "https://docs.bigmodel.cn/cn/guide/models/text/glm-5.3",
+    "kimi": "https://platform.moonshot.cn/docs/guide/models",
+    "qwen": "https://help.aliyun.com/zh/model-studio/models",
+    "ollama": "https://ollama.com/library?sort=newest",
+}
+
+# Only documented capabilities; custom models still require explicit overrides.
+MODEL_CAPABILITIES = {}
+for _provider, _models, _window, _images in (
+    ("openai", ("gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"), 1_050_000, True),
+    ("anthropic", ("claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5"), 1_000_000, True),
+    ("anthropic", ("claude-haiku-4-5",), 200_000, True),
+    ("gemini", ("gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-3.1-pro-preview"), 1_048_576, True),
+    ("glm", ("glm-5.3",), 1_000_000, False),
+    ("glm", ("glm-5.3-flash", "glm-5.3-flashx"), 1_000_000, True),
+    ("kimi", ("kimi-k3",), 1_000_000, True),
+    ("kimi", ("kimi-k2.7-code", "kimi-k2.7-code-highspeed", "kimi-k2.6"), 256_000, True),
+    ("qwen", ("qwen3.8-max", "qwen3.7-plus"), None, True),
+    ("ollama", ("gemma4:e4b",), None, True),
+    ("ollama", ("gemma4:12b", "gemma4:31b", "qwen3.8-flash-next:125b-a6b-q4_K_M"), None, True),
+):
+    for _model in _models:
+        MODEL_CAPABILITIES[(_provider, _model)] = dict(
+            window=_window, images=_images, source=MODEL_CATALOG_SOURCES[_provider])
+for _model in ("glm-5.3-flash", "glm-5.3-flashx"):
+    MODEL_CAPABILITIES[("glm", _model)]["source"] = "https://docs.bigmodel.cn/cn/guide/models"
+
+_RESPONSES_MODELS = frozenset({"gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"})
+
+
+def reasoning_output_budget(provider, model, max_tokens):
+    """Leave room for mandatory thoughts in short extraction/translation requests.
+
+    This is a configurable engineering allowance, not a vendor-guaranteed minimum.
+    An explicit zero keeps the caller's strict total-output limit.
+    """
+    required = ((provider == "openai" and model in {"gpt-6.1-sol", "gpt-6-astra"})
+                or (provider == "gemini" and model.startswith("gemini-3."))
+                or (provider == "glm" and model in {"glm-5.3", "glm-5.3-flash", "glm-5.3-flashx"})
+                or (provider == "kimi" and model == "kimi-k3"))
+    if not required:
+        return max_tokens
+    reserve = (load_config().get("llm") or {}).get("reasoning_output_reserve", 4096)
+    if not isinstance(reserve, int) or isinstance(reserve, bool) or not 0 <= reserve <= 32768:
+        reserve = 4096
+    return max_tokens + reserve
+
+
+def requires_api_key(provider: str, base_url: str = "") -> bool:
+    """Require official Ollama cloud credentials; preserve private-server use.
+
+    Local/LAN/custom Ollama servers retain their existing optional-key contract.
+    Their own authentication requirements are checked by the configured endpoint.
+    """
+    if provider == "codex":
+        return False
+    if provider != "ollama":
+        return True
+    parsed = urlparse(base_url or PROVIDERS["ollama"]["base_url"])
+    return (parsed.hostname or "").rstrip(".").casefold() == "ollama.com"
 
 _TASK_KEYS = ("score_model", "chat_model", "reasoning_model")
 
@@ -235,11 +368,13 @@ def get_client(task: str | None = None) -> "LLMClient | None":
     base_url = cfg["base_url"] or PROVIDERS[provider]["base_url"]
     api_key = cfg["api_key"]
 
-    # ollama 本地服务免 key；其余无 key 视为不可用
-    if not api_key and provider != "ollama":
+    if not api_key and requires_api_key(provider, base_url):
         return None
 
-    if provider == "anthropic":
+    if provider == "codex":
+        from paperpilot.codex_client import CodexSubscriptionClient
+        client = CodexSubscriptionClient(model=model)
+    elif provider == "anthropic":
         client = AnthropicClient(api_key=api_key, model=model, base_url=base_url)
     else:
         client = OpenAICompatClient(provider=provider, base_url=base_url,
@@ -267,12 +402,15 @@ def get_task_model_override(task: str) -> str:
 
 
 def llm_configured() -> bool:
-    """是否已配置任何可用的 LLM（provider + key，或 ollama）。"""
+    """API 配置或本地 Ollama 可用；Codex 另检查 ChatGPT 登录及模型目录。"""
     cfg = _load_llm_cfg()
     if not cfg:
         return False
+    if cfg["provider"] == "codex":
+        client = get_client()
+        return bool(client and client.is_available)
     return cfg["provider"] in PROVIDERS and (
-        bool(cfg["api_key"]) or cfg["provider"] == "ollama")
+        bool(cfg["api_key"]) or not requires_api_key(cfg["provider"], cfg["base_url"]))
 
 
 def _is_retryable(exc: Exception) -> bool:
@@ -379,12 +517,16 @@ class LLMClient:
         except GeneratorExit:
             status = "cancelled"
             raise
+        except OperationCancelled:
+            status = "cancelled"
+            raise
         except Exception:
             status = "error"
             raise
         finally:
             result = self.last_result
-            result.content = "".join(parts)
+            if getattr(self, "provider", "") != "codex" or not result.content:
+                result.content = "".join(parts)
             result.elapsed_ms = round((perf_counter() - started) * 1000)
             result.first_token_ms = first_token
             self._record(result, messages, use_model, status, thinking=thinking)
@@ -429,7 +571,7 @@ class LLMClient:
 
 
 class OpenAICompatClient(LLMClient):
-    """OpenAI 兼容客户端：deepseek / openai / glm / kimi / qwen / ollama。"""
+    """OpenAI SDK transport, with model-specific protocol and thinking controls."""
 
     def __init__(self, provider: str, base_url: str, api_key: str, model: str):
         super().__init__(model)
@@ -437,6 +579,14 @@ class OpenAICompatClient(LLMClient):
         self.base_url = base_url
         self.api_key = api_key
         self._client = None  # 懒创建，避免 import 期开销
+
+    def _responses_client(self, model):
+        if self.provider == "openai" and model in _RESPONSES_MODELS:
+            from paperpilot.openai_responses import OpenAIResponsesClient
+            client = OpenAIResponsesClient(self.api_key, model, self.base_url)
+            client.task = self.task
+            return client
+        return None
 
     def _get_client(self, timeout: int):
         import openai
@@ -450,6 +600,7 @@ class OpenAICompatClient(LLMClient):
         return self._client
 
     def _request_kwargs(self, messages, model, max_tokens, thinking) -> dict:
+        max_tokens = reasoning_output_budget(self.provider, model, max_tokens)
         fields = ("role", "content", "name", "tool_calls", "tool_call_id", "reasoning_content", "prefix")
         kwargs = {"messages": [{k: m[k] for k in fields if k in m} for m in messages], "model": model}
         options = _tool_options.get()
@@ -457,16 +608,16 @@ class OpenAICompatClient(LLMClient):
             kwargs["tools"] = options["tools"]
             if options.get("tool_choice"):
                 kwargs["tool_choice"] = options["tool_choice"]
-            if self.provider in {"openai", "deepseek"}:
+            if self.provider in {"openai", "deepseek", "gemini"}:
                 kwargs["parallel_tool_calls"] = False
         if self.provider == "openai":
             kwargs["max_completion_tokens"] = max_tokens
-            if model in ("gpt-6-astra", "gpt-6-sol", "gpt-6-luna"):
+            if model in _RESPONSES_MODELS:
                 if thinking is True:
                     kwargs["reasoning_effort"] = "high"
                 elif thinking is False:
                     kwargs["reasoning_effort"] = (
-                        "low" if model == "gpt-6-astra" else "none"
+                        "low" if model in {"gpt-6-astra", "gpt-6.1-sol"} else "none"
                     )
         else:
             kwargs["max_tokens"] = max_tokens
@@ -474,10 +625,43 @@ class OpenAICompatClient(LLMClient):
             kwargs["extra_body"] = {
                 "thinking": {"type": "enabled" if thinking else "disabled"}
             }
+        if self.provider == "gemini" and thinking is not None:
+            kwargs["reasoning_effort"] = (
+                "high" if thinking else "none" if model in {"gemini-2.5-flash", "gemini-2.5-flash-lite"} else "low"
+            )
+        if thinking is not None and (
+                (self.provider == "glm" and model in {"glm-5.3", "glm-5.3-flash", "glm-5.3-flashx"})
+                or (self.provider == "kimi" and model == "kimi-k3")):
+            kwargs["reasoning_effort"] = "high" if thinking else "low"
+        if self.provider == "qwen" and model in {"qwen3.8-max", "qwen3.7-plus", "qwen3.8-flash"} and thinking is not None:
+            kwargs["extra_body"] = {"enable_thinking": thinking}
         return kwargs
+
+    @staticmethod
+    def _merge_tool_delta(calls, change):
+        """Keep provider extensions (notably Gemini signatures) during SSE assembly."""
+        row = calls.setdefault(change.index, dict(id="", type="function", function=dict(name="", arguments="")))
+        if change.id:
+            row["id"] = change.id
+        if change.function:
+            for name in ("name", "arguments"):
+                value = getattr(change.function, name, None)
+                if value:
+                    row["function"][name] += value
+        extra = getattr(change, "model_extra", None) or {}
+        def merge(target, source):
+            for key, value in source.items():
+                if isinstance(value, dict) and isinstance(target.get(key), dict):
+                    merge(target[key], value)
+                elif value is not None:
+                    target[key] = copy.deepcopy(value)
+        merge(row, extra)
 
     def _do_chat(self, messages, temperature, max_tokens, timeout,
                  model, thinking) -> ChatResult:
+        responses = self._responses_client(model)
+        if responses:
+            return responses._do_chat(messages, temperature, max_tokens, timeout, model, thinking)
         kwargs = self._request_kwargs(messages, model, max_tokens, thinking)
         client = self._get_client(timeout)
         resp = client.chat.completions.create(**kwargs)
@@ -495,38 +679,15 @@ class OpenAICompatClient(LLMClient):
                           request_id=getattr(resp, "id", None))
 
     def _do_cancellable(self, messages, temperature, max_tokens, timeout, model, thinking, token):
+        responses = self._responses_client(model)
+        if responses:
+            return responses._do_cancellable(messages, temperature, max_tokens, timeout, model, thinking, token)
         import openai
-        from contextlib import aclosing
         from openai.types.chat import ChatCompletionChunk
-        class ManagedChatStream(openai.AsyncStream[ChatCompletionChunk]):
-            """Close SSE iterators in order before the worker's event loop exits.
-
-            The installed SDK closes the response at [DONE], leaving its nested
-            generators for concurrent loop shutdown. Keep its decoder and typed
-            parsing, but explicitly own that iterator lifetime.
-            """
-            def _iter_events(self):
-                self._managed_events = self._read_events()
-                return self._managed_events
-
-            async def _read_events(self):
-                async with aclosing(self.response.aiter_bytes()) as chunks:
-                    async with aclosing(self._decoder.aiter_bytes(chunks)) as events:
-                        async for event in events:
-                            yield event
-
-            async def __stream__(self):
-                async with aclosing(super().__stream__()) as chunks:
-                    try:
-                        async for chunk in chunks:
-                            yield chunk
-                    finally:
-                        events = getattr(self, "_managed_events", None)
-                        if events is not None:
-                            await events.aclose()
+        ManagedChatStream = _managed_async_stream(ChatCompletionChunk)
         kwargs = self._request_kwargs(messages, model, max_tokens, thinking)
         kwargs["stream"] = True
-        if self.provider in {"openai", "deepseek"}:
+        if self.provider in {"openai", "deepseek", "gemini"}:
             kwargs["stream_options"] = {"include_usage": True}
         result = self.last_result = ChatResult(model=model)
         calls = {}
@@ -546,14 +707,7 @@ class OpenAICompatClient(LLMClient):
                             delta = chunk.choices[0].delta
                             result.reasoning += getattr(delta, "reasoning_content", "") or ""
                             for change in getattr(delta, "tool_calls", []) or []:
-                                row = calls.setdefault(change.index, dict(id="", type="function", function=dict(name="", arguments="")))
-                                if change.id:
-                                    row["id"] = change.id
-                                if change.function:
-                                    if change.function.name:
-                                        row["function"]["name"] += change.function.name
-                                    if change.function.arguments:
-                                        row["function"]["arguments"] += change.function.arguments
+                                self._merge_tool_delta(calls, change)
                             result.tool_calls = [calls[i] for i in sorted(calls)]
                             if delta.content:
                                 result.content += delta.content
@@ -566,23 +720,42 @@ class OpenAICompatClient(LLMClient):
 
     def _do_stream(self, messages, temperature, max_tokens, timeout,
                    model, thinking) -> Iterator[str]:
+        responses = self._responses_client(model)
+        if responses:
+            try:
+                yield from responses._do_stream(messages, temperature, max_tokens, timeout, model, thinking)
+            finally:
+                self.last_result = responses.last_result
+            return
         kwargs = self._request_kwargs(messages, model, max_tokens, thinking)
         kwargs["stream"] = True
-        if self.provider in {"openai", "deepseek"}:
+        if self.provider in {"openai", "deepseek", "gemini"}:
             kwargs["stream_options"] = {"include_usage": True}
         client = self._get_client(timeout)
         resp = client.chat.completions.create(**kwargs)
-        for chunk in resp:
-            usage = normalize_usage(getattr(chunk, "usage", None), self.provider)
-            if usage is not None:
-                self.last_result.usage = usage
-            self.last_result.model = getattr(chunk, "model", None) or model
-            self.last_result.request_id = getattr(chunk, "id", None)
-            if not chunk.choices:
-                continue
-            delta = chunk.choices[0].delta
-            if delta and delta.content:
-                yield delta.content
+        calls = {}
+        try:
+            for chunk in resp:
+                usage = normalize_usage(getattr(chunk, "usage", None), self.provider)
+                if usage is not None:
+                    self.last_result.usage = usage
+                self.last_result.model = getattr(chunk, "model", None) or model
+                self.last_result.request_id = getattr(chunk, "id", None)
+                if not chunk.choices:
+                    continue
+                self.last_result.finish_reason = getattr(chunk.choices[0], "finish_reason", None) or self.last_result.finish_reason
+                delta = chunk.choices[0].delta
+                if delta:
+                    self.last_result.reasoning += getattr(delta, "reasoning_content", "") or ""
+                    for change in getattr(delta, "tool_calls", []) or []:
+                        self._merge_tool_delta(calls, change)
+                    self.last_result.tool_calls = [calls[i] for i in sorted(calls)]
+                    if delta.content:
+                        yield delta.content
+        finally:
+            close = getattr(resp, "close", None)
+            if close:
+                close()
 
 
 class AnthropicClient(LLMClient):
@@ -591,7 +764,7 @@ class AnthropicClient(LLMClient):
     # Anthropic thinking 模式的最小预算
     _MIN_THINKING_BUDGET = 1024
     _ADAPTIVE_MODELS = frozenset({
-        "claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5",
+        "claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5", "claude-sonnet-5-5",
     })
     _ALWAYS_THINKING_MODELS = frozenset({
         "claude-fable-5-1", "claude-opus-5-5",
@@ -702,7 +875,7 @@ class AnthropicClient(LLMClient):
                 return ({"thinking": {"type": "adaptive"},
                          "output_config": {"effort": "high"}}, max_tokens + budget)
             if thinking is False:
-                if selected_model == "claude-sonnet-5":
+                if selected_model in {"claude-sonnet-5", "claude-sonnet-5-5"}:
                     return {"thinking": {"type": "disabled"}}, max_tokens
                 # Fable 5.1 / Opus 5.5 的 adaptive thinking 不能关闭。
                 return ({"thinking": {"type": "adaptive"},

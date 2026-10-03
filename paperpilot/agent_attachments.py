@@ -407,14 +407,16 @@ def image_count(messages):
 
 def ensure_image_support(provider, model):
     from paperpilot.config import load_config
+    from paperpilot.llm_client import MODEL_CAPABILITIES
     settings = load_config().get("agent", {}) or {}
     overrides = settings.get("image_support", {}) if isinstance(settings, dict) else {}
     models = overrides.get(provider, {}) if isinstance(overrides, dict) else {}
     supported = models.get(model) if isinstance(models, dict) else None
     if not isinstance(supported, bool):
-        supported = provider == "deepseek" and model in {"deepseek-flash", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp"}
+        supported = (MODEL_CAPABILITIES.get((provider, model), {}).get("images", False)
+                     or provider == "deepseek" and model in {"deepseek-flash", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp"})
     if not supported:
-        raise AttachmentError(f"模型 {model} 未确认支持图片输入。请选择 DeepSeek Flash，或核实服务商能力后配置 agent.image_support。")
+        raise AttachmentError(f"模型 {model} 未确认支持图片输入。请选择已确认的视觉模型，或核实服务商能力后配置 agent.image_support。")
 
 
 def validate_request(messages, provider, model):

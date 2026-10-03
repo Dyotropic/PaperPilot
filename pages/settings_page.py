@@ -12,7 +12,7 @@ from pages.context import (
     seed_color, app_bg, surface, surface_hi, accent_container,
     subtle_shadow, card,
 )
-from paperpilot.llm_client import PROVIDERS, MODEL_CATALOG
+from paperpilot.llm_client import PROVIDERS, MODEL_CATALOG, requires_api_key
 
 
 # ── 多模型 LLM 配置 UI ──
@@ -95,9 +95,24 @@ def _build_llm_service_section(ctx) -> ft.Column:
     key_status = ft.Text("", size=13)
     test_status = ft.Text("", size=13)
     save_status = ft.Text("", size=13)
+    from pages.codex_settings import CodexSettings
+    def refresh_codex_models():
+        if provider_dd.value != "codex":
+            return
+        selected = model_dd.value
+        model_dd.options = _model_options_for("codex")
+        if selected != _CUSTOM and selected not in dict(MODEL_CATALOG["codex"]):
+            model_dd.value = "codex-default"
+        model_dd.update()
+    codex = CodexSettings(ctx.page, saved.get("llm") or {}, refresh_codex_models)
+    codex.control.visible = cur_provider == "codex"
+    api_key_field.visible = base_url_field.visible = cur_provider != "codex"
 
     # 已配置提示
-    if cur.get("api_key") or cur_provider == "ollama":
+    if cur_provider == "codex":
+        key_status.value = "Codex 订阅：请检查下方登录状态"
+        key_status.color = ft.Colors.OUTLINE
+    elif cur.get("api_key") or not requires_api_key(cur_provider, cur.get("base_url", "")):
         provider_label = PROVIDERS[cur_provider]["label"]
         key_status.value = f"已配置：{provider_label}"
         key_status.color = ft.Colors.GREEN
@@ -117,6 +132,9 @@ def _build_llm_service_section(ctx) -> ft.Column:
         }
         new_p = provider_dd.value or "deepseek"
         active_provider = new_p
+        codex.control.visible = new_p == "codex"
+        api_key_field.visible = base_url_field.visible = new_p != "codex"
+        codex.control.update()
         model_dd.options = _model_options_for(new_p)
         next_model = model_cache.get(new_p) or PROVIDERS[new_p]["default_model"]
         next_is_custom = next_model not in dict(MODEL_CATALOG.get(new_p, []))
@@ -129,10 +147,13 @@ def _build_llm_service_section(ctx) -> ft.Column:
             field.value = advanced_cache.get(new_p, {}).get(name, "")
             field.update()
         key_status.value = (f"已配置：{PROVIDERS[new_p]['label']}"
-                            if api_key_field.value or new_p == "ollama"
+                            if api_key_field.value or not requires_api_key(new_p, base_url_field.value)
                             else "该服务商尚未配置 API Key")
-        key_status.color = (ft.Colors.GREEN if api_key_field.value or new_p == "ollama"
+        key_status.color = (ft.Colors.GREEN if api_key_field.value or not requires_api_key(new_p, base_url_field.value)
                             else ft.Colors.ORANGE)
+        if new_p == "codex":
+            key_status.value = "Codex 订阅：请检查下方登录状态"
+            key_status.color = ft.Colors.OUTLINE
         model_dd.update(); api_key_field.update(); custom_model_field.update()
         key_status.update()
 
@@ -153,26 +174,33 @@ def _build_llm_service_section(ctx) -> ft.Column:
         # 用当前控件值（未保存）构造配置测试
         p = provider_dd.value or "deepseek"
         key = (api_key_field.value or "").strip()
-        if p != "ollama" and not key:
+        base = (base_url_field.value or "").strip()
+        if requires_api_key(p, base) and not key:
             test_status.value = "请先填写该服务商的 API Key"
             test_status.color = ft.Colors.ERROR
             test_status.update()
             return
-        model = custom_model_field.value.strip() if model_dd.value == _CUSTOM \
+        model = (custom_model_field.value or "").strip() if model_dd.value == _CUSTOM \
             else (model_dd.value or "").strip()
+        codex_values = codex.values()
 
         def _run():
             from paperpilot.llm_client import OpenAICompatClient, AnthropicClient
-            base = (base_url_field.value or "").strip()
             base_url = base or PROVIDERS[p]["base_url"]
-            if p == "anthropic":
+            if p == "codex":
+                from paperpilot.codex_client import CodexSubscriptionClient
+                c = CodexSubscriptionClient(model=model or "codex-default",
+                    cli=codex_values["codex_cli"], home=codex_values["codex_home"])
+            elif p == "anthropic":
                 c = AnthropicClient(api_key=key, model=model or PROVIDERS[p]["default_model"],
                                     base_url=base)
             else:
                 c = OpenAICompatClient(provider=p, base_url=base_url,
                                        api_key=key, model=model or PROVIDERS[p]["default_model"])
             ok, msg = c.test_connection()
-            def _show():
+            async def _show():
+                if provider_dd.value != p:
+                    return
                 test_status.value = msg
                 test_status.color = ft.Colors.GREEN if ok else ft.Colors.ERROR
                 test_status.update()
@@ -183,7 +211,7 @@ def _build_llm_service_section(ctx) -> ft.Column:
     def _collect_model(e=None, field=None):
         """保存时解析模型：自定义优先，否则下拉值。"""
         if model_dd.value == _CUSTOM:
-            v = custom_model_field.value.strip()
+            v = (custom_model_field.value or "").strip()
             if v:
                 return v
             return ""
@@ -199,7 +227,7 @@ def _build_llm_service_section(ctx) -> ft.Column:
             save_status.update()
             return
         key = (api_key_field.value or "").strip()
-        if p != "ollama" and not key:
+        if requires_api_key(p, base_url_field.value or "") and not key:
             save_status.value = "该服务商的 API Key 为空，未保存；原配置和密钥保持不变"
             save_status.color = ft.Colors.ERROR
             save_status.update()
@@ -215,6 +243,7 @@ def _build_llm_service_section(ctx) -> ft.Column:
                 "score_model": (score_model_field.value or "").strip(),
                 "chat_model": (chat_model_field.value or "").strip(),
                 "reasoning_model": (reasoning_model_field.value or "").strip(),
+                **codex.values(),
             }
         }
         do_save(updates)
@@ -224,9 +253,11 @@ def _build_llm_service_section(ctx) -> ft.Column:
         save_status.value = f"已保存：{label} / {model}，下次 AI 调用生效"
         save_status.color = ft.Colors.GREEN
         key_status.value = (f"已配置：{label} / {model}"
-                            if (api_key_field.value or p == "ollama")
+                            if (api_key_field.value or not requires_api_key(p, base_url_field.value))
                             else "未配置 API Key")
-        if not (api_key_field.value or p == "ollama"):
+        if p == "codex":
+            key_status.value = "Codex 配置已保存，登录状态见下方"
+        if not (api_key_field.value or not requires_api_key(p, base_url_field.value)):
             key_status.color = ft.Colors.ORANGE
         else:
             key_status.color = ft.Colors.GREEN
@@ -242,7 +273,7 @@ def _build_llm_service_section(ctx) -> ft.Column:
             reasoning_model_field,
             ft.Text(
                 "「推理模型」非空才启用两步推理（先深度推理再生成回复）。"
-                "多数模型单步即可，填了会增加一次 API 调用。",
+                "多数模型单步即可，填了会增加一次模型调用。",
                 size=FS_SM, color=text_secondary(),
             ),
         ], spacing=SP_MD, tight=True),
@@ -258,13 +289,17 @@ def _build_llm_service_section(ctx) -> ft.Column:
 
     return ft.Column([
         ft.Text("AI 模型服务", size=FS_LG, weight=FW_SEMIBOLD, color=text_primary()),
-        ft.Text("选择 AI 服务商并配置密钥；支持多家主流模型", size=FS_SM, color=text_secondary()),
+        ft.Text("选择 AI 服务商，配置 API Key 或 Codex 订阅登录", size=FS_SM, color=text_secondary()),
+        ft.Text("网页会员与 API 额度通常分开；Gemini 在 Google AI Studio 获取密钥。"
+                "Ollama 云端需填写云端 Key 和 Base URL，详见用户指南 §3.4。",
+                size=FS_SM, color=text_secondary()),
         key_status,
         ft.Row([
             provider_dd,
             model_dd,
         ], spacing=SP_SM),
         custom_model_field,
+        codex.control,
         ft.Row([
             api_key_field,
             ft.FilledTonalButton(

@@ -46,7 +46,7 @@ class ContextPolicy:
 
 def context_policy(model=None):
     from paperpilot.config import load_config
-    from paperpilot.llm_client import _load_llm_cfg, get_task_model
+    from paperpilot.llm_client import _load_llm_cfg, get_task_model, MODEL_CAPABILITIES
     route = _load_llm_cfg()
     provider = route.get("provider", "")
     model = model or get_task_model("chat") or route.get("model", "")
@@ -59,8 +59,11 @@ def context_policy(model=None):
         configured = {}
     value = configured.get(model)
     valid = isinstance(value, int) and not isinstance(value, bool) and 1024 <= value <= 50_000_000
-    window = value if valid else _KNOWN_WINDOWS.get((provider, model))
-    source = "用户配置" if valid else (DEEPSEEK_CAPACITY_SOURCE if window else "未配置")
+    capability = MODEL_CAPABILITIES.get((provider, model), {})
+    window = value if valid else _KNOWN_WINDOWS.get((provider, model)) or capability.get("window")
+    source = "用户配置" if valid else (
+        DEEPSEEK_CAPACITY_SOURCE if (provider, model) in _KNOWN_WINDOWS
+        else capability.get("source", "未配置") if window else "未配置")
     reserve = min(8192, window // 8) if window else 8192
     ratio = settings.get("auto_compact_ratio", .7)
     if not isinstance(ratio, (int, float)) or isinstance(ratio, bool) or not math.isfinite(ratio) or not .5 <= ratio <= .95:
@@ -95,6 +98,9 @@ def observe_response(result, messages):
 
 
 def _canonical_model(provider, model):
+    if provider == "codex" and model == "codex-default":
+        from paperpilot.llm_client import MODEL_CAPABILITIES
+        return MODEL_CAPABILITIES.get((provider, model), {}).get("model", model)
     if provider == "deepseek" and model in {"deepseek-flash", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp"}:
         return "deepseek-flash"
     return model

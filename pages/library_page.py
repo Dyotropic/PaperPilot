@@ -83,8 +83,10 @@ def build_library_page(ctx):
         sub.controls.clear()
         if not projects:
             sub.controls.append(
-                ft.Text("暂无课题", size=FS_XS, color=text_tertiary(),
-                        padding=ft.padding.Padding(left=SP_MD, top=4, bottom=4))
+                ft.Container(
+                    content=ft.Text("暂无课题", size=FS_XS, color=text_tertiary()),
+                    padding=ft.padding.Padding(left=SP_MD, top=SP_XS, bottom=SP_XS),
+                )
             )
         else:
             for proj in projects:
@@ -589,7 +591,7 @@ def build_library_page(ctx):
         if _selected_project_id is None:
             return
         if not ctx.ai_service.is_available:
-            upload_progress.value = "AI 排序失败：未配置 API Key"
+            upload_progress.value = "AI 排序失败：请检查模型凭据或 Codex 登录"
             upload_progress.color = ft.Colors.ERROR
             upload_progress.update()
             return
@@ -1089,7 +1091,7 @@ def build_library_page(ctx):
             )
             if not _ai_available:
                 deep_read_btn.disabled = True
-                deep_read_btn.tooltip = "AI 精读（未配置 API Key）"
+                deep_read_btn.tooltip = "AI 精读（请配置模型凭据或 Codex 登录）"
 
             # 删除按钮
             delete_btn = ft.IconButton(
@@ -1397,7 +1399,7 @@ def build_library_page(ctx):
                     result = ctx.ai_service.deep_read(paper, full_text)
                 checkpoint()
                 if not result:
-                    _error = f"精读《{title}》失败，请检查 API Key 和网络连接。"
+                    _error = f"精读《{title}》失败，请检查模型凭据、Codex 登录和网络连接。"
                     _done.set()
                     return
 

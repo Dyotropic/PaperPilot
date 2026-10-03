@@ -1,6 +1,6 @@
 # PaperPilot 验证指南
 
-> 核对日期：2026-10-02。本文维护验证方法和入口，不汇总每轮“全部通过”的数字。当前功能见 [ARCHITECTURE.md](ARCHITECTURE.md)，用户操作见 [USER_GUIDE.md](USER_GUIDE.md)。
+> 核对日期：2026-10-03。本文维护验证方法和入口，不汇总每轮“全部通过”的数字。当前功能见 [ARCHITECTURE.md](ARCHITECTURE.md)，用户操作见 [USER_GUIDE.md](USER_GUIDE.md)。
 
 ## 验证原则
 
@@ -17,6 +17,34 @@
 - `validation_evidence/` 只在本地保存计数、验收 JSON 和截图，已列入 `.gitignore`，不得提交或推送；新克隆不包含这些历史资料。文件名日期标明快照，不表示当前代码重新验证；截图中的固定模拟缓存率不作服务商实测。
 
 ## 无真实模型凭据的隔离检查
+
+AI 服务商及模型更新的业务验收：
+
+```powershell
+.\.venv\Scripts\python.exe -B tools/run_validation.py tools/validate_llm_providers.py
+.\.venv\Scripts\python.exe -B tools/run_validation.py tools/validate_llm_settings_ui.py
+```
+
+`validate_llm_providers.py` 使用真实 OpenAI SDK 连接本机 HTTP/SSE，验证 Gemini 的科研精读/评分/对话、三领域中英文输入、GPT-6.1 Sol Responses、两家的中英文课题关键词提取/分组翻译/缓存、短输出思考预算及显式禁用预留、原生工具计算及签名/加密项回传、token/cache 计数、截断、认证失败、开始前/流中取消及后续恢复、旧配置/自定义模型/任务覆盖、本地与云端 Ollama 的密钥边界、容量及图片能力覆盖。返回内容和图片载荷是 fixture，不证明真实模型推理或视觉质量。`validate_llm_settings_ui.py` 启动真实 `app.main`，对生产设置控件调用回调，验证九项接入方式的模型选项、Gemini/OpenAI SDK 连通结果、密钥切换与保存、自定义 ID、空远程 Key 拒绝及本地 Ollama。截取自有前台窗口的实屏像素并拒绝空白截图，不宣称物理鼠标/键盘覆盖。真实 API、账户权限及套餐扣费需单独验收；脚本要求经隔离 runner 启动。
+
+Codex 订阅后端检查：
+
+```powershell
+.\.venv\Scripts\python.exe -B tools/run_validation.py tools/validate_codex_subscription.py
+.\.venv\Scripts\python.exe -B tools/run_validation.py tools/validate_codex_settings_ui.py
+```
+
+`codex_fixture_server.py` 是独立 stdio 子进程 fixture。验证科研三领域中英文精读/评分/多轮对话、关键词/翻译、主计算及两个子 Agent 并行读取再审查、动态工具图片回传、SDK 用量增量、动态能力和模型覆盖、登录/取消/退出、API Key 登录拒绝、官方缓存复制失败回滚、跨会话拒绝与重启历史重建、四线程结果归属、未授权工具、启动前/启动回复前/流中/工具等待取消、流关闭、断连/错误/超时、不自动重复调用。原生 CLI 的未登录初始化、命名空间工具、历史注入及返回只读沙箱另测；未安装 CLI 时明确跳过该项。UI 脚本运行生产 app，驱动真实挂载回调，经 fixture 验证登录 URL 转交、登录完成/取消、目录刷新、连接测试、保存及 API 密钥隔离、退出；浏览器打开被拦截，不代替真实浏览器授权。
+
+真实订阅探针是显式开启的另一路径，复制官方 auth.json 到隔离目录，会使用少量订阅额度；不输出令牌或账号身份。只有明确选用时设置源路径：
+
+```powershell
+$env:PAPERPILOT_CODEX_AUTH_SOURCE = '本机 Codex 的 auth.json 完整路径'
+.\.venv\Scripts\python.exe -B tools/run_validation.py tools/validate_codex_live.py
+Remove-Item Env:PAPERPILOT_CODEX_AUTH_SOURCE
+```
+
+2026-10-03 真实检查仅确认 ChatGPT 登录身份及账号目录；GPT-6.1 Sol 和 GPT-6 Luna 生成均超时，CLI 日志为请求超时重试，真实推理/工具/图片未验收通过。隔离、原生 CLI、原生 UI 和真实服务结果分别记录在本地 `validation_evidence/`，不将其中一种成功当成其余成功。官方 app-server 的实验协议与 CLI 版本变化须重新验证。
 
 通过 runner 运行已有的非付费脚本：
 

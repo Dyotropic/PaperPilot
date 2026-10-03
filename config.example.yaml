@@ -1,9 +1,12 @@
 # ── LLM 模型服务（多模型，功能三）──
-# provider 可选：deepseek / openai / anthropic / glm / kimi / qwen / ollama
+# provider 可选：deepseek / openai / codex / anthropic / gemini / glm / kimi / qwen / ollama
+# Gemini: provider: gemini, model: gemini-3.8-flash, API Key 从 Google AI Studio 获取。
+# OpenAI: 新配置默认 gpt-6.1-sol；GPT-6 系列端点须支持 Responses API。
+# 各家网页订阅并非通用 API 凭据；订阅接入边界见 USER_GUIDE.md §3.4。
 # 旧版 deepseek: 配置节仍兼容：未设置 llm.provider 时自动回退到 old deepseek 的 key/model
 llm:
   provider: deepseek        # 默认 DeepSeek
-  api_key: "sk-your-key-here"   # 对应 provider 的 API Key（ollama 本地可留空）
+  api_key: "sk-your-key-here"   # 对应 provider 的 API Key；Ollama 官方云端需 Key，本地/私有端点可留空
   api_keys: {}              # 可选：设置页保存各服务商 Key；如 {deepseek: "sk-...", openai: "sk-..."}
   base_url: ""              # 留空用内置默认地址；第三方兼容镜像可在此覆盖
   model: deepseek-flash  # 主模型（DeepSeek V4.1 Flash）
@@ -11,6 +14,10 @@ llm:
   score_model: ""           # AI 精排打分专用
   chat_model: ""            # 对话输出专用
   reasoning_model: ""       # 非空才启用"两步推理"（先深度推理再生成），多数模型无需
+  reasoning_output_reserve: 4096  # 不可关闭思考的新模型，追加思考输出预算；0=保留调用方总上限
+  codex_cli: ""             # Codex 订阅：官方 CLI >=0.159.2，留空自动查找可执行文件
+  codex_home: ""            # 留空为 cache.dir/codex-subscription；独立登录目录应放在 Git 忽略范围
+                            # provider: codex / model: codex-default，不使用 API Key 或 Base URL
 embedding:
   local_model: paraphrase-multilingual-MiniLM-L12-v2
   cache_dir: ./cache/embedding
@@ -26,7 +33,7 @@ agent:
     max_batches: 3         # 每轮最多派发/追问批次，1–3；之后必须审查汇总
     timeout_seconds: 180   # 每个子任务的总超时（含读取与推理），10–600 秒
   image_support: {}       # 按服务商/模型声明图片能力，如 {openai: {my-vision-model: true}}
-                         # DeepSeek Flash 已内置支持；其他模型核实官方文档后设置，false 可禁用
+                         # 已确认的内置视觉模型默认支持；未知型号仍需核实后声明，false 可禁用
 data_sources:
   arxiv: false
   openalex: true
