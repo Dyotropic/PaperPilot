@@ -231,8 +231,9 @@ class AgentRun:
             self._jobs -= 1
             if self._jobs != 0:
                 return
-            self._state = "cancelled" if self.token.cancelled else (
+            self._state = getattr(self, "task_outcome", None) or ("cancelled" if self.token.cancelled else (
                 "failed" if self._state == "failed" else "completed")
+            )
             note = ""
             if self.maintenance:
                 if self.token.cancelled:
@@ -241,6 +242,11 @@ class AgentRun:
                 self._save()
                 return note
             self.cm.finish_pending_tools()
+            if self.operation == "loop" and self.reply_recorded:
+                # The task controller records the precise pause/completion reason.
+                # A budget deadline uses cancellation too; it is not a user stop.
+                self._save()
+                return note
             if self.token.cancelled:
                 # Record the goal even when interrupted during pre-request compaction.
                 if not self.user_recorded:

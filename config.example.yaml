@@ -23,6 +23,11 @@ agent:
   context_windows: {}      # 按服务商/模型覆盖容量，如 {deepseek: {deepseek-flash: 1000000}}
   auto_compact_ratio: 0.7  # 达到模型窗口的此比例时压缩；未知容量沿用 80000 token 阈值
   keep_recent_rounds: 2    # 压缩时保留最近完整轮次；短会话手动压缩可覆盖全部完整轮次
+  loop:
+    permission_mode: ask_edit # read_only / ask_edit / direct_edit；仅作用于长任务 Agent 工具
+                          # 在右侧 Agent 输入区勾选长任务后直接发送，无需填写预算。
+                          # 修改审批与缺信息问询以对话卡片呈现，批准/回复须明确提交。
+                          # 不按累计时长/请求/token 暂停；旧额度配置不再生效，用量仍记录。
   team:
     enabled: true          # 主 Agent 按需派发只读子 Agent；模型端点需支持原生函数调用
     max_parallel: 3        # 同时工作人数，1–6；其它任务排队

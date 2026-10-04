@@ -90,7 +90,8 @@ def _managed_async_stream(item_type):
 @dataclass
 class ChatResult:
     """chat() 统一返回。content 为正文；reasoning 为推理链
-    （DeepSeek reasoning_content / Anthropic thinking block），无则为空串。"""
+    （DeepSeek reasoning_content / Anthropic thinking block），无则为空串。
+    非流式请求失败时 error_type 保存异常类型，正文为空；不保存异常原文。"""
     content: str = ""
     reasoning: str = ""
     usage: TokenUsage | None = None
@@ -102,6 +103,7 @@ class ChatResult:
     finish_reason: str | None = None
     tool_calls: list[dict] = field(default_factory=list)
     provider_blocks: list[dict] = field(default_factory=list)
+    error_type: str | None = None  # Sanitized failure type; never provider error text.
 
 
 # ── Provider 注册表 ──
@@ -449,13 +451,20 @@ class LLMClient:
              max_tokens: int = 2000, timeout: int = 120,
              model: str | None = None, thinking: bool | None = None,
              retries: int = 1) -> ChatResult:
-        """非流式调用。失败重试 1 次（仅网络/5xx），最终失败返回空 ChatResult。"""
+        """非流式调用。失败重试 1 次（仅网络/5xx），最终失败返回带 error_type 的空正文结果。"""
         use_model = model or self.model
         for attempt in (1, 2):
             started = perf_counter()
             self.last_result = ChatResult()
+            from paperpilot.agent_budget import current_budget
+            budget, ticket = current_budget(), None
             try:
                 checkpoint()
+                if budget:
+                    ticket = budget.reserve(messages, reasoning_output_budget(
+                        getattr(self, "provider", ""), use_model, max_tokens),
+                        _tool_options.get().get("tools"),
+                        route=(getattr(self, "provider", ""), getattr(self, "base_url", "")))
                 run = current_run()
                 if run:
                     result = self._do_cancellable(messages, temperature, max_tokens,
@@ -473,7 +482,8 @@ class LLMClient:
                 self._record(result, messages, use_model, "cancelled", thinking=thinking)
                 raise
             except Exception as e:
-                failed = ChatResult(elapsed_ms=round((perf_counter() - started) * 1000))
+                failed = ChatResult(elapsed_ms=round((perf_counter() - started) * 1000),
+                                    error_type=type(e).__name__)
                 self._record(failed, messages, use_model, "error", thinking=thinking)
                 if attempt <= retries and _is_retryable(e):
                     logger.warning("LLM call failed (attempt %d, %s): %s",
@@ -481,6 +491,9 @@ class LLMClient:
                     continue
                 logger.warning("LLM call failed (%s): %s", type(e).__name__, e)
                 break
+            finally:
+                if ticket is not None:
+                    budget.settle(ticket, self.last_result)
         return self.last_result
 
     def chat_stream(self, messages: list[dict], temperature: float = 0.3,

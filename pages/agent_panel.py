@@ -29,6 +29,7 @@ from pages.context import (
 from pages.components import clamp_width, make_resize_handle, open_dialog, close_dialog
 from pages.agent_attachments_ui import AttachmentComposer, history_attachments
 from pages.agent_team_ui import AgentTeamView
+from pages.agent_task_ui import AgentTaskView
 from paperpilot.agent_attachments import (persist_attachments,
     format_attachment_material, ensure_image_support)
 
@@ -42,6 +43,7 @@ from paperpilot import repo_manager, downloader
 from paperpilot.keywords import extract_all_keywords
 from paperpilot.llm_usage import UsageStore
 from paperpilot.agent_runtime import AgentRun, OperationCancelled, run_scope, checkpoint
+from paperpilot.agent_presentation import user_text
 
 # ── 模块级状态 ──
 _agent_msg_list: ft.ListView | None = None
@@ -65,6 +67,7 @@ _active_run: AgentRun | None = None
 _agent_send_button: ft.IconButton | None = None
 _attachment_composer: AttachmentComposer | None = None
 _team_view: AgentTeamView | None = None
+_task_view: AgentTaskView | None = None
 
 
 def _refresh_run_button():
@@ -100,6 +103,8 @@ def begin_agent_run(cm, pid, goal, operation="chat", on_partial=None, *, attachm
         _refresh_run_button()
         refresh_agent_usage()
         _refresh_command_menu()
+        if _task_view:
+            _task_view.notify(run.identity)
     _active_run = AgentRun(cm, pid, goal, operation, on_done=done, on_partial=on_partial, attachments=attachments)
     _thinking_active = True
     _refresh_run_button()
@@ -144,6 +149,9 @@ def _set_agent_panel_width(w: int) -> None:
         _agent_panel_ref.width = w
         try:
             _agent_panel_ref.update()
+            if _task_view and any(card and not card.finished for card in
+                    (_task_view.approval_card, _task_view.question_card)):
+                _scroll_agent_to_bottom()
         except Exception:
             pass
 
@@ -322,6 +330,12 @@ def _make_bubble(text: str, role: str = "user", *, attachments=None, attachment_
     colors = _agent_theme_colors()
     if role == "agent":
         try:
+            cm = _ai_service.get_conversation(_agent_project_id or 0, _agent_project_name or "通用",
+                _agent_topic_desc, _agent_session_id)
+            text = user_text(text, cm.get_task_state())
+        except (ValueError, OSError):
+            text = user_text(text)
+        try:
             formatted, _ = _format_agent_text(text)
             body = _agent_markdown(formatted)
         except Exception:
@@ -392,6 +406,16 @@ def send_agent_message(text: str, role: str = "user", *, attachments=None, attac
     _scroll_agent_to_bottom()
 
 
+def _append_agent_card(control):
+    if _agent_msg_list is None:
+        return
+    _agent_msg_list.controls.append(control)
+    if len(_agent_msg_list.controls) > 200:
+        _agent_msg_list.controls.pop(0)
+    _agent_msg_list.update()
+    _scroll_agent_to_bottom()
+
+
 def _show_thinking_bubble():
     """在消息列表末尾添加一个轻量的思考状态行。"""
     global _agent_msg_list, _thinking_active
@@ -447,7 +471,11 @@ def refresh_agent_panel_theme() -> None:
     colors = _agent_theme_colors()
     _agent_panel_ref.bgcolor = surface()
     _agent_panel_ref.border = ft.Border(left=ft.BorderSide(1, border_color()))
+    if _task_view:
+        for card in _task_view.cards:
+            card.retheme()
     panel_column = _agent_panel_ref.content
+    panel_column.controls[-1].border = ft.Border.all(1, border_color())
     header_row = panel_column.controls[0].content
     header_row.controls[0].color = seed_color()
     header_row.controls[1].color = text_primary()
@@ -476,6 +504,9 @@ def refresh_agent_panel_theme() -> None:
 
     if _team_view:
         _team_view.refresh()
+
+    if _task_view:
+        _task_view.refresh()
 
     for message in _agent_msg_list.controls:
         role = message.data
@@ -802,6 +833,8 @@ def load_agent_conversation():
         _attachment_composer.refresh()
     if _team_view:
         _team_view.refresh(recover=True)
+    if _task_view:
+        _task_view.refresh(recover=True)
     if _agent_msg_list is None:
         return
     clear_agent_messages()
@@ -915,8 +948,9 @@ def refresh_agent_context():
         status = _ai_service.get_context_status(_agent_project_id or 0, _agent_project_name or "通用",
                     _agent_topic_desc, session_id=_agent_session_id, draft=draft)
         window = f"{status['window']:,}" if status["window"] else "未配置"
-        ratio = f" · {status['ratio']:.1%}" if status["ratio"] is not None else ""
-        _context_text.value = f"上下文 ≈{status['used']:,} / {window} token{ratio}"
+        ratio = f"{status['ratio']:.1%}" if status["ratio"] is not None else "容量未配置"
+        _context_text.value = f"上下文 {ratio}"
+        _context_text.expand = True
         _context_bar.value = min(1, status["ratio"]) if status["ratio"] is not None else 0
         _context_bar.color = ft.Colors.ERROR if (status["ratio"] or 0) >= .9 else seed_color()
         detail = "最近聊天输入用量 + 后续内容估算" if status["anchored"] else "当前发送上下文估算"
@@ -925,7 +959,7 @@ def refresh_agent_context():
             from paperpilot.conversation import _estimate_tokens
             for item in _attachment_composer.pending:
                 attachment_tokens += _estimate_tokens(item.excerpt) + 4096 * len(item.images)
-        _context_text.tooltip = (f"{status['model'] or '模型未配置'}；{detail}。不是累计账单用量。"
+        _context_text.tooltip = (f"{status['model'] or '模型未配置'}；上下文约 {status['used']:,} / {window} token；{detail}。"
             f"草稿约 {status['draft_tokens']:,} token，待发附件另约 {attachment_tokens:,} token；"
             f"自动压缩阈值 {status['compact_threshold']:,}。点击查看详情与配置容量。")
         _context_text.update()
@@ -1643,7 +1677,7 @@ def build_agent_panel() -> tuple[ft.Container, ft.GestureDetector]:
     """
     global _agent_msg_list, _agent_input, _agent_panel_ref, _session_selector, _usage_text, _agent_send_button
     global _context_text, _context_bar, _command_menu, _command_rows, _slash_dismissed, _slash_index
-    global _attachment_composer, _team_view
+    global _attachment_composer, _team_view, _task_view
     _slash_dismissed, _slash_index = False, 0
     ctx.refresh_agent_usage = refresh_agent_usage
     ctx.begin_agent_run = begin_agent_run
@@ -1656,6 +1690,11 @@ def build_agent_panel() -> tuple[ft.Container, ft.GestureDetector]:
         lambda: _ai_service.get_conversation(_agent_project_id or 0, _agent_project_name or "通用",
                                              _agent_topic_desc, _agent_session_id),
         lambda: (_agent_project_id or 0, _agent_session_id), refresh_agent_usage)
+    _task_view = AgentTaskView(_ai_service,
+        lambda: _ai_service.get_conversation(_agent_project_id or 0, _agent_project_name or "通用",
+                                             _agent_topic_desc, _agent_session_id),
+        lambda: (_agent_project_id or 0, _agent_session_id), begin_agent_run, send_agent_message,
+        _team_view.notify, _append_agent_card, _scroll_agent_to_bottom)
 
     _agent_input = ft.TextField(
         key=ft.ValueKey("agent-composer-input"),
@@ -1665,9 +1704,10 @@ def build_agent_panel() -> tuple[ft.Container, ft.GestureDetector]:
         min_lines=1,
         max_lines=4,
         expand=True,
-        text_size=13,
-        border_radius=20,
-        content_padding=ft.padding.Padding(left=16, top=10, right=16, bottom=10),
+        text_size=FS_LG,
+        border=ft.InputBorder.NONE,
+        border_radius=R_XL,
+        content_padding=ft.padding.Padding(left=SP_SM, top=SP_SM, right=SP_SM, bottom=SP_SM),
     )
     _agent_msg_list = ft.ListView(
         expand=True, spacing=SP_SM,
@@ -1675,12 +1715,40 @@ def build_agent_panel() -> tuple[ft.Container, ft.GestureDetector]:
     )
 
     def _on_agent_send(e):
-        if _thinking_active or _attachment_composer.loading:
+        if _attachment_composer.loading:
             return
         text = (_agent_input.value or "").strip()
         items = list(_attachment_composer.pending)
         if not text and not items:
             return
+        if _thinking_active:
+            from paperpilot.agent_loop import live_controller
+            cm = _ai_service.get_conversation(_agent_project_id or 0, _agent_project_name or "通用",
+                _agent_topic_desc, _agent_session_id)
+            controller = live_controller(cm)
+            if not controller:
+                return
+            if items:
+                send_agent_message("正在处理当前任务。新增附件请先停止任务后发送；文字要求可以直接补充。", role="system")
+                return
+            try:
+                question = controller.question
+                if question and len(question.details["questions"]) == 1:
+                    if len(text) > 4000:
+                        raise ValueError("每题回复最多 4000 字符，请精简后再发送。")
+                    qid = question.details["questions"][0]["id"]
+                    accepted = controller.respond_question(question.details["request_id"], {qid: text})
+                    if not accepted:
+                        return
+                else:
+                    controller.enqueue_instruction(text)
+                    send_agent_message(text, role="user")
+                _agent_input.value = ""
+                _agent_input.update()
+                return
+            except ValueError as exc:
+                send_agent_message(str(exc), role="system")
+                return
         query = _slash_filter(_agent_input.value or "")
         if query is not None:
             matches = [name for name, _, _ in _SLASH_COMMANDS if name.startswith(query)]
@@ -1704,6 +1772,16 @@ def build_agent_panel() -> tuple[ft.Container, ft.GestureDetector]:
             attachments = persist_attachments(cm.storage_directory, items)
         except (ValueError, OSError) as exc:
             send_agent_message(f"附件未发送：{exc}", role="system")
+            return
+        if _task_view.enabled.value:
+            def started():
+                if identity == (_agent_project_id or 0, _agent_session_id):
+                    _agent_input.value = ""
+                    _agent_input.update()
+                    _attachment_composer.clear(identity)
+                    _refresh_command_menu()
+                    refresh_agent_context()
+            _task_view.start(text, attachments=attachments, on_started=started)
             return
         send_agent_message(text, role="user", attachments=attachments, attachment_directory=cm.storage_directory)
         bubble = _agent_msg_list.controls[-1]
@@ -1896,20 +1974,20 @@ def build_agent_panel() -> tuple[ft.Container, ft.GestureDetector]:
                     ft.IconButton(icon=ft.Icons.QUERY_STATS, icon_size=FS_XL,
                                   tooltip="用量详情", on_click=_show_usage_details)], spacing=SP_XS),
             _team_view.host,
+            _task_view.host,
             _agent_msg_list,
             ft.Divider(height=1, color=border_color()),
             context_meter,
-            _attachment_composer.host,
-            # Keep a composer sibling mounted even when the menu is hidden.
-            # Flutter must not reuse its TextField state for a different child
-            # when visible controls are filtered out of a Column.
-            ft.Container(content=_command_menu, key=ft.ValueKey("agent-command-host")),
-            ft.Row([
-                _attachment_composer.button,
-                _preset_menu,
-                _agent_input,
-                _agent_send_button,
-            ], spacing=6, key=ft.ValueKey("agent-composer-row")),
+            ft.Container(content=ft.Column([
+                _attachment_composer.host,
+                # Stable keyed hosts preserve composer focus as menus appear.
+                ft.Container(content=_command_menu, key=ft.ValueKey("agent-command-host")),
+                ft.Row([_attachment_composer.button, _preset_menu, _agent_input, _agent_send_button],
+                    spacing=SP_XS, key=ft.ValueKey("agent-composer-row")),
+                _task_view.settings,
+            ], spacing=SP_XS), border=ft.Border.all(1, border_color()), border_radius=R_XL,
+                padding=ft.padding.Padding(left=SP_XS, top=SP_XS, right=SP_XS, bottom=SP_XS),
+                margin=ft.margin.Margin(left=SP_SM, top=0, right=SP_SM, bottom=SP_SM)),
         ], spacing=SP_XS),
         width=_agent_panel_width,
         bgcolor=surface(),

@@ -22,6 +22,7 @@ import uuid
 from paperpilot.agent_runtime import (CancellationToken, OperationCancelled,
     current_run, run_scope, reply_stream, checkpoint)
 from paperpilot.context_budget import context_policy, estimate_request_tokens
+from paperpilot.agent_budget import BudgetPaused
 from paperpilot.llm_usage import usage_scope
 from paperpilot.repo_manager import atomic_write_text
 
@@ -312,20 +313,24 @@ class _WorkerRun:
 
 
 class AgentTeam:
-    def __init__(self, cm, project_id, parent_run, messages, client_factory, model, on_change=None):
+    def __init__(self, cm, project_id, parent_run, messages, client_factory, model, on_change=None, *, team_id=None):
         if not cm.session_id or not cm.storage_directory.is_dir():
             raise ValueError("团队需要一个已保存的独立会话")
         self.cm, self.project_id, self.parent = cm, project_id, parent_run
-        self.id = parent_run.id if parent_run else uuid.uuid4().hex
+        self.id = team_id or (parent_run.id if parent_run else uuid.uuid4().hex)
+        if not re.fullmatch(r"[0-9a-f]{32}", self.id):
+            raise ValueError("团队标识无效")
         self.identity = (project_id, cm.session_id)
         self.settings = team_settings()
         self.catalog = SourceCatalog(messages)
         self.client_factory, self.model, self.on_change = client_factory, model, on_change
+        from paperpilot.agent_budget import current_budget
+        self.budget = current_budget()
         self.lock = threading.RLock()
         self.tokens, self.histories = {}, {}
         self.path = cm.storage_directory / "teams" / self.id / "team.json"
-        self.key = (str(cm.storage_directory.resolve()), self.id)
-        self.data = dict(version=1, team_id=self.id, parent_run_id=self.id,
+        self.key = (cm.session_id or str(cm.storage_directory.resolve()), self.id)
+        self.data = dict(version=1, team_id=self.id, parent_run_id=parent_run.id if parent_run else self.id,
             project_id=project_id, session_id=cm.session_id, goal=parent_run.goal if parent_run else "",
             state="running", created_at=_now(), updated_at=_now(), batches=0, agents=[])
         self.closed = False
@@ -343,6 +348,8 @@ class AgentTeam:
         root = self.cm.storage_directory
         if not root.is_dir() or not root.joinpath("events.jsonl").is_file():
             raise ValueError("主会话已移除，未重新创建团队目录")
+        # The host rebinds this manager only after moving the entire project.
+        self.path = root / "teams" / self.id / "team.json"
         for path in (root, root / "teams", self.path.parent, self.path):
             if _linked(path):
                 raise ValueError("团队存储不能经过链接目录")
@@ -456,7 +463,8 @@ class AgentTeam:
                 self._save()
         worker = _WorkerRun(token, publish)
         try:
-            with run_scope(worker):
+            from paperpilot.agent_budget import budget_scope
+            with run_scope(worker), budget_scope(self.budget):
                 with self.lock:
                     self._row(agent_id)["state"] = "running"
                     self._save()
@@ -555,6 +563,11 @@ class AgentTeam:
                     break
                 else:
                     raise ValueError("子 Agent 未在工具调用上限内完成分析")
+        except BudgetPaused as exc:
+            with self.lock:
+                self._row(agent_id).update(state="cancelled", stop_reason=str(exc), finished_at=_now())
+                self._save()
+            raise
         except OperationCancelled:
             with self.lock:
                 row = self._row(agent_id)
@@ -624,7 +637,7 @@ def _team_paths(cm):
 def saved_teams(cm, *, recover=False):
     records = []
     for path in _team_paths(cm)[:30]:
-        key = (str(cm.storage_directory.resolve()), path.parent.name)
+        key = (cm.session_id or str(cm.storage_directory.resolve()), path.parent.name)
         with _live_lock:
             live = _live.get(key)
         if live:
@@ -666,7 +679,7 @@ def saved_teams(cm, *, recover=False):
 
 def stop_saved_agent(cm, team_id, agent_id):
     with _live_lock:
-        team = _live.get((str(cm.storage_directory.resolve()), team_id))
+        team = _live.get((cm.session_id or str(cm.storage_directory.resolve()), team_id))
     if team:
         team.stop(agent_id)
 

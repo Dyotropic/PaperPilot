@@ -37,6 +37,8 @@ def atomic_write_text(path: Path, text: str) -> None:
     进程退出/断电导致的截断文件不会出现——磁盘上永远是完整旧版或完整新版。
     残留 .tmp 在下次写入时自然覆盖，无需清理。
     """
+    from paperpilot.file_paths import io_path
+    path = io_path(path)
     tmp = Path(str(path) + ".tmp")
     tmp.write_text(text, encoding="utf-8")
     os.replace(str(tmp), str(path))

@@ -119,6 +119,16 @@ class ConversationManager:
                     data["history"].append(event["message"])
                 elif kind == "metadata":
                     data["_meta"].update(event["changes"])
+                    if "agent_task_delta" in event["changes"]:
+                        delta = event["changes"]["agent_task_delta"]
+                        task = data["_meta"].get("agent_task")
+                        if not task or task.get("task_id") != delta["task_id"]:
+                            raise ValueError("任务增量日志与目标不匹配，原记录保留")
+                        task.update(copy.deepcopy(delta["set"]))
+                        task["evidence"].extend(copy.deepcopy(delta.get("evidence_append", [])))
+                        for key, updates in delta.get("maps", {}).items():
+                            task[key].update(copy.deepcopy(updates))
+                        data["_meta"].pop("agent_task_delta", None)
                 elif kind == "compression":
                     event["summary"].setdefault("history_boundary",
                         len(data["history"]) - len(data["messages"]) + event["count"])
@@ -234,6 +244,38 @@ class ConversationManager:
             self._meta["maintenance"] = copy.deepcopy(state)
             self._save()
 
+    def set_task_state(self, state: dict):
+        """Durable goal/plan checkpoint, independent of model context compression."""
+        with self.lock:
+            previous = self._meta.get("agent_task")
+            # Keep the existing metadata event envelope. Older builds can still
+            # read ordinary chat history; new builds replay bounded task deltas.
+            if (not previous or previous.get("task_id") != state.get("task_id") or
+                    state["status"] in {"ready", "completed", "paused", "failed"}):
+                changes = {"agent_task": state}
+            else:
+                updates = {key: value for key, value in state.items() if previous.get(key) != value}
+                delta = dict(task_id=state["task_id"], set=updates, maps={})
+                prior = previous.get("evidence", [])
+                current = state.get("evidence", [])
+                if "evidence" in updates and current[:len(prior)] == prior:
+                    delta["evidence_append"] = current[len(prior):]
+                    updates.pop("evidence")
+                for key in ("datasets", "observed"):
+                    old_map, new_map = previous.get(key, {}), state.get(key, {})
+                    if key in updates and set(old_map) <= set(new_map):
+                        delta["maps"][key] = {k: v for k, v in new_map.items() if old_map.get(k) != v}
+                        updates.pop(key)
+                changes = {"agent_task_delta": delta}
+            self._append_event("metadata", changes=changes)
+            self._meta["agent_task"] = copy.deepcopy(state)
+            self._meta.pop("agent_task_delta", None)
+            self._save()
+
+    def get_task_state(self):
+        with self.lock:
+            return copy.deepcopy(self._meta.get("agent_task"))
+
     def set_context_sample(self, sample: dict):
         with self.lock:
             self._append_event("metadata", changes={"context_sample": sample})
@@ -298,7 +340,7 @@ class ConversationManager:
             self._history.append(msg)
             self._save()
 
-    def add_assistant_message(self, content: str, display_content: str = "") -> None:
+    def add_assistant_message(self, content: str, display_content: str = "", *, loop_checkpoint=None) -> None:
         """添加助手回复。display_content 用于 UI 显示，content 保留完整版供 API 上下文。"""
         msg = {
             "role": "assistant",
@@ -308,6 +350,10 @@ class ConversationManager:
         if display_content:
             msg["display_content"] = display_content
         with self.lock:
+            if loop_checkpoint is not None:
+                if not isinstance(loop_checkpoint, str) or not re.fullmatch(r"[0-9a-f]{32}", loop_checkpoint) or pending_tool_calls(self._messages):
+                    raise ValueError("长任务检查点必须位于完整工具批次之后")
+                msg["loop_checkpoint"] = loop_checkpoint
             self._append_event("message", message=msg)
             self._messages.append(msg)
             self._history.append(msg)
@@ -319,11 +365,18 @@ class ConversationManager:
             raise ValueError("内部消息角色无效")
         msg = dict(role=role, content=content, internal=True, team_id=team_id,
                    timestamp=datetime.now().isoformat())
-        allowed = {"tool_calls", "tool_call_id", "reasoning_content", "provider_blocks"}
+        allowed = {"tool_calls", "tool_call_id", "reasoning_content", "provider_blocks", "attachments", "loop_checkpoint"}
         if not set(tool_fields) <= allowed:
             raise ValueError("内部工具消息字段无效")
+        if "attachments" in tool_fields and role != "user":
+            raise ValueError("内部附件观察仅可使用 user 协议消息，不代表人工指令")
         msg.update(copy.deepcopy(tool_fields))
         with self.lock:
+            marker = tool_fields.get("loop_checkpoint")
+            if marker is not None and (role != "assistant" or not isinstance(marker, str) or
+                    not re.fullmatch(r"[0-9a-f]{32}", marker) or pending_tool_calls(self._messages) or
+                    tool_fields.get("tool_calls")):
+                raise ValueError("长任务检查点必须位于完整工具批次之后")
             self._append_event("message", message=msg)
             self._messages.append(msg)
             self._history.append(msg)
@@ -505,13 +558,25 @@ class ConversationManager:
         self._messages = self._messages[len(batch):]
         self._save()
 
+    def _compaction_boundaries(self):
+        # Host checkpoints allow one human goal to run through many compactable
+        # cycles. They are metadata, never a fabricated human instruction.
+        pending, boundaries = set(), []
+        for i, message in enumerate(self._messages):
+            if message["role"] == "assistant":
+                pending.update(c["id"] for c in message.get("tool_calls", []))
+            elif message["role"] == "tool":
+                pending.discard(message.get("tool_call_id"))
+            if message["role"] == "assistant" and (not message.get("internal") or message.get("loop_checkpoint")) and not pending:
+                if (message.get("loop_checkpoint") or i + 1 == len(self._messages) or
+                    (self._messages[i + 1]["role"] == "user" and not self._messages[i + 1].get("internal"))):
+                    boundaries.append(i + 1)
+        return boundaries
+
     def compaction_plan(self, system_prompt, keep_rounds=2, *, manual=False):
         """Snapshot a complete prefix, keeping recent question/answer turns verbatim."""
         with self.lock:
-            boundaries = [i + 1 for i, m in enumerate(self._messages)
-                          if m["role"] == "assistant" and not m.get("internal")
-                          and (i + 1 == len(self._messages) or
-                               (self._messages[i + 1]["role"] == "user" and not self._messages[i + 1].get("internal")))]
+            boundaries = self._compaction_boundaries()
             if not boundaries:
                 return None
             if not manual and len(boundaries) <= keep_rounds:

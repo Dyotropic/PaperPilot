@@ -18,6 +18,7 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 for stream in (sys.stdout, sys.stderr):
     reconfigure = getattr(stream, "reconfigure", None)
     if reconfigure is not None:
@@ -37,7 +38,8 @@ work = scratch_root / target.stem
 if work.exists():
     if not work.is_relative_to(scratch_root):
         raise SystemExit("Refusing to clear validation path outside scratch root")
-    shutil.rmtree(work)
+    from paperpilot.file_paths import io_path
+    shutil.rmtree(io_path(work))
 work.mkdir(parents=True, exist_ok=True)
 os.environ.update({"TMP": str(work), "TEMP": str(work),
                    "PAPERPILOT_VALIDATION_ROOT": str(work),
@@ -46,7 +48,6 @@ os.environ.update({"TMP": str(work), "TEMP": str(work),
                    "XDG_CACHE_HOME": str(work / "xdg")})
 sys.dont_write_bytecode = True
 tempfile.tempdir = str(work)
-sys.path.insert(0, str(ROOT))
 
 # Build a synthetic configuration without importing or reading config.yaml.
 example_path = ROOT / "config.example.yaml"
@@ -159,7 +160,8 @@ def guard(event, args):
     for path in paths:
         if os.fsdecode(path).lower() in (os.devnull.lower(), r"\\.\nul"):
             continue
-        resolved = Path(os.fsdecode(path)).resolve()
+        from paperpilot.file_paths import logical_path
+        resolved = logical_path(os.fsdecode(path)).resolve()
         if not resolved.is_relative_to(work):
             raise PermissionError(f"Validation write outside isolated directory: {resolved}")
 sys.addaudithook(guard)

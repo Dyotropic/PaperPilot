@@ -57,7 +57,7 @@ class TeamBusinessTests(unittest.TestCase):
     def tearDown(self):
         self.config["agent"] = self.before
         self.config_patch.stop()
-        self.assertFalse(any(k[0] == str(self.cm.storage_directory.resolve()) for k in _live))
+        self.assertFalse(any(k[0] == self.cm.session_id for k in _live))
 
     def chat(self, callback, message, **kwargs):
         with patch("paperpilot.ai_service.get_client", side_effect=lambda task=None: ScriptClient(callback)), \

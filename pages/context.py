@@ -52,6 +52,16 @@ SP_LG = 16
 SP_XL = 24
 SP_XXL = 32
 
+# Bounded Agent review surfaces; keep chat readable at narrow panel widths.
+AGENT_REVIEW_HEIGHT = 220
+AGENT_REVIEW_LINE_HEIGHT = 20
+AGENT_REQUEST_HEIGHT = 360
+AGENT_DETAILS_HEIGHT = 380
+DIFF_ADDED_LIGHT = "#176B3A"
+DIFF_ADDED_DARK = "#82D9A1"
+DIFF_REMOVED_LIGHT = "#A52B35"
+DIFF_REMOVED_DARK = "#FF9AA3"
+
 
 # ── 主题定义 ──
 # 每个主题含：label（中文名）、seed（accent 色）、light/dark 两套中性分层背景。
