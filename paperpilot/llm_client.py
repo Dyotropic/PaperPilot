@@ -1,10 +1,9 @@
 """多模型 LLM 统一抽象层（PHASE3_PLAN 功能三）。
 
-支持 provider：deepseek / openai / codex / anthropic / gemini / glm / kimi / qwen / ollama。
+支持 provider：deepseek / openai / anthropic / gemini / glm / kimi / qwen / ollama。
 - OpenAI 兼容系经 openai SDK；GPT-6 系列使用 Responses API，其余使用
   Chat Completions。Gemini 使用 Google 官方兼容端点。
 - Anthropic 经 anthropic SDK。
-- Codex 订阅经官方 CLI app server；账号模型目录、OAuth 与刷新由 CLI 管理。
 
 统一接口：
     get_client(task=None) -> LLMClient | None   # 每次现读 config，task 解析任务级模型覆盖
@@ -108,10 +107,6 @@ class ChatResult:
 # ── Provider 注册表 ──
 
 PROVIDERS: dict[str, dict] = {
-    "codex": {
-        "label": "Codex（订阅）", "base_url": "", "default_model": "codex-default",
-        "key_hint": "使用 ChatGPT 登录，模型与额度由 Codex 账号提供",
-    },
     "deepseek": {
         "label": "DeepSeek",
         "base_url": "https://api.deepseek.com/v1",
@@ -164,7 +159,6 @@ PROVIDERS: dict[str, dict] = {
 
 # 每家内置模型清单：(model_id, 显示名)；下拉框额外提供"自定义…"手输
 MODEL_CATALOG: dict[str, list[tuple[str, str]]] = {
-    "codex": [("codex-default", "账号默认（登录后刷新）")],
     "deepseek": [
         ("deepseek-flash", "DeepSeek V4.1 Flash（当前）"),
         ("deepseek-v4-flash", "旧 ID（暂时转发至 V4.1 Flash）"),
@@ -227,7 +221,6 @@ MODEL_CATALOG: dict[str, list[tuple[str, str]]] = {
 
 # Official catalogues checked 2026-10-03; presets are not account entitlements.
 MODEL_CATALOG_SOURCES = {
-    "codex": "https://developers.openai.com/codex/app-server",
     "deepseek": "https://api-docs.deepseek.com/quick_start/pricing",
     "openai": "https://developers.openai.com/api/docs/models",
     "anthropic": "https://platform.claude.com/docs/en/about-claude/models/overview",
@@ -286,8 +279,6 @@ def requires_api_key(provider: str, base_url: str = "") -> bool:
     Local/LAN/custom Ollama servers retain their existing optional-key contract.
     Their own authentication requirements are checked by the configured endpoint.
     """
-    if provider == "codex":
-        return False
     if provider != "ollama":
         return True
     parsed = urlparse(base_url or PROVIDERS["ollama"]["base_url"])
@@ -371,10 +362,7 @@ def get_client(task: str | None = None) -> "LLMClient | None":
     if not api_key and requires_api_key(provider, base_url):
         return None
 
-    if provider == "codex":
-        from paperpilot.codex_client import CodexSubscriptionClient
-        client = CodexSubscriptionClient(model=model)
-    elif provider == "anthropic":
+    if provider == "anthropic":
         client = AnthropicClient(api_key=api_key, model=model, base_url=base_url)
     else:
         client = OpenAICompatClient(provider=provider, base_url=base_url,
@@ -402,13 +390,10 @@ def get_task_model_override(task: str) -> str:
 
 
 def llm_configured() -> bool:
-    """API 配置或本地 Ollama 可用；Codex 另检查 ChatGPT 登录及模型目录。"""
+    """API 配置或本地 Ollama 可用；未知服务商保持未配置状态。"""
     cfg = _load_llm_cfg()
     if not cfg:
         return False
-    if cfg["provider"] == "codex":
-        client = get_client()
-        return bool(client and client.is_available)
     return cfg["provider"] in PROVIDERS and (
         bool(cfg["api_key"]) or not requires_api_key(cfg["provider"], cfg["base_url"]))
 
@@ -525,8 +510,7 @@ class LLMClient:
             raise
         finally:
             result = self.last_result
-            if getattr(self, "provider", "") != "codex" or not result.content:
-                result.content = "".join(parts)
+            result.content = "".join(parts)
             result.elapsed_ms = round((perf_counter() - started) * 1000)
             result.first_token_ms = first_token
             self._record(result, messages, use_model, status, thinking=thinking)
@@ -769,6 +753,14 @@ class AnthropicClient(LLMClient):
     _ALWAYS_THINKING_MODELS = frozenset({
         "claude-fable-5-1", "claude-opus-5-5",
     })
+    # ContentBlockParam types from the installed Anthropic SDK. Foreign
+    # transport metadata is rebuilt from the shared text/tool journal instead.
+    _REPLAY_BLOCK_TYPES = frozenset({
+        "text", "image", "document", "search_result", "thinking", "redacted_thinking",
+        "tool_use", "tool_result", "server_tool_use", "web_search_tool_result",
+        "web_fetch_tool_result", "code_execution_tool_result", "bash_code_execution_tool_result",
+        "text_editor_code_execution_tool_result", "tool_search_tool_result", "container_upload",
+    })
 
     def __init__(self, api_key: str, model: str, base_url: str = ""):
         super().__init__(model)
@@ -797,7 +789,9 @@ class AnthropicClient(LLMClient):
             elif m.get("role") == "tool":
                 rest.append(dict(role="user", content=[dict(type="tool_result",
                     tool_use_id=m["tool_call_id"], content=anthropic_content(m.get("content", "")))]))
-            elif m.get("role") == "assistant" and m.get("provider_blocks"):
+            elif (m.get("role") == "assistant" and m.get("provider_blocks")
+                  and all(isinstance(block, dict) and block.get("type") in self._REPLAY_BLOCK_TYPES
+                          for block in m["provider_blocks"])):
                 rest.append(dict(role="assistant", content=m["provider_blocks"]))
             else:
                 role = "assistant" if m.get("role") == "assistant" else "user"

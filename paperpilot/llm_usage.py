@@ -44,14 +44,7 @@ def _count(obj, name):
 def normalize_usage(raw, provider: str) -> TokenUsage | None:
     if raw is None:
         return None
-    if provider == "codex":
-        input_tokens = _count(raw, "inputTokens")
-        output = _count(raw, "outputTokens")
-        hit = _count(raw, "cachedInputTokens")
-        miss = input_tokens - hit if hit is not None and input_tokens is not None and hit <= input_tokens else None
-        write = None
-        reasoning = _count(raw, "reasoningOutputTokens")
-    elif provider == "anthropic":
+    if provider == "anthropic":
         uncached = _count(raw, "input_tokens")
         hit = _count(raw, "cache_read_input_tokens")
         write = _count(raw, "cache_creation_input_tokens")
@@ -82,7 +75,7 @@ def normalize_usage(raw, provider: str) -> TokenUsage | None:
             miss = input_tokens - hit
         write = None
         reasoning = _count(_value(raw, "completion_tokens_details"), "reasoning_tokens")
-    total = _count(raw, "totalTokens" if provider == "codex" else "total_tokens")
+    total = _count(raw, "total_tokens")
     if total is None and input_tokens is not None and output is not None:
         total = input_tokens + output
     result = TokenUsage(input_tokens, output, hit, miss, write, reasoning, total)
@@ -97,11 +90,6 @@ def usage_scope(**values):
         yield
     finally:
         _scope.reset(token)
-
-
-def usage_context():
-    """Read-only ownership snapshot for transports continuing a paused tool turn."""
-    return dict(_scope.get())
 
 
 def usage_task(task):

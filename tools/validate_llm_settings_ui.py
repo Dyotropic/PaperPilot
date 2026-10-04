@@ -18,7 +18,7 @@ if not os.environ.get("PAPERPILOT_VALIDATION_ROOT"):
 import flet as ft
 import app
 from pages.context import ctx
-from paperpilot.config import load_config
+from paperpilot.config import load_config, save_config
 from paperpilot.llm_client import MODEL_CATALOG, PROVIDERS
 from tools.validate_llm_providers import transport, completion, response, configure
 
@@ -108,6 +108,11 @@ async def validate(page):
         return 200, response(body["model"], "OK") if path.endswith("/responses") else completion(body["model"], "OK")
     with transport(route) as (base, captured, *_):
         configure("deepseek", base)
+        # Open the real settings page with a saved provider that was removed.
+        save_config({"llm": dict(provider="codex", model="codex-default",
+            api_key="synthetic-retired-key", base_url="http://retired.invalid/v1",
+            score_model="retired-score", chat_model="retired-chat", reasoning_model="retired-reasoning",
+            codex_cli="retired-cli", codex_home="unused-profile")})
         app.main(page)
         page.title = f"PaperPilot Native LLM Settings {os.getpid()}"
         page.window.width, page.window.height = 1100, 700
@@ -118,7 +123,7 @@ async def validate(page):
         provider = next(c for c in all_controls if isinstance(c, ft.Dropdown)
             and {o.key for o in c.options} == set(PROVIDERS))
         models = next(c for c in all_controls if isinstance(c, ft.Dropdown)
-            and "deepseek-flash" in {o.key for o in c.options})
+            and "--custom--" in {o.key for o in c.options})
         def field(label):
             return next(c for c in all_controls if isinstance(c, ft.TextField) and c.label == label)
         def button(label):
@@ -138,6 +143,18 @@ async def validate(page):
                     return
             raise AssertionError("Native connection-test result was not delivered to the page")
         try:
+            before = copy.deepcopy(load_config())
+            assert provider.value is None and models.value is None
+            assert not key.value and not endpoint.value
+            for label in ("精排打分模型（可选）", "对话模型（可选）", "推理模型（两步推理，可选）"):
+                assert not field(label).value
+            assert len(PROVIDERS) == 8 and "codex" not in {o.key for o in provider.options}
+            assert any(isinstance(c, ft.Text) and "已不受支持" in (c.value or "") for c in all_controls)
+            assert not any(isinstance(c, ft.Text) and "ChatGPT 登录" in (c.value or "") for c in all_controls)
+            test.on_click(SimpleNamespace(control=test))
+            save.on_click(SimpleNamespace(control=save))
+            assert load_config() == before and not captured
+            await screenshot(page, "native-llm-retired-provider.png")
             for name in PROVIDERS:
                 choose(name)
                 assert {m for m, _ in MODEL_CATALOG[name]} <= {o.key for o in models.options}
@@ -183,10 +200,12 @@ async def validate(page):
             assert load_config()["llm"]["provider"] == "ollama"
             (Path.cwd() / "native-llm-settings.json").write_text(json.dumps(dict(
                 native_app=True, callback_driven=True, provider_options=len(PROVIDERS), key_isolation=True,
+                retired_provider_blocked=True, retired_configuration_preserved=True,
+                retired_credentials_and_overrides_isolated=True,
                 gemini_connection=True, responses_connection=True, custom_model=True,
                 empty_remote_key_rejected=True, local_ollama_compatible=True,
                 paid_models=False, requests=len(captured)), ensure_ascii=False, indent=2), encoding="utf-8")
-            print("PASS native settings: Gemini/OpenAI SDK tests, provider/key switching, custom IDs and Ollama", flush=True)
+            print("PASS native settings: removed-provider migration, eight providers, Gemini/OpenAI SDK tests, keys and Ollama", flush=True)
         except Exception:
             failures.append(True)
             await screenshot(page, "native-llm-failure.png")

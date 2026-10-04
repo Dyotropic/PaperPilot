@@ -33,16 +33,24 @@ def _build_llm_service_section(ctx) -> ft.Column:
     from paperpilot.llm_client import _load_llm_cfg
 
     cur = _load_llm_cfg()
-    cur_provider = cur.get("provider", "deepseek") or "deepseek"
-    cur_model = cur.get("model", "") or PROVIDERS[cur_provider]["default_model"]
+    stored_provider = cur.get("provider", "deepseek") or "deepseek"
+    unsupported_provider = stored_provider not in PROVIDERS
+    cur_provider = None if unsupported_provider else stored_provider
+    if unsupported_provider:
+        # Leave the saved configuration intact until the user selects a service.
+        # Credentials and model overrides belong to their original provider.
+        cur = {}
+    cur_model = (cur.get("model", "") or PROVIDERS[cur_provider]["default_model"]
+                 if cur_provider else "")
     saved = load_config()
     saved_keys = (saved.get("llm") or {}).get("api_keys") or {}
     key_cache = dict(saved_keys) if isinstance(saved_keys, dict) else {}
-    key_cache.setdefault(cur_provider, cur.get("api_key", "") or "")
+    if cur_provider:
+        key_cache.setdefault(cur_provider, cur.get("api_key", "") or "")
     legacy_key = (saved.get("deepseek") or {}).get("api_key", "")
     if legacy_key:
         key_cache.setdefault("deepseek", legacy_key)
-    model_cache = {cur_provider: cur_model}
+    model_cache = {cur_provider: cur_model} if cur_provider else {}
     active_provider = cur_provider
 
     # ── 控件 ──
@@ -51,10 +59,10 @@ def _build_llm_service_section(ctx) -> ft.Column:
                  for k, v in PROVIDERS.items()],
         value=cur_provider, expand=True,
     )
-    is_custom_model = cur_model not in dict(MODEL_CATALOG.get(cur_provider, []))
+    is_custom_model = bool(cur_model) and cur_model not in dict(MODEL_CATALOG.get(cur_provider, []))
     model_dd = ft.Dropdown(
         options=_model_options_for(cur_provider),
-        value=_CUSTOM if is_custom_model else cur_model, expand=True,
+        value=_CUSTOM if is_custom_model else cur_model or None, expand=True,
     )
     custom_model_field = ft.TextField(
         label="自定义模型 ID", hint_text="请输入服务商支持的实际 API 模型 ID",
@@ -63,7 +71,7 @@ def _build_llm_service_section(ctx) -> ft.Column:
     )
     api_key_field = ft.TextField(
         label="API Key",
-        hint_text=PROVIDERS[cur_provider]["key_hint"],
+        hint_text=PROVIDERS.get(cur_provider, {}).get("key_hint", "请先选择模型服务商"),
         value=cur.get("api_key", "") or "",
         password=True, can_reveal_password=True, expand=True,
     )
@@ -95,23 +103,10 @@ def _build_llm_service_section(ctx) -> ft.Column:
     key_status = ft.Text("", size=13)
     test_status = ft.Text("", size=13)
     save_status = ft.Text("", size=13)
-    from pages.codex_settings import CodexSettings
-    def refresh_codex_models():
-        if provider_dd.value != "codex":
-            return
-        selected = model_dd.value
-        model_dd.options = _model_options_for("codex")
-        if selected != _CUSTOM and selected not in dict(MODEL_CATALOG["codex"]):
-            model_dd.value = "codex-default"
-        model_dd.update()
-    codex = CodexSettings(ctx.page, saved.get("llm") or {}, refresh_codex_models)
-    codex.control.visible = cur_provider == "codex"
-    api_key_field.visible = base_url_field.visible = cur_provider != "codex"
-
     # 已配置提示
-    if cur_provider == "codex":
-        key_status.value = "Codex 订阅：请检查下方登录状态"
-        key_status.color = ft.Colors.OUTLINE
+    if unsupported_provider:
+        key_status.value = f"原配置服务商（{stored_provider}）已不受支持，请重新选择并保存模型服务"
+        key_status.color = ft.Colors.ORANGE
     elif cur.get("api_key") or not requires_api_key(cur_provider, cur.get("base_url", "")):
         provider_label = PROVIDERS[cur_provider]["label"]
         key_status.value = f"已配置：{provider_label}"
@@ -122,19 +117,19 @@ def _build_llm_service_section(ctx) -> ft.Column:
 
     def on_change_provider(e):
         nonlocal active_provider
-        key_cache[active_provider] = (api_key_field.value or "").strip()
         current_model = (custom_model_field.value or "").strip() if model_dd.value == _CUSTOM \
             else (model_dd.value or "").strip()
-        if current_model:
-            model_cache[active_provider] = current_model
-        advanced_cache[active_provider] = {
-            name: field.value or "" for name, field in advanced_fields.items()
-        }
-        new_p = provider_dd.value or "deepseek"
+        if active_provider in PROVIDERS:
+            key_cache[active_provider] = (api_key_field.value or "").strip()
+            if current_model:
+                model_cache[active_provider] = current_model
+            advanced_cache[active_provider] = {
+                name: field.value or "" for name, field in advanced_fields.items()
+            }
+        new_p = provider_dd.value
+        if new_p not in PROVIDERS:
+            return
         active_provider = new_p
-        codex.control.visible = new_p == "codex"
-        api_key_field.visible = base_url_field.visible = new_p != "codex"
-        codex.control.update()
         model_dd.options = _model_options_for(new_p)
         next_model = model_cache.get(new_p) or PROVIDERS[new_p]["default_model"]
         next_is_custom = next_model not in dict(MODEL_CATALOG.get(new_p, []))
@@ -151,9 +146,6 @@ def _build_llm_service_section(ctx) -> ft.Column:
                             else "该服务商尚未配置 API Key")
         key_status.color = (ft.Colors.GREEN if api_key_field.value or not requires_api_key(new_p, base_url_field.value)
                             else ft.Colors.ORANGE)
-        if new_p == "codex":
-            key_status.value = "Codex 订阅：请检查下方登录状态"
-            key_status.color = ft.Colors.OUTLINE
         model_dd.update(); api_key_field.update(); custom_model_field.update()
         key_status.update()
 
@@ -172,7 +164,12 @@ def _build_llm_service_section(ctx) -> ft.Column:
         save_status.value = ""; save_status.update()
 
         # 用当前控件值（未保存）构造配置测试
-        p = provider_dd.value or "deepseek"
+        p = provider_dd.value
+        if p not in PROVIDERS:
+            test_status.value = "请先选择受支持的模型服务商"
+            test_status.color = ft.Colors.ERROR
+            test_status.update()
+            return
         key = (api_key_field.value or "").strip()
         base = (base_url_field.value or "").strip()
         if requires_api_key(p, base) and not key:
@@ -182,16 +179,10 @@ def _build_llm_service_section(ctx) -> ft.Column:
             return
         model = (custom_model_field.value or "").strip() if model_dd.value == _CUSTOM \
             else (model_dd.value or "").strip()
-        codex_values = codex.values()
-
         def _run():
             from paperpilot.llm_client import OpenAICompatClient, AnthropicClient
             base_url = base or PROVIDERS[p]["base_url"]
-            if p == "codex":
-                from paperpilot.codex_client import CodexSubscriptionClient
-                c = CodexSubscriptionClient(model=model or "codex-default",
-                    cli=codex_values["codex_cli"], home=codex_values["codex_home"])
-            elif p == "anthropic":
+            if p == "anthropic":
                 c = AnthropicClient(api_key=key, model=model or PROVIDERS[p]["default_model"],
                                     base_url=base)
             else:
@@ -219,7 +210,12 @@ def _build_llm_service_section(ctx) -> ft.Column:
 
     def on_save(e):
         from paperpilot.llm_client import PROVIDERS as _P
-        p = provider_dd.value or "deepseek"
+        p = provider_dd.value
+        if p not in _P:
+            save_status.value = "请先选择受支持的模型服务商"
+            save_status.color = ft.Colors.ERROR
+            save_status.update()
+            return
         model = _collect_model()
         if not model:
             save_status.value = "请选择或输入一个模型"
@@ -243,7 +239,6 @@ def _build_llm_service_section(ctx) -> ft.Column:
                 "score_model": (score_model_field.value or "").strip(),
                 "chat_model": (chat_model_field.value or "").strip(),
                 "reasoning_model": (reasoning_model_field.value or "").strip(),
-                **codex.values(),
             }
         }
         do_save(updates)
@@ -255,8 +250,6 @@ def _build_llm_service_section(ctx) -> ft.Column:
         key_status.value = (f"已配置：{label} / {model}"
                             if (api_key_field.value or not requires_api_key(p, base_url_field.value))
                             else "未配置 API Key")
-        if p == "codex":
-            key_status.value = "Codex 配置已保存，登录状态见下方"
         if not (api_key_field.value or not requires_api_key(p, base_url_field.value)):
             key_status.color = ft.Colors.ORANGE
         else:
@@ -289,7 +282,7 @@ def _build_llm_service_section(ctx) -> ft.Column:
 
     return ft.Column([
         ft.Text("AI 模型服务", size=FS_LG, weight=FW_SEMIBOLD, color=text_primary()),
-        ft.Text("选择 AI 服务商，配置 API Key 或 Codex 订阅登录", size=FS_SM, color=text_secondary()),
+        ft.Text("选择 AI 服务商并配置 API Key；本地 Ollama 可免 Key", size=FS_SM, color=text_secondary()),
         ft.Text("网页会员与 API 额度通常分开；Gemini 在 Google AI Studio 获取密钥。"
                 "Ollama 云端需填写云端 Key 和 Base URL，详见用户指南 §3.4。",
                 size=FS_SM, color=text_secondary()),
@@ -299,7 +292,6 @@ def _build_llm_service_section(ctx) -> ft.Column:
             model_dd,
         ], spacing=SP_SM),
         custom_model_field,
-        codex.control,
         ft.Row([
             api_key_field,
             ft.FilledTonalButton(

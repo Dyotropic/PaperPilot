@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
+from pathlib import Path
 import threading
 import time
 import unittest
@@ -178,6 +179,77 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(lc.get_client().model, "tenant-custom-model")
         save_config({"llm": {"api_keys": {"gemini": ""}}})
         self.assertIsNone(lc.get_client()); self.assertFalse(lc.llm_configured())
+
+    def test_removed_subscription_and_unknown_provider_preserve_data(self):
+        self.assertEqual(set(lc.PROVIDERS), {
+            "deepseek", "openai", "anthropic", "gemini", "glm", "kimi", "qwen", "ollama"})
+        self.assertNotIn("codex", lc.MODEL_CATALOG)
+        self.assertNotIn("codex", lc.MODEL_CATALOG_SOURCES)
+        history = UsageStore(Path(os.environ["PAPERPILOT_VALIDATION_ROOT"]) / "legacy-usage.sqlite3")
+        history.record(lc.ChatResult(content="Historical reply", usage=lc.TokenUsage(
+            input_tokens=100, output_tokens=20, total_tokens=120)),
+            [dict(role="user", content="Historical request")], provider="codex", model="codex-default")
+        records_before, summary_before = history.records(), history.summary()
+        with patch.object(lc, "OpenAICompatClient") as compatible, patch.object(lc, "AnthropicClient") as anthropic:
+            for provider in ("codex", "removed-custom-provider"):
+                for model in ("", "codex-default"):
+                    with self.subTest(provider=provider, model=model):
+                        save_config({"deepseek": {"api_key": "synthetic-old-deepseek-key"}, "llm": dict(
+                            provider=provider, model=model, api_key="synthetic-retired-key",
+                            api_keys={"gemini": "synthetic-gemini-key"}, codex_cli="removed-cli",
+                            codex_home="unused-profile", score_model="old-score", chat_model="old-chat",
+                            reasoning_model="old-reasoning")})
+                        before = CONFIG_PATH.read_bytes()
+                        for task in (None, "chat", "score", "reasoning"):
+                            self.assertIsNone(lc.get_client(task))
+                        self.assertFalse(lc.llm_configured())
+                        self.assertEqual(CONFIG_PATH.read_bytes(), before)
+            service = AIService()
+            project = library.create_project("停用后端的历史", "Retired provider history")
+            cm = service.get_conversation(project.id, project.name)
+            cm.add_user_message("Previous evidence")
+            cm.add_assistant_message("Previous analysis")
+            for prompt in ("请解释样本限制", "Compare measurement uncertainty"):
+                self.assertIn("AI 服务未配置", service.chat(project.id, project.name, prompt)["reply"])
+            self.assertEqual(cm.total_rounds, 3)
+            paper = dict(title="Old-provider reading", abstract="Evidence remains available")
+            self.assertEqual(service.deep_read(paper, full_text=paper["abstract"]), {})
+            self.assertEqual(service.score_papers("研究证据", [paper]), [])
+            compatible.assert_not_called()
+            anthropic.assert_not_called()
+        self.assertEqual(history.records(), records_before)
+        self.assertEqual(history.summary(), summary_before)
+
+    def test_retired_tool_journal_can_continue_with_other_providers(self):
+        call = function()
+        marker = dict(type="paperpilot_codex", thread_id="retired-thread", continuation="retired-turn")
+        messages = [dict(role="user", content="核验误差 / Check measurement uncertainty"),
+            dict(role="assistant", content="Historical calculation", tool_calls=[call], provider_blocks=[marker]),
+            dict(role="tool", tool_call_id=call["id"], content='{"value":5}'),
+            dict(role="user", content="继续解释限制 / Continue the analysis")]
+        original = copy.deepcopy(messages)
+        for provider in ("gemini", "openai", "anthropic"):
+            with self.subTest(provider=provider):
+                def route(path, body):
+                    if provider == "anthropic":
+                        return 200, dict(id="local-claude", type="message", role="assistant", model=body["model"],
+                            content=[dict(type="text", text="History preserved")], stop_reason="end_turn",
+                            stop_sequence=None, usage=dict(input_tokens=100, output_tokens=20))
+                    return 200, response(body["model"], "History preserved") if path.endswith("/responses") else completion(body["model"], "History preserved")
+                with transport(route) as (base, captured, *_):
+                    configure(provider, base)
+                    result = lc.get_client().chat(messages, thinking=False)
+                    self.assertEqual(result.content, "History preserved")
+                    payload = captured[0][1]
+                    self.assertNotIn("paperpilot_codex", json.dumps(payload))
+                    self.assertIn(call["id"], json.dumps(payload))
+                    self.assertIn("Historical calculation", json.dumps(payload))
+                    self.assertEqual(messages, original)
+        native = [dict(type="thinking", thinking="Original analysis", signature="opaque-native-signature"),
+                  dict(type="text", text="Original reply")]
+        client = lc.AnthropicClient("synthetic-key", "claude-opus-5-5")
+        _, converted = client._split_messages([dict(role="assistant", content="Original reply", provider_blocks=native)])
+        self.assertEqual(converted[0]["content"], native)
 
     def test_ollama_cloud_keys_and_local_compatibility(self):
         for base in ("", "http://localhost:11434/v1", "http://127.0.0.1:11434/v1",

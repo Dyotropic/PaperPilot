@@ -174,12 +174,12 @@ llm:
 
 **推荐：直接在界面上配置**。打开软件 →「设置」页 →「AI 模型服务」卡片：
 
-1. **Provider（服务商）**：下拉选择接入方式（共 9 项，见下表），Codex 订阅与 OpenAI API 分别配置。
+1. **Provider（服务商）**：下拉选择接入方式（共 8 项，见下表）。
 2. **模型**：下拉选择该家的模型；列表里没有的可选「自定义…」并手动输入模型名。
-3. **凭据**：API 服务粘贴对应密钥；Codex 订阅使用下方 ChatGPT 登录区。API 密钥以明文保存在本地 config.yaml；调用时作为凭据发送给配置的服务端。未实现 keyring/加密。
+3. **凭据**：API 服务粘贴对应密钥，本地 Ollama 可留空。API 密钥以明文保存在本地 config.yaml；调用时作为凭据发送给配置的服务端。未实现 keyring/加密。
 4. 点 **「测试」** 验证连通性 → 点 **「保存」** 生效（下次 AI 调用时应用）。
 
-> 切换 Provider 时，设置页会记住当前会话里各家的 Key 和模型；保存后各家 Key 留在本机 `llm.api_keys` 中。API 服务商仍需填写自己的 Key。Codex 使用独立登录目录，可先保存配置再登录；未登录时 AI 服务不可用。
+> 切换 Provider 时，设置页会记住当前会话里各家的 Key 和模型；保存后各家 Key 留在本机 `llm.api_keys` 中。API 服务商仍需填写自己的 Key。
 
 **服务商入口与内置模型候选：**
 
@@ -189,7 +189,6 @@ llm:
 | --------------------- | --------------------------------------------------------- | -------------- | ------------------------------------------------- |
 | **DeepSeek**          | https://platform.deepseek.com → 注册 → 「API Keys」→ 创建 | `sk-` 开头     | deepseek-flash（V4.1 Flash）/ deepseek-v4-pro               |
 | **OpenAI**            | https://platform.openai.com → 「API keys」→ 创建          | `sk-` 开头     | gpt-6.1-sol、gpt-6-astra、gpt-6-luna（保留 GPT-6 Sol / GPT-5.6 等） |
-| **Codex（订阅）**      | [官方 Codex CLI](https://developers.openai.com/codex/cli/)与 ChatGPT 登录 | 不填 API Key | 账号默认；登录后从账号模型目录刷新，不套用 API 型号权限 |
 | **Anthropic(Claude)** | https://console.anthropic.com →「API Keys」→ 创建         | `sk-ant-` 开头 | claude-fable-5-1、claude-opus-5-5、claude-sonnet-5-5、claude-haiku-4-5 |
 | **Gemini**            | https://aistudio.google.com/api-keys → 创建 Gemini API Key | Google Key | gemini-3.8-flash、gemini-3.5-flash-lite、gemini-3.1-pro-preview（及部分旧版 Gemini 3 文本模型） |
 | **智谱 GLM**          | https://open.bigmodel.cn → 注册 →「API 密钥」→ 新建       | 长字符串       | glm-5.3、glm-5.3-flash、glm-5.3-flashx、glm-5.2 |
@@ -218,24 +217,13 @@ Gemini 复用 [Google 官方 OpenAI 兼容端点](https://ai.google.dev/gemini-a
 
 **订阅套餐可以导入吗？**
 
-**Codex 订阅的使用步骤：**
+PaperPilot 当前通过 API Key 或本地 Ollama 接入模型，不提供订阅账号登录导入。**Codex 订阅功能已于 2026-10-04 移除**。若本机仍保存 `llm.provider: codex`，AI 功能会保持未配置状态；在设置中重新选择服务商、模型和凭据后保存即可。旧 `codex_cli`、`codex_home` 字段已不使用，保存不会自动删除旧字段或登录文件；其他服务商的密钥、文献库、会话及用量历史保留。
 
-1. 安装 [官方 Codex CLI](https://developers.openai.com/codex/cli/)，要求版本 **0.159.2 或更新**；它是独立依赖，PaperPilot 不自动下载安装。网络须能访问官方 Codex 服务。
-2. 设置中选择 **Codex（订阅）**，点击 **ChatGPT 登录**，在官方页面完成授权。完成后会刷新登录状态与模型目录，也可点击 **刷新登录与模型**。
-3. 已在本机 Codex 登录的用户可选 **复用本机 Codex 登录**。这采用[官方文档允许的登录缓存复制](https://developers.openai.com/codex/auth)，仅在本机存在 `auth.json` 时可用；仅存在系统凭据库登录时使用正常登录入口。复制会检查账号类型，API Key 登录不会作为订阅接受。
-4. 选择账号默认或账号目录中的型号，点 **测试**，再点 **保存**。关键词、翻译、AI 精读、评分、对话及 Agent 工具都通过该后端；测试会使用少量订阅额度。任务模型覆盖也须填写该账号目录中的 ID。
-
-**登录路径选项** 可指定 CLI 和独立登录目录；留空分别自动查找 CLI、使用 `cache.dir/codex-subscription`。OAuth 和凭据刷新由官方 CLI 管理，不将令牌写入 `config.yaml`。该目录包含凭据和 CLI 状态，须保持私密并排除 Git；项目内的自定义目录会检查忽略规则，推荐使用 `cache`。**退出项目登录** 操作项目使用的登录目录；不要把独立目录设为其他 Codex 客户端正在使用的目录。取消登录、正在运行的任务停止和退出登录分别处理；有任务运行时不能更改该目录的登录。
-
-订阅模型及用量限制由账号与官方服务决定；不自动回退到付费 API。Codex app server 当前未提供与 API 等同的 `temperature` 和硬性输出 token 上限：PaperPilot 的 `max_tokens` 在该后端仅作为回复长度指导，不能保证截断或额度上限。图片能力从账号模型目录读取；上下文窗口由真实响应提供，收到前采用既有保守预算。用户显式容量和图片能力覆盖仍有效。
-
-2026-10-03 验证：原生设置回调、隔离协议和科研/Agent 业务链路已通过，本机官方 CLI 的只读沙箱及历史注入已通过。真实登录缓存可读、账号模型目录可获取，但 GPT-6.1 Sol 与 GPT-6 Luna 的实际生成均超时，CLI 日志记录 `request timed out`；**真实订阅生成、真实浏览器 OAuth 全流程及真实图片理解尚未通过验收**，不将模型目录可读视为生成可用。
-
-PaperPilot 支持模型 API 和独立的 Codex 订阅后端。套餐登录、产品内额度与 API 计费权益分别处理，不能把浏览器 Cookie、OAuth token 或会员账号当作通用 API Key。核对日期为 2026-10-03：
+套餐登录、产品内额度与 API 计费权益分别处理，不能把浏览器 Cookie、OAuth token 或会员账号当作通用 API Key。以下官方路径的调研日期为 2026-10-03，项目接入范围更新于 2026-10-04：
 
 | 套餐 | 官方提供的路径 | PaperPilot 当前接入范围 |
 | --- | --- | --- |
-| ChatGPT / Codex | [Codex 官方登录](https://developers.openai.com/codex/auth)支持 ChatGPT 订阅；[官方 app server](https://developers.openai.com/codex/app-server)供自定义客户端集成 | 已实现独立 Codex 后端，登录、账号模型目录、线程、工具回传、取消均经官方 CLI。Platform API Key 仍走独立 API 后端；不自动改走 API 计费 |
+| ChatGPT / Codex | [Codex 官方登录](https://developers.openai.com/codex/auth)支持 ChatGPT 订阅；[官方 app server](https://developers.openai.com/codex/app-server)供自定义客户端集成 | 订阅后端已移除；OpenAI 使用 Platform API Key |
 | Claude Pro / Max 等 | [Anthropic 官方凭据规则](https://code.claude.com/docs/en/legal-and-compliance)不允许第三方应用提供 Claude.ai 登录或使用个人订阅凭据路由请求 | 本项目使用 Claude API Key；不提供订阅登录导入 |
 | Google AI Pro / Ultra | [Gemini CLI 官方登录](https://geminicli.com/docs/get-started/authentication/)可使用订阅账号；[套餐页面](https://one.google.com/intl/en/about/google-ai-plans/)另列 AI Studio、Cloud credits 权益 | Gemini API 使用 AI Studio Key 与[项目计费](https://ai.google.dev/gemini-api/docs/billing)。适用的 Cloud credits 须按官方规则领取/绑定；不把 Gemini 网页额度直接转换成 API 额度。CLI 后端目前未实现 |
 | GLM / Kimi / Qwen 编程套餐 | [GLM](https://docs.bigmodel.cn/cn/coding-plan/faq)、[Kimi Code](https://www.kimi.com/code/docs/)、[Qwen Coding Plan](https://help.aliyun.com/zh/model-studio/coding-plan)对指定工具、编程用途或自建应用设有使用限制 | 不把 PaperPilot 伪装成获准客户端；科研应用使用各家标准 API 服务 |
@@ -565,7 +553,7 @@ agent:
 
 | 设置项            | 说明                                                                                                                                                      |
 | ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **AI 模型服务**   | 选择 Provider、配置 API Key 或 Codex 订阅登录、选/输模型名，可「测试」「保存」；「高级选项」含 Base URL、任务专用模型。**各家 Key、Codex 登录及高级字段详见 §3.4 / §3.5** |
+| **AI 模型服务**   | 选择 Provider、配置 API Key、选/输模型名，可「测试」「保存」；本地 Ollama 可免 Key。「高级选项」含 Base URL、任务专用模型。**各家 Key 及高级字段详见 §3.4 / §3.5** |
 | **数据源**        | 开关 arXiv / OpenAlex / Europe PMC 检索；**OpenAlex API Key** 输入框（密文，建议配置，申请步骤见 §3.6）                                                   |
 | **检索数量**      | 每个来源的最大检索结果数（100–500 篇，示例配置 100，配置缺省时 250） |
 | **显示/精排数量** | 最终显示论文数（10–200）和送入精排的候选数（10–200）                                                                                                      |

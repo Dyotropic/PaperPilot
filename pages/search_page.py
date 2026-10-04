@@ -1010,10 +1010,10 @@ def build_search_page(ctx):
             status_text.update()
             return
         if not ctx.ai_service.is_available:
-            ai_score_btn.tooltip = "请配置模型凭据或 Codex 登录"
+            ai_score_btn.tooltip = "请在设置中配置模型服务"
             ai_score_btn.update()
             if e is None:
-                ctx.send_agent_message("AI 服务不可用，请在设置中检查模型凭据或 Codex 登录。", role="system")
+                ctx.send_agent_message("AI 服务不可用，请在设置中检查模型服务商和 API Key。", role="system")
             return
 
         # 收集论文

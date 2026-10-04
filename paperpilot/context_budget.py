@@ -98,9 +98,6 @@ def observe_response(result, messages):
 
 
 def _canonical_model(provider, model):
-    if provider == "codex" and model == "codex-default":
-        from paperpilot.llm_client import MODEL_CAPABILITIES
-        return MODEL_CAPABILITIES.get((provider, model), {}).get("model", model)
     if provider == "deepseek" and model in {"deepseek-flash", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp"}:
         return "deepseek-flash"
     return model
