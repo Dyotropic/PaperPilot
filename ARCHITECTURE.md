@@ -1,6 +1,6 @@
 # PaperPilot 架构与工程说明
 
-> 核对日期：2026-10-03。描述当前工作区实现；功能存在不等于所有环境、模型和外部服务均已验收。接口变更仍须核对源码与调用方。
+> 版本：v2.1.0；源码与口径核对日期：2026-10-07。功能存在不等于所有环境、模型和外部服务均已验收。接口变更仍须核对源码与调用方。
 
 ## 文档分工
 
@@ -8,12 +8,13 @@
 | --- | --- |
 | [README.md](README.md) | 项目介绍与快速开始 |
 | [USER_GUIDE.md](USER_GUIDE.md) | 安装、配置、操作、故障排查与备份 |
+| [PaperPilot_项目文档.docx](PaperPilot_项目文档.docx) | 当前版本的产品背景、功能、架构和工程说明，统一微软雅黑排版 |
 | 本文 | 当前架构、模块关系、接口、数据与配置契约 |
 | [TESTING.md](TESTING.md) | 验证入口、环境隔离、真实服务与证据边界 |
 | [PHASE3_PLAN.md](PHASE3_PLAN.md) | 项目发展脉络与尚未实现的方向 |
 | [AGENTS.md](AGENTS.md)、[CLAUDE.md](CLAUDE.md) | 当前工程约定与开发提示 |
 
-早期阶段报告及配套 Word/PPT 是历史资料。其旧接口、排序方案、协作分工和测试数字不作为现行规范。近期专项研究与实施报告中的有效设计已归入长期文档，原始验证计数和截图只保存在本地 `validation_evidence/`，该目录由 `.gitignore` 排除，不随仓库发布。
+早期 Phase 1/Phase 2 报告和答辩 PPT 是历史资料，其旧接口、排序方案、协作分工和测试数字不作为现行规范；Word 项目文档随当前版本维护。近期专项研究与实施报告中的有效设计已归入长期文档，原始验证计数和截图只保存在本地 `validation_evidence/`，该目录由 `.gitignore` 排除，不随仓库发布。
 
 ## 项目定位与主流程
 
@@ -260,7 +261,9 @@ StudyCopilot 提供课题感知聊天、只读科研 Agent Team 与目标驱动�
 | 用量 / 自动压缩比例 / 保留轮数 | `true / 0.7 / 2` | 容量覆盖为 `{}`；未知模型不猜容量 |
 | 主题 / 深色 | `slate / true` | 六套主题定义于 `pages/context.py` |
 
-桌面当前在 `app.py` 初始化为 1200×750；示例的 `ui.window_width/window_height/title` 尚未接入该入口，修改这些字段不会改变启动窗口。已使用字段与预留字段应区分。当前验证基线为 Python 3.13.5、Flet/flet-desktop 0.85.1；`requirements.txt` 中 Flet 的历史宽下限不证明旧 Flet 可运行当前界面。
+应用版本的唯一代码来源为 `paperpilot.__version__`，本版为 `2.1.0`；导航底部显示 `v2.1.0`，窗口标题显示 `PaperPilot v2.1.0`。文档版本与该值同步，任务、会话和团队 JSON 的 `version: 1` 是各自的存储格式版本，不能随应用发布号一起修改。
+
+桌面在 `app.py` 初始化为 1200×750；示例的 `ui.window_width/window_height/title` 尚未接入该入口，修改这些字段不会改变启动窗口。当前开发验证基线为 Python 3.13.5、Flet/flet-desktop 0.85.1；`requirements.txt` 已要求 Flet ≥0.85.1，其他依赖组合仍需独立核验。
 
 ## 图谱与阅读器
 

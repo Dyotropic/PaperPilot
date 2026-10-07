@@ -1,17 +1,19 @@
 # PaperPilot
 
-面向课题攻关的可解释智能文献工作流系统。
+面向课题攻关的可解释智能科研文献工作流系统。
+
+**版本：v2.1.0**
 
 ## 项目背景
 
-学生在面对一个全新的研究课题时，从课题分析、文献检索、筛选排序、阅读消化到整理归档的整个流程耗时耗力，且需要频繁切换于不同平台（学术搜索引擎、PDF 阅读器、笔记工具、文献管理软件）之间。PaperPilot 将这一完整工作流整合到单一桌面应用中，让科研人员专注于研究本身。
+学生和科研人员面对一个新的研究课题时，需要识别术语、查找与筛选论文、阅读原文并整理证据，还要在学术搜索、PDF 阅读器、笔记和文献管理工具之间频繁切换。PaperPilot 以课题为中心，在本地桌面应用中整合检索、排序、归档、阅读、AI 分析、研究讨论与导出，降低科研新手的使用门槛，也支持持续的文献调研。
 
 ## 核心功能
 
 - **智能检索**：AI 自动提取课题核心技术术语，支持年份区间、作者和完整期刊名筛选；筛选条件在 arXiv / OpenAlex / Europe PMC 查询阶段下推，并在页数上限内补足结果，再由 Cross-Encoder 语义精排
 - **精确查找**：按论文 DOI、arXiv ID（可指定版本）或完整标题严格查找；不接受 ISBN，匹配结果以“精确”标识显示，不把占位分数当作 CE 得分
 - **多模型 AI 服务**：统一 LLM 抽象层，支持 DeepSeek / OpenAI / Gemini / Anthropic(Claude) / GLM / Kimi / 通义千问 / Ollama(本地) 等多服务商，设置页一键切换 Provider、Key 与模型；内置模型名是配置候选，实际可用性以服务商账户和连接测试为准
-- **AI 精读**：基于 RLM 三层阅读策略，对论文全文进行结构化分析（核心贡献 / 研究方法 / 关键证据 / 创新亮点 / 局限不足 / 三维评分）
+- **AI 精读**：按材料长度采用直接阅读、滑动窗口或分块合成，输出贡献、方法、证据、亮点、局限与三维评分；依据实际取得的 PDF、HTML 或摘要分析并说明材料范围。摘要四维 AI 评分与 CE 排序分别保存
 - **AI 对话助手（StudyCopilot）**：课题上下文感知的学术对话助手，支持 Markdown、论文引用、对比及应用功能调用；同一课题可建立独立会话，Enter 发送、Shift+Enter 换行，工作中可停止当前轮并保留记录继续；显示用量、缓存率及上下文占用，输入 `/` 可手动压缩上下文；左下角 `+` 添加文件、照片或文件夹，发送前预览/移除，支持文档摘录与原生图片输入（需支持图片的模型）
 - **科研 Agent Team**：主 Agent 派发独立子 Agent 并行阅读、分析及核验，再审查凝练结论；子 Agent 只读，修改统一由主 Agent 执行。右侧名单显示状态，点击查看完整子对话，支持停止单个成员或整个轮次；默认并行三名，需支持原生工具调用的模型
 - **目标驱动长任务**：在右侧 Agent 输入区勾选「长任务」并发送目标，无启动表单或累计额度上限；Agent 先了解资料，按需维护可调整的任务清单，持续检索、分析和处理文本文件，逐条核验证据后结束。提供只读、修改前询问、可直接修改三档；审批卡片先解释目的与影响，修改内容按需展开；问询支持选项和自由回复。停止或真正无法继续时保存检查点，重开后点击「继续任务」确认恢复。源码设计与边界见 [AGENT_LOOP_DESIGN.md](AGENT_LOOP_DESIGN.md)
@@ -26,7 +28,7 @@
 在 PowerShell 中执行：
 
 ```powershell
-git clone https://github.com/Dyotropic/PaperPilot.git
+git clone --branch develop https://github.com/Dyotropic/PaperPilot.git
 cd PaperPilot
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
@@ -35,10 +37,10 @@ if (!(Test-Path -LiteralPath config.yaml)) { Copy-Item config.example.yaml confi
 .\.venv\Scripts\python.exe app.py
 ```
 
-在设置页选择 LLM 服务商、模型并填写对应 Key（Ollama 可免 Key），测试后保存。示例配置默认启用 OpenAlex；其他数据源可在设置中开启。
+在设置页选择 LLM 服务商、模型并填写对应 Key（本地 Ollama 可免 Key，Ollama 官方云端需要 Key），测试后保存。示例配置默认启用 OpenAlex；其他数据源可在设置中开启。
 
 检索页可在“课题检索”和“精确查找”之间切换。课题检索的多个筛选字段按 AND 组合；若严格筛选后不足目标数量，界面显示实际数量和数据源警告，不会放宽条件凑数。网络控制默认值为 `search.max_pages: 5`、`search.request_timeout: 15` 秒，精确查找默认最多显示 `search.exact_max_results: 25` 条，可在 `config.yaml` 调整。
 
 **主要依赖**：Flet、SQLAlchemy、sentence-transformers、KeyBERT、arxiv、PyMuPDF、pywebview、jieba、PyYAML、openai、anthropic；附件解析另使用 Pillow、python-docx、python-pptx、openpyxl。
 
-详细使用指南见 [USER_GUIDE.md](USER_GUIDE.md)。
+详细使用指南见 [USER_GUIDE.md](USER_GUIDE.md)；项目背景、模块和工程契约的 Word 版见 [PaperPilot_项目文档.docx](PaperPilot_项目文档.docx)。

@@ -4,6 +4,8 @@
 """
 import flet as ft
 
+from paperpilot import __version__
+
 from pages.context import (
     ctx,
     FS_XS, FS_LG, FS_XXL,
@@ -195,7 +197,7 @@ def build_sidebar(active_idx: int) -> ft.Column:
         # 底部版本信息
         ft.Container(expand=True),
         ft.Container(
-            content=ft.Text("v2  Phase 3", size=FS_XS, color=text_tertiary()),
+            content=ft.Text(f"v{__version__}", size=FS_XS, color=text_tertiary()),
             padding=ft.padding.Padding(left=SP_LG, top=SP_SM, right=SP_LG, bottom=SP_SM),
         ),
     ], spacing=0, expand=True)

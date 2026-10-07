@@ -2,7 +2,7 @@
 
 > 面向课题攻关的可解释智能文献工作流系统
 >
-> 对应当前工作区实现 | 最后核对：2026-10-02
+> 版本：v2.1.0 | 最后核对：2026-10-07。操作说明与当前源码核对；历史验证记录不代表本次重新运行。
 
 ---
 
@@ -29,7 +29,7 @@
 
 ## 1. 项目简介
 
-PaperPilot 是一款**桌面端学术文献管理工具**，帮助你完成从"课题输入"到"文献阅读"的完整工作流：
+PaperPilot 是一款**以课题为中心的桌面科研文献工作流工具**，面向学生、科研新手和持续开展文献调研的研究人员，串联检索、管理、阅读、AI 分析、讨论与导出：
 
 - 输入研究课题 → 自动提取关键词 → 从启用的 arXiv、OpenAlex 和 Europe PMC 数据源检索论文 → 智能排序打分 → 保存到文献库 → AI 精读分析 → 导出 BibTeX/CSV
 
@@ -88,15 +88,17 @@ PaperPilot 是一款**桌面端学术文献管理工具**，帮助你完成从"�
 打开命令行，进入你想存放项目的目录（例如 `E:\`），执行：
 
 ```powershell
-git clone https://github.com/Dyotropic/PaperPilot.git
+git clone --branch develop https://github.com/Dyotropic/PaperPilot.git
 cd PaperPilot
 ```
 
 **方式二：直接下载 ZIP**
 
-1. 在浏览器打开 https://github.com/Dyotropic/PaperPilot
+1. 在浏览器打开 https://github.com/Dyotropic/PaperPilot/tree/develop ，确认分支选择器为 `develop`
 2. 点击绿色的 **Code** 按钮 → **Download ZIP**
 3. 解压到你想要的目录（例如 `E:\PaperPilot`）
+
+本版从 `develop` 获取，克隆命令显式指定分支，避免依赖 GitHub 默认分支设置。启动后左侧导航底部与窗口标题均显示 `v2.1.0`；也可在项目目录执行 `.\.venv\Scripts\python.exe -B -c "import paperpilot; print(paperpilot.__version__)"` 核对代码版本。
 
 ### 3.2 创建虚拟环境
 
@@ -714,12 +716,14 @@ agent:
 
 ```powershell
 git branch --show-current
+git fetch origin
+git switch develop
 git pull --ff-only
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\.venv\Scripts\python.exe -m pip install "flet==0.85.1" "flet-desktop==0.85.1"
 ```
 
-无上游或存在冲突时先处理 Git 提示，勿用强制覆盖解决。ZIP 安装可解压到新目录，关闭旧应用后迁移 §Q9 的数据；已有 `config.yaml` 不用示例覆盖，新增字段按需补充。
+上述命令适用于更新本版所在的 `develop`。若已有本地分支、无上游或存在冲突，先检查 Git 提示与未提交内容，不要强制覆盖。ZIP 安装可从 `develop` 页面重新下载并解压到新目录，关闭旧应用后迁移 §Q9 的数据；已有 `config.yaml` 不用示例覆盖，新增字段按需补充。更新后检查导航底部和窗口标题的版本号。
 
 ### Q9：数据库文件在哪里？可以备份吗？
 

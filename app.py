@@ -9,6 +9,8 @@ import logging
 
 import flet as ft
 
+from paperpilot import __version__
+
 from pages.context import (
     ctx, THEMES, DEFAULT_THEME, apply_theme,
     SP_LG, SP_XL,
@@ -75,7 +77,7 @@ def main(page: ft.Page):
     global container_project, container_results, container_settings
 
     ctx.page = page
-    page.title = "PaperPilot"
+    page.title = f"PaperPilot v{__version__}"
     page.window.width = 1200
     page.window.height = 750
     page.window.min_width = 900
